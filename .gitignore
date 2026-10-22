@@ -66,3 +66,11 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# macOS
+.DS_Store
+
+# Partition folders that `fourfold dev` creates in the examples
+examples/*/data/
+examples/*/dropbox/
+examples/*/private/

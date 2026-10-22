@@ -1,0 +1,50 @@
+// AppFolder: an app's folder and its partitions (overview §1).
+//
+//   myapp/
+//     code/  data/  dropbox/  private/config/  private/state/
+//
+// Opening it checks the layout once, up front. A partition folder may be a
+// symbolic link (e.g. code/ to a checkout elsewhere): each is resolved to its
+// real path here, once, and the app is refused if any partition is inside
+// another (code/ pointing into data/, say), since that would undo the
+// partitions' separation. Inside a partition, links are never followed.
+//
+// Host paths appear in this class's errors, which go to the developer.
+// They must never reach app code (SANDBOXING.md rule 5); the partition
+// types' errors use partition-relative paths only.
+#pragma once
+
+#include <string>
+
+#include "base/fd.h"
+#include "base/result.h"
+#include "partition/code_tree.h"
+
+namespace fourfold {
+
+class AppFolder {
+public:
+    enum class Missing {
+        Fail,     // a missing partition folder is an error
+        Create,   // create missing folders (and the app folder itself): `fourfold dev`
+    };
+
+    static Result<AppFolder> open(const std::string& root, Missing missing = Missing::Fail);
+
+    AppFolder(AppFolder&&) = default;
+    AppFolder& operator=(AppFolder&&) = default;
+
+    // The app folder's real path.
+    const std::string& root() const { return root_; }
+
+    // A read-only view of code/.
+    Result<CodeTree> codeTree(CodeTreeLimits limits = {}) const;
+
+private:
+    AppFolder(std::string root, Fd code) : root_(std::move(root)), code_(std::move(code)) {}
+
+    std::string root_;
+    Fd code_;
+};
+
+}  // namespace fourfold

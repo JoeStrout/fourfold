@@ -1,0 +1,13 @@
+routes:
+  /  page  pages/index.html
+  /about  page  pages/about.html
+  /docs/  page  pages/docs/index.html
+  /docs/diagram.svg  static  pages/docs/diagram.svg  image/svg+xml
+  /docs/intro  page  pages/docs/intro.html
+  /img/logo.png  static  pages/img/logo.png  image/png
+  /members/photos/beach.jpg  static  pages/members/photos/beach.jpg  image/jpeg
+  /style.css  static  pages/style.css  text/css; charset=utf-8
+not found page: pages/404.html
+diagnostics:
+  code/pages/docs/intro.ms: warning: MiniScript and Markdown pages aren't supported yet; ignored
+  code/pages/notes.xyz: warning: unknown file type .xyz; not served

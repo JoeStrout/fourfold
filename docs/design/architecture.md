@@ -187,6 +187,13 @@ The extra conversion step (`Value` → `Datum` → bytes, instead of `Value` →
 
 Path canonicalization and the anti-traversal rule live here and nowhere else. **Nothing else in Fourfold opens files in an app folder directly**; a code-review rule, but easy to check by grepping for raw file APIs outside `partition` and `sqlite`.
 
+The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBOXING.md`):
+
+- **`RelPath`** is the only path type the partition operations take. Its segments may not be empty, `.` or `..`, start with `.`, contain control characters or `\`, or be invalid UTF-8. Rejecting dot-names makes `data/.fourfold/` unreachable without a special case.
+- **Request paths** are canonicalized by `canonicalUrlPath`: each segment is percent-decoded on its own (so `%2F` can't create a segment, and `%2e%2e` is caught as `..`), repeated slashes collapse, and dot segments are rejected, never resolved.
+- **No symbolic links inside a partition.** Files are opened one segment at a time with `openat` and `O_NOFOLLOW`, which leaves no gap between checking a path and opening it. A partition folder itself may be a link (e.g. `code/` to a checkout), resolved once when the app is opened, and refused if any partition ends up inside another.
+- **Errors don't help a prober.** Missing files, links, and non-regular files are all `NotFound`; the message says which, for the developer. Script bindings report only "not found". Messages name partition-relative paths, never host paths.
+
 `CodeFile` is constructible only by `CodeTree`. That makes "code is compiled only from the code partition" a type rule: the compiler's entry points take `CodeFile`, not strings or paths (see §6).
 
 **`sqlite`, `net`, `threads`, `log`.** Thin wrappers. `log` provides two unrelated types, `EngineLog` (`private/state/logs/`) and the app's `Dropbox` writer, so engine code can't write security events where the app could forge or bury them (§1).
@@ -429,9 +436,9 @@ fourfold/
   third_party/     md4c, sqlite, …   (MS2 itself from ~/svnrepo/miniscript2)
 ```
 
-Each directory has a public header (or a few) and internal files. A component's tests use only its public headers, plus fakes of the interfaces below it. Build each component as its own static library, so the build itself rejects a dependency that points upward or sideways.
+Each component directory has its public headers in `include/<component>/` and its internal files beside them. A component's tests use only its public headers, plus fakes of the interfaces below it. Each component is its own static library, and only components that declare a dependency on it can see its `include/` folder, so the build itself rejects a dependency that points upward or sideways. The build system and its conventions are described in [building.md](../building.md).
 
-Likely third-party pieces (to be decided): SQLite; md4c; an HTTP/1.1 parser such as llhttp, and nghttp2 for HTTP/2; OpenSSL or BoringSSL for TLS; libsodium for crypto; an ACME client or a small one of our own; and an event loop (standalone Asio, or libuv).
+Third-party pieces: llhttp for parsing HTTP/1.1 (chosen in M1). Likely, still to be decided: SQLite; md4c; nghttp2 for HTTP/2; OpenSSL or BoringSSL for TLS; libsodium for crypto; an ACME client or a small one of our own. The event loop is our own (`platform`'s `EventLoop`, over kqueue or epoll): the script thread needs little from it beyond readiness, timers, and a cross-thread wakeup.
 
 ---
 

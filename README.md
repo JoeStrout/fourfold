@@ -14,3 +14,13 @@ The name is a reference to the four different file areas which form the core of 
 - **engine** (config only): code can neither read nor write the special engine-supported files in this area: API secrets and other sensitive details.
 
 On a fully hardened installation, the above restrictions are enforced at the OS level as well as by the engine.  This design means that no matter what code you (as a Fourfold developer) write, or what hackers manage to inject into your forms, it is structurally impossible to make your website run code you didn't intend.
+
+## Building
+
+Fourfold is written in C++17 and built with CMake:
+
+```sh
+cmake --preset dev && cmake --build --preset dev && ctest --preset dev
+```
+
+See [docs/building.md](docs/building.md) for requirements, the repository layout, and coding conventions.

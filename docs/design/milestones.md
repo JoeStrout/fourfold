@@ -44,7 +44,7 @@ The risks most likely to change the design, and where each is retired:
 - Content types from an allowlist; `nosniff`; the baseline security headers that don't depend on later features.
 - The build: one static library per component, so upward dependencies fail to link (Arch §9). Test harness and a first golden compiler test.
 
-**Decisions made here:** event loop and HTTP parser libraries; build system; test framework.
+**Decisions made here:** event loop and HTTP parser (made: llhttp, and our own small kqueue/epoll loop in `platform`); build system (made: CMake with presets and Ninja); test framework (made: doctest). See [building.md](../building.md).
 
 **Exit criteria:** a sample static site (nested folders, images, a 404 page) works in a browser; path-normalization tests (`%2e%2e`, `//`, case) pass; golden test of the route table.
 

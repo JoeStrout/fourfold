@@ -387,6 +387,7 @@ To keep that load low, a page and its code are paired by naming convention: `pag
 - **File-based routing for pages:** `pages/about.html` (+ optional `about.ms`) is served at `/about`. So is `pages/about.md` (see [Markdown](#markdown)).
 - **Static files live in `pages/` too:** anything in `pages/` that isn't `.html`, `.md`, or `.ms` is served as a static file at its path, e.g. `pages/members/photos/beach.jpg` at `/members/photos/beach.jpg`. Images stay next to the pages that use them, and folder access rules cover both.
 - **Handlers by convention:** `POST /guestbook/sign` calls `post.sign` in `pages/guestbook.ms`. See [Handler model](#handler-model).
+- **One canonical URL per page, so relative links work.** A folder's index page is canonical *with* a trailing slash (`pages/docs/index.html` at `/docs/`); every other page and file is canonical without one (`/docs/intro`). The other form redirects to the canonical one, so a relative link like `foo.png` always resolves against the page's own folder, whichever form the visitor typed. There are no directory listings.
 - **An explicit routes table as fallback** for URLs that don't fit the convention: URL patterns like `/user/{id}`, handlers shared by several pages, API-style endpoints.
 
 All of these map URLs to handler functions and templates in the code partition.
