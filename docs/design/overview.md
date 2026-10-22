@@ -220,14 +220,14 @@ To keep that load low, a page and its code are paired by naming convention: `pag
 
 ### Progressive path
 
-1. Start with pure HTML/CSS: put `about.html` in `pages/` and it's served at `/about`. No code required.
+1. Start with pure HTML/CSS (or Markdown): put `about.html` (or `about.md`) in `pages/` and it's served at `/about`. No code required.
 2. To add a feature, add a template field to the HTML and write a small `.ms` file next to it.
 3. Larger apps add explicit routes, fragments, real-time updates, and databases.
 
 ### Routing: hybrid (decided)
 
-- **File-based routing for pages:** `pages/about.html` (+ optional `about.ms`) is served at `/about`.
-- **Static files live in `pages/` too:** anything in `pages/` that isn't `.html` or `.ms` is served as a static file at its path, e.g. `pages/members/photos/beach.jpg` at `/members/photos/beach.jpg`. Images stay next to the pages that use them, and folder access rules cover both.
+- **File-based routing for pages:** `pages/about.html` (+ optional `about.ms`) is served at `/about`. So is `pages/about.md` (see [Markdown](#markdown)).
+- **Static files live in `pages/` too:** anything in `pages/` that isn't `.html`, `.md`, or `.ms` is served as a static file at its path, e.g. `pages/members/photos/beach.jpg` at `/members/photos/beach.jpg`. Images stay next to the pages that use them, and folder access rules cover both.
 - **Handlers by convention:** `POST /guestbook/sign` calls `post.sign` in `pages/guestbook.ms`. See [Handler model](#handler-model).
 - **An explicit routes table as fallback** for URLs that don't fit the convention: URL patterns like `/user/{id}`, handlers shared by several pages, API-style endpoints.
 
@@ -296,7 +296,7 @@ The `<script>` case gives a safe way to pass data to the occasional bit of JavaS
 | string | escaped | escaped |
 | number | MS2's standard number formatting | same |
 | `null` | empty | **attribute omitted** (if the field is the attribute's entire value) |
-| fragment (from `frag`) | inserted as HTML | compile/render error |
+| rendered HTML (from `frag` or `markdown`) | inserted as HTML | compile/render error |
 | map / list | error (except inside `<script>`, as JSON) | error |
 
 - **Boolean attributes** (`checked`, `disabled`, `selected`, `hidden`, …; the engine knows the standard list) are on/off switches: `<input type="checkbox" checked="{{agreed}}">` renders `checked` if `agreed` is true, and omits it if false or null.
@@ -401,6 +401,93 @@ Errors, runtime failures, and budget overruns are all handled the same way:
 #### Progressive enhancement
 
 Forms should carry both a normal `action` and `hx-post`. With JavaScript, HTMX swaps the result in place. Without it, the form posts normally and the handler redirects back (redirect-after-POST, which also stops a reload from resubmitting). It's the same handler either way, distinguished by `req.htmx`. See the guestbook example in §7.
+
+### Markdown
+
+GitHub-flavored Markdown (GFM) is a first-class format alongside HTML: for whole pages, for fragments, and as a value that code can render. It has become a quasi-standard (READMEs, dev.to, Discord, LLM output), it's easy to write, and it's readable even as source.
+
+#### Fourfold Markdown: GFM, made safe
+
+Plain GFM is **not** safe: it passes raw HTML through, and GitHub is safe only because it sanitizes the output afterward. Fourfold Markdown is GFM with these changes, applied by the engine's renderer everywhere:
+
+- **No raw HTML.** HTML tags in Markdown are shown as escaped text, in developer files too. That's one rule and one renderer configuration; anyone who wants HTML writes an HTML fragment.
+- **Link and image URLs follow the template URL rule** (see [contextual escaping](#where-fields-are-allowed-contextual-escaping)): http(s), mailto, or relative only. `[click](javascript:…)` renders as plain text.
+- **Linear-time parser, capped input.** Rendering runs in native code, outside the VM's instruction budget, so the parser must not slow down on pathological input (nested brackets, emphasis runs). md4c and cmark-gfm are both designed for this, and md4c has a built-in no-HTML flag. Text rendered at runtime is also capped in size.
+- Task-list checkboxes are rendered `disabled`.
+
+Markdown with no raw HTML (and no fields; but see [below](#fields-in-markdown-unresolved)) can't execute or include anything, so it is **inert data** under the core rule. It can be rendered from anywhere, including `data/`: a wiki or blog stored as data can be shown with `markdown(file.read(path), "full")`.
+
+#### Markdown pages
+
+- `pages/about.md` is served at `/about`. This is an exception to the static-file rule: `.md` files in `pages/` are rendered, not served as is.
+- A page must be a complete document, so the engine wraps the rendered Markdown in **`frags/layout/markdown.html`**, which has a `{{content}}` field and a `{{title}}` field (from the first `#` heading). If that template doesn't exist, a minimal built-in page is used, so a pure-Markdown site needs no setup at all.
+- This is one narrow wrapper, not general layout inheritance, which is still out of v1. Per-folder wrappers (the nearest one up the tree wins) could come later.
+- `about.md` and `about.html` side by side is a compile error, like any other route collision.
+- No front matter in v1.
+- **Links between `.md` files are rewritten at compile time:** `[setup](setup.md)` becomes `/setup`, keeping any `#anchor`. The same folder reads correctly on GitHub or in an editor's preview, and when served by Fourfold. Since the route table is known at compile time, **a link to a route that doesn't exist is a compile warning.**
+- Headings get GitHub-style anchor `id`s, so `#installation` links work.
+- **Raw source (opt-in):** a config setting serves the source of `pages/about.md` at `/about.md` as `text/markdown`, for LLM and agent readers (the llms.txt idea).
+
+#### Markdown fragments
+
+- `frags/intro.md` works with both `frag("intro")` and `{{> intro}}`. As an include, it's rendered at compile time, so it costs nothing per request.
+- `.md` fragments have no fields (for now), so passing a value to one is an error.
+- `intro.md` and `intro.html` side by side in `frags/` is a compile error.
+
+#### Rendering Markdown from code
+
+`markdown(text)` renders a string and returns **the same rendered-HTML handle as `frag`**. Nothing about templates changes: in text context the result is inserted as HTML; in an attribute it's an error.
+
+```
+showEntry = function(e)
+    return frag("entry", {"who": e.who, "msg": markdown(e.msg)})
+end function
+```
+
+Store the Markdown source, not the rendered result. Handles aren't inert, so they can't be saved to `data` or `session`, and rendering at display time lets the renderer's rules improve without migrating stored data.
+
+#### Two profiles
+
+Text that reaches `markdown()` at runtime is usually visitor input, so **the default is the restricted `"comment"` profile**. Full Markdown is an explicit, grep-able opt-in: `markdown(text, "full")`. Files in `code/` are developer-authored and always use `"full"`.
+
+| | `"comment"` (default for `markdown()`) | `"full"` (`.md` files; opt-in from code) |
+|---|---|---|
+| Paragraphs, line breaks | yes | yes |
+| Bold, italic, strikethrough, inline code | yes | yes |
+| Code blocks, lists, block quotes | yes | yes |
+| Tables | yes | yes |
+| Links | yes, with `rel="nofollow ugc"` | yes |
+| Headings | rendered as ordinary paragraphs | yes |
+| Images | rendered as a plain link to the image URL | yes |
+| Footnotes | no | yes |
+| Heading and footnote `id`s | **none** | yes |
+
+- **Why no images in comments:** a visitor's image is a tracking pixel or a hotlink to someone else's server.
+- **Why no `id`s in comments:** user content that produces an `id` can **clobber** the page's own. A comment containing `# entries` would produce `id="entries"` and break the guestbook's `hx-target="#entries"`. (GitHub works around this by prefixing `user-content-`. Leaving `id`s out is simpler.)
+- **Why headings become paragraphs:** a visitor's `# Hello` shouldn't render as the biggest text on the page.
+
+#### Styling
+
+Styling rendered Markdown should take no effort:
+
+- All rendered Markdown is wrapped in an element with a class, `<div class="markdown">` (with `markdown comment` for the comment profile), so CSS can target `.markdown h2`, `.markdown table`, or `.markdown.comment` without affecting the rest of the page.
+- **Stylesheet by convention:** if `pages/markdown.css` exists, the engine adds a `<link>` to it in the `<head>` of every page that contains rendered Markdown, the same way it injects CSRF tokens. If it doesn't exist, the engine links its own built-in default stylesheet (at a reserved URL such as `/__fourfold/markdown.css`), so Markdown looks decent out of the box. A config setting turns injection off for developers who'd rather link their styles themselves.
+- Code blocks render as `<pre><code class="language-x">`, so any CSS/JS syntax highlighter works. (Server-side highlighting could come later.)
+- Live reload already swaps changed CSS in place (see §9), so tuning Markdown styles is immediate.
+
+#### Fields in Markdown (unresolved)
+
+Tentatively, v1 Markdown has **no fields**: `{{` is literal text, and `.md` pages don't pair with `.ms` files. That keeps all Markdown inert, and avoids a trap for documentation, which often shows `{{name}}` in examples (Fourfold's own docs certainly will).
+
+**The case for fields:** many sites could be written entirely, or almost entirely, in Markdown. If a page needs HTML the moment it shows one dynamic value, the developer is pushed back to HTML for no good reason. Markdown pages should be able to do what HTML pages do: `about.md` pairs with `about.ms`, and `render` fills its fields.
+
+One possible shape, built on the split between developer-authored and visitor-supplied Markdown:
+
+- **Fields only in developer Markdown in `code/`**, never in text passed to `markdown()` at runtime. Markdown with fields is then a template, and lives in `code/` like every other template; runtime and `data/` Markdown stays inert.
+- **Parse first, fill second.** The renderer treats `{{name}}` as an opaque placeholder while parsing Markdown, then fills it at the HTML stage with the normal contextual rules: escaped in text, the URL rule in a link destination (`[profile]({{url}})`). A field value can never change the Markdown structure; a value containing `**` or `# ` stays literal text.
+- **Never recognized in code spans or code blocks**, so documentation examples work unescaped. Elsewhere, `\{{` writes a literal `{{`, as in HTML templates.
+
+Still to decide: whether `{{> include}}` works in Markdown too; whether `.md` fragments get fields as well as pages; and how a rendered fragment placed in a field on its own line behaves (probably as a block, not wrapped in `<p>`).
 
 ---
 
@@ -789,4 +876,5 @@ All the settings the design has called for so far:
 
 ## Open questions
 
+- Fields in Markdown pages and fragments (see [Fields in Markdown](#fields-in-markdown-unresolved)).
 - Routes table format. Tentatively: a separate file from `access.ms`, with the same path syntax and the same compile-time evaluation, and optionally an inline access level per entry.
