@@ -68,6 +68,7 @@ On top of the engine's own checks, the partitions are protected with OS file per
 - `private/state/` is readable and writable by the engine user only.
 - On a server hosting several apps, each app's engine runs as a separate OS user.
 - The engine binary and the optional server config (see §10) live outside every app's partitions, owned by the admin.
+- In CGI mode on shared hosting, none of this is available; see [Hosting modes](#hosting-modes).
 
 ### Developer access
 
@@ -761,7 +762,7 @@ This fits the per-request model unchanged: request → handler → filled-in tem
 3. A handler calls something like `publish "guestbook", frag("entry", entry)`.
 4. The engine writes that fragment to every subscriber, and HTMX swaps it in.
 
-No VM lives beyond its request, so the core security property still holds. WebSockets could be added later if two-way connections are needed.
+No VM lives beyond its request, so the core security property still holds. WebSockets could be added later if two-way connections are needed. SSE needs a long-running engine process, so it isn't available in CGI mode (see [Hosting modes](#hosting-modes)).
 
 ---
 
@@ -781,6 +782,29 @@ Files uploaded into `data/` can never execute. But if the app serves them back, 
 - default to `Content-Disposition: attachment` for anything that isn't a known-safe type.
 
 Static files in `code/pages/` are served normally, since only the developer can put them there.
+
+### Hosting modes
+
+Fourfold is its own web server, which in practice means a VPS, a container platform (Fly.io, Render, Railway, and the like), or a machine of your own. Shared hosting, where Apache is already running, mostly rules that out. Long-running processes are often forbidden or killed, binding a port is often blocked and ports 80/443 are never available, and `.htaccess` proxying needs `mod_proxy`, which is usually disabled. (Some cPanel hosts offer Phusion Passenger "apps", but typically only for Node, Python, and Ruby.) An Apache module wouldn't help either: shared hosts won't install custom modules, and anyone who could install one could just run Fourfold.
+
+But nearly every shared host runs CGI, and many run FastCGI. The execution model (§2) is already close to CGI: a fresh VM per request, nothing kept in memory between requests, sessions in SQLite. So Fourfold supports two hosting modes:
+
+| | **Standalone server** (primary) | **CGI / FastCGI** (reduced) |
+|---|---|---|
+| Typical host | VPS, container platform, own machine; `fourfold dev` | Shared hosting behind Apache |
+| Startup per request | none (image held in memory) | loads the compiled image from `private/state/` (CGI); none once warm (FastCGI) |
+| Recompile on change | file watcher, wait for quiet | checked on request (`code/` changed, or `.deploy` touched) |
+| SSE push (§7) | yes | **no**: fall back to HTMX polling (`hx-trigger="every 5s"`) |
+| OS-level enforcement (§1) | separate engine user, read-only `code/` | **engine-only**: under suEXEC the engine runs as the developer |
+| Budgets, outbound HTTP, email | Fourfold's config | Fourfold's config, but the host's own limits apply on top |
+
+**Architecture.** The engine core is a library that doesn't care how a request arrives. The standalone HTTP server and a thin CGI/FastCGI adapter both sit on top of it. To keep the adapter thin, **all state that crosses requests lives in SQLite or files**, never only in process memory: sessions and their locks, rate-limit counters, the anonymous-session caps, and the atomic `data` operations must all work across separate processes. In-memory caches are fine as long as they're only caches.
+
+**Apache must never serve the app's files.** The app folder (`code/`, `data/`, `private/`) lives **outside** the web root (`public_html`). Inside it there's only a tiny CGI entry point and an `.htaccess` that sends **every** request through it, static files included. If Apache served `pages/members/photo.jpg` itself, it would bypass access control; if it could reach `data/` or `private/`, far worse. A setup command (e.g. `fourfold cgi-setup`) writes this layout, and the engine **refuses to start if the app folder is inside the web root.**
+
+**Visibility.** The dev-mode reports and the engine log state which mode the app is running in, and what that mode doesn't provide (e.g. "CGI mode: SSE push unavailable; OS-level partition enforcement unavailable").
+
+The standalone server is what the docs recommend for real deployments, and a VPS costs about the same as shared hosting. CGI mode is there so someone with an existing shared-hosting account can try Fourfold without buying anything new.
 
 ---
 
