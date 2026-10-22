@@ -177,6 +177,86 @@ The engine stores the message in the session; the next page render receives it a
 - Sessions can be viewed, edited, and cleared from the dev tools.
 - Each fake-login user gets its own session, so switching between "admin" and "visitor" doesn't mix them up.
 
+### Background jobs
+
+No VM outlives its request, but real apps need work done outside one: nightly cleanup, digest emails, expiring old data, polling a feed, or sending a welcome email without making the visitor wait. Jobs provide this without giving up the per-request model: **a job is just another handler, run by the engine in a fresh VM**, and the only thing that waits between runs is inert data.
+
+#### Defining jobs
+
+Job handlers live in `code/jobs/`, in a `job` map that the engine creates before each file runs, like `get` and `post`:
+
+```
+// code/jobs/mail.ms
+job.sendWelcome = function(args)
+    u = users.get(args.user)
+    if u == null then return    // the account is gone; nothing to do
+    return mail.send(u.email, "welcome", {"name": u.name})
+end function
+```
+
+- Job names must be unique across `code/jobs/`; a duplicate is a compile error.
+- **No URL ever reaches a job.** `job` maps are only allowed in `code/jobs/`, and page `.ms` files can't define one. A job runs only when scheduled, when enqueued by code, or from the dev tools.
+- A job gets a frozen `args` map instead of `req`. There's no `session` and no `req.user`: a job acting for a user is passed the user's `id` and looks the user up when it runs, so roles are current (the same rule as `req.user`, §2).
+- `data`, `db`, `http`, `secrets`, and `publish` work as they do in requests. A scheduled feed poll can `publish` new items straight to SSE subscribers.
+- **Return value:** an `error` value means the job failed and is retried (below). Anything else counts as success.
+
+#### Enqueuing
+
+```
+post.signup = function(req)
+    ...
+    enqueue "sendWelcome", {"user": id}
+    enqueue "remind", {"user": id}, {"delay": 3 * 24 * 60 * 60}   // in 3 days
+    return redirect("/welcome")
+end function
+```
+
+- **Arguments must be inert**, checked when `enqueue` is called; a function or handle in `args` is an error. So the queue, like `session`, survives restarts and deploys safely.
+- The queue lives in an engine-owned SQLite store in `private/state/`, not in `data/`, so app code can't read or rewrite pending jobs.
+- **Jobs enqueued during a request are committed only if the request succeeds.** If the request ends in an error, they're dropped (with a dev-mode note), just as the session isn't saved. A failed signup shouldn't send a welcome email.
+- Optional `{"key": "digest:" + id}` makes the job unique while it's pending: enqueuing the same key again does nothing. That covers "send at most one digest" without app-side bookkeeping.
+
+#### Scheduling
+
+Schedules are declared in `code/schedule.ms`, evaluated at compile time as data, like `access.ms`:
+
+```
+schedule = {}
+schedule["cleanup"]   = "daily 03:00"
+schedule["digest"]    = "weekly mon 08:00"
+schedule["pollFeeds"] = "every 15m"
+schedule["report"]    = "0 6 1 * *"           // plain cron syntax also works
+```
+
+- A schedule naming a job that doesn't exist is a compile error.
+- Times are in the app's configured time zone (default UTC).
+- **A scheduled job never overlaps itself.** If the previous run is still going when the next one is due, that tick is skipped.
+- **Missed runs run once, not many times.** After downtime, each overdue scheduled job runs once at startup, not once per missed tick.
+
+#### Running, failing, retrying
+
+- **At-least-once delivery.** A job can run more than once (e.g. if the engine stops mid-run), so the docs teach that jobs should be safe to repeat. The `key` option and atomic `data` operations make that easy.
+- A failed job is retried with exponential backoff, up to a limit (default 5 attempts). After that it's marked **dead**: kept with its last error, written to the engine log, and shown in the dev tools.
+- **Jobs have their own budget**, set in the host config and separate from request budgets. The default wall-clock time is longer, e.g. 60 seconds.
+- **Jobs can't starve requests:** they run on a separate, capped worker pool (default: a couple of workers).
+- **Deploys:** a job runs on whichever image is current when it starts. If a deploy removes a job that still has queued entries, the compile step warns, and those entries go dead when they come up rather than vanishing silently.
+
+#### Dev mode
+
+- A **jobs panel**: the queue, recent runs and their results, dead jobs (with retry and discard buttons), the schedule with next run times, and a "run now" button for any job.
+- The request inspector shows which jobs a request enqueued.
+- Scheduled jobs run in dev just as in production; a toggle pauses them.
+
+#### CGI mode
+
+There's no long-running process in CGI mode, so the host's cron runs `fourfold run-jobs ./myapp` every minute. It runs whatever scheduled jobs are due and works through the queue until a time limit is reached. Enqueued jobs therefore wait up to a minute.
+
+#### Still open
+
+- Whether jobs need a way to enqueue follow-up jobs in a chain, and whether a job's enqueues commit only when it succeeds, like a request's.
+- Multi-server deployments need the queue in Postgres (or similar) instead of SQLite, with workers claiming jobs safely. Same host-config option as for sessions.
+- In CGI mode without cron access, whether to fall back to running due jobs after a request's response has been sent.
+
 ---
 
 ## 3. Data storage
@@ -208,6 +288,83 @@ A single file in `data/`: real transactions, no separate server. Probably the ri
   The engine only runs SQL from the code partition, which makes SQL injection structurally impossible. It also extends the code/design separation: someone who knows SQL can review or tune `queries/` without reading app logic.
 - Dynamic SQL (user-chosen sort column, optional filters) gets a narrow, clearly marked escape hatch, such as identifier slots checked against an allowlist declared alongside the query. Never raw strings.
 - A key-value store is likewise a host-provided handle with a namespace per app, offering the same atomic operations.
+
+### Schema changes and migrations
+
+Apps outlive their first data layout. Tables gain columns, data files change shape, and the change has to reach production without breaking the site or the data. The approach: **migrations are code, kept in `code/`, applied forward only, as part of deploying.**
+
+#### Migration files
+
+Migrations live in `code/migrations/`, numbered, and run in order:
+
+```
+code/migrations/
+  001_create_guestbook.sql
+  002_add_entry_time.sql
+  003_backfill_entry_time.ms
+  004_add_likes_index.sql
+```
+
+- **`.sql` migrations** run against the app's database (SQLite or Postgres). They're ordinary SQL files: SQL from the code partition, like named queries.
+- **`.ms` migrations** handle what SQL can't: reshaping Tier 1 data files, or backfills that need logic. Each defines `migrate = function()`; returning an `error` value fails the migration. They run in a fresh VM like a job, with `data`, `db`, and file access, but **no `http`, `mail`, `publish`, or `enqueue`**: a migration should change data and nothing else, so that a failed migration can be undone completely.
+- Numbers must be unique; a duplicate is a compile error. Gaps are fine.
+- **Forward only; there are no "down" migrations.** Down migrations are rarely tested and often wrong. Undoing a migration means restoring the backup taken just before it (below), or writing a new forward migration.
+- **An applied migration can't change.** The engine stores each applied migration's checksum; if the file is edited afterward, that's a compile error ("003 was changed after it was applied; write a new migration instead"). Dev mode offers "redo the last migration" for the edit-and-retry loop while a migration is being written.
+- **A new migration numbered below one already applied** (typically from merging two lines of work) is a compile error: renumber it.
+- A fresh install runs every migration from the start, so the migrations folder *is* the schema's history. This also means `.ms` migrations that call named queries can break later if those queries change. The docs recommend keeping migrations self-contained.
+
+#### Where the record lives
+
+The record of applied migrations is stored **with the data it describes**, so restoring a backup brings back the matching record:
+
+- For the database: an engine-owned `fourfold_migrations` table inside it (SQLite or Postgres). It's not exposed through named queries.
+- For Tier 1 files: an engine-reserved `data/.fourfold/` folder, which the path sandbox hides from app code.
+
+#### Applying migrations: drain, migrate, swap
+
+Pending migrations are applied as part of the whole-image compile and swap (§8):
+
+1. The new image compiles. If it fails, nothing else happens; the old image keeps serving.
+2. If it has no pending migrations, it's swapped in as usual. Most deploys stop here.
+3. Otherwise the engine **stops starting new requests and jobs**. New requests wait in a queue instead of failing.
+4. It **waits for in-flight requests and jobs** on the old image to finish (each is bounded by its budget).
+5. It **takes a backup** (below).
+6. It **runs the pending migrations in order.** Each `.sql` migration runs in its own transaction; SQLite and Postgres both support transactional schema changes.
+7. **On success:** the new image is swapped in and the queued requests proceed on it.
+   **On failure:** the database and data files are restored to the pre-migration backup, the old image resumes, and the error goes to the engine log (and the dev overlay). The site never runs old code against a new schema, or new code against an old one.
+
+- **No old-image request ever sees the new schema**, because there are none left running when migration starts. That's the simplest rule that's always correct, and the pause is a second or less for typical hobby-scale migrations.
+- **If a migration runs long**, queued requests wait up to a configured limit (e.g. 30 seconds), then get a 503 with `pages/503.html` if it exists ("down for maintenance; back shortly"). Long migrations (an index on a big table) get their own generous budget, separate from requests and jobs.
+- **The same lock works in every hosting mode.** Every request and job holds a shared "schema lock" while it runs; the migrator takes it exclusively. In standalone mode this is in memory; in CGI mode it's a file lock in `private/state/`, so independent CGI processes coordinate too. In CGI mode, the first request that sees new code runs the migrations while later ones wait.
+- **Rolling back code past a migration is refused.** If the database is at migration 7 and the new image only knows 1–5 (an older version of the code was deployed), the swap is refused with a clear error, since old code would run against a schema it doesn't understand. The fix is to restore a backup, or deploy code that includes the migrations. An explicit override exists for emergencies.
+
+**Considered: online ("expand/contract") migrations**, where migrations run while the old image is still serving and must therefore be compatible with both old and new code (add a column in one deploy, start using it in the next, drop the old one in a third). This avoids the pause but asks for discipline most hobby apps don't need. It may come later as an opt-in deploy mode for large apps.
+
+#### What migrations don't cover
+
+- **Sessions and queued jobs aren't migrated.** A `session.cart` or job `args` written by old code keeps its old shape after a deploy. Code should tolerate older shapes (or check a version field). A config option clears all anonymous sessions on a deploy that ran migrations.
+- **Postgres in a multi-server deployment** needs a migration lock in the database itself (an advisory lock), so only one server migrates; the others wait for it.
+
+#### Backups
+
+Migrations depend on reliable backups, and so does everything else.
+
+- **`fourfold backup ./myapp`** makes a consistent snapshot of `data/` and `private/state/`. SQLite files are copied with SQLite's online backup API, not a file copy, so a write in progress can't corrupt the copy. Data files are copied under a brief write lock. Sessions can optionally be left out.
+- **Automatic backups:** before every migration batch (always), and on a schedule if configured, with a retention limit. They go to `private/state/backups/` by default, or a configured directory **outside every partition**. A backup holds the auth store, so it must never end up somewhere app code or the web can reach.
+- **`fourfold restore`** puts a snapshot back while the app is stopped (or paused, as for migrations).
+- **Postgres** is backed up by its own tools (`pg_dump`, or the provider's backups). Fourfold records the migration state but doesn't own Postgres backups. Without a Fourfold-made backup, a failed Postgres migration is undone by its transaction alone, which covers `.sql` migrations; an `.ms` migration on Postgres runs its database work in one transaction for the same reason.
+
+#### Dev mode
+
+- Pending migrations are applied automatically after each successful recompile (after the usual wait for files to stop changing), with a backup each time.
+- A **migrations panel** shows which migrations are applied, pending, or failed, with "redo last" and "reset dev data" (recreate the database from scratch and rerun every migration).
+- **Seed data:** if `code/seed.ms` exists, it runs after "reset dev data" (and on a fresh dev database) to fill in sample content and test users' data. It never runs in production.
+
+#### Still open
+
+- **SQL dialects.** SQLite and Postgres differ, so "moving to Postgres is mostly a configuration change" (Middle tier, above) isn't quite true for migrations. Options include per-dialect variants (`004_x.sqlite.sql`, `004_x.pg.sql`) or a restricted portable subset.
+- Whether production should apply migrations automatically on deploy (the default above) or optionally wait for an explicit `fourfold migrate`.
+- How `.ms` migrations should reach the database without depending on named queries that may change later.
 
 ---
 
@@ -368,6 +525,7 @@ post.sign = function(req) ... end function    // POST /guestbook/sign
 | `files` | uploaded files (contents held by the engine, saved to `data/` explicitly) |
 | `headers` | read-only request headers |
 | `user` | the signed-in user, or `null` (see §5) |
+| `ip` | the client's address (from trusted proxy headers when behind a proxy; see §8) |
 | `htmx` | true if HTMX made the request, so it expects a fragment |
 | `rawBody` | the unparsed request body (`webhook` handlers only, for signature checks) |
 
@@ -769,7 +927,7 @@ No VM lives beyond its request, so the core security property still holds. WebSo
 ## 8. Deployment
 
 - The developer uploads files with plain **scp/rsync**. No special tooling is required.
-- **Whole-image compile and swap:** the engine compiles the entire code tree into a single image, then swaps it in atomically. If anything fails to compile, it keeps serving the old image and logs the error, so a broken or partial upload never takes the site down. Requests already running finish on the old image; new requests get the new one.
+- **Whole-image compile and swap:** the engine compiles the entire code tree into a single image, then swaps it in atomically. If anything fails to compile, it keeps serving the old image and logs the error, so a broken or partial upload never takes the site down. Requests already running finish on the old image; new requests get the new one. If the new image has pending migrations, the swap waits for them (see §3, [Schema changes and migrations](#schema-changes-and-migrations)).
 - **Wait for quiet:** the engine watches `code/` and recompiles only once files have stopped changing for a second or two. Optionally, touching a trigger file (e.g. `code/.deploy`) means "load now."
 - An optional `fourfold deploy` wrapper could rsync to a staging folder and then swap directories atomically.
 - **Deploys should only touch `code/`.** The docs must warn that, for example, `rsync --delete` of the whole tree from a laptop would wipe production data.
@@ -806,6 +964,92 @@ But nearly every shared host runs CGI, and many run FastCGI. The execution model
 
 The standalone server is what the docs recommend for real deployments, and a VPS costs about the same as shared hosting. CGI mode is there so someone with an existing shared-hosting account can try Fourfold without buying anything new.
 
+### Serving on the open internet
+
+In standalone mode, Fourfold is the server facing the internet, so it takes on what Apache or nginx would normally handle. The goal is the same as everywhere else: **safe defaults, with nothing for the developer to set up.**
+
+#### TLS
+
+Two supported shapes:
+
+| | **Fourfold terminates TLS** | **Behind a reverse proxy** |
+|---|---|---|
+| Typical use | a single VPS | nginx/Caddy already running; cloud load balancers; container platforms |
+| Certificates | automatic, from Let's Encrypt (ACME), stored in `private/state/` and renewed by the engine | handled by the proxy |
+| Port 80 | only redirects to HTTPS and answers ACME challenges | n/a |
+| Fourfold listens on | 443 (and 80) | plain HTTP on localhost, a private address, or a Unix socket |
+
+- The engine never runs as root. It gets ports 80 and 443 through systemd socket activation or `CAP_NET_BIND_SERVICE`.
+- **Several apps on one server:** only one process can listen on 443. A small **front process** (`fourfold front`, configured by the server config, owned by the admin) terminates TLS for every domain and forwards each request to that app's engine over a Unix socket. Each engine still runs as its own OS user (§1), and the front process holds no app code or data. A single-app server can skip the front process and let its engine terminate TLS directly.
+
+#### Trusting the client's address
+
+- Behind a proxy, every connection appears to come from the proxy, so the real client address is in `X-Forwarded-For` (or `Forwarded`). Those headers are **trusted only when the connection comes from an address listed in the config** (`config.proxy.trust`); otherwise they're ignored. Without this rule, anyone could fake their IP and slip past per-IP limits.
+- The result is available to code as `req.ip`, and is the address used for the engine's own per-IP limits (sign-in, anonymous sessions, connection caps).
+- **The `Host` header is checked** against the configured domain(s); a request for any other host is rejected. The engine never builds URLs from `Host` (magic links, redirects, and the CSRF `Origin` check all use `config.domain`), so a forged `Host` can't steer a sign-in link to an attacker's site.
+
+#### Connection and request limits
+
+Defaults, configurable in the host config within the server's ceilings:
+
+| Limit | Default (illustrative) | Defends against |
+|---|---|---|
+| Time to receive request headers | 10 s | slowloris |
+| Minimum body upload rate | ~1 KB/s after a grace period | slow-body attacks |
+| Header size | 16 KB | oversized headers |
+| Request body size | 1 MB (forms); uploads have a separate, larger cap | memory exhaustion |
+| Form fields, multipart parts, JSON depth | e.g. 1000 / 100 / 64 | parser exhaustion |
+| Concurrent connections, total and per IP | sized to the machine | connection floods |
+| Concurrent requests (running VMs) | sized to the machine; excess waits briefly, then gets 503 | overload |
+| Open SSE connections, total and per IP | counted separately, since they're long-lived | SSE floods |
+| Keep-alive idle timeout | 60 s | idle connection buildup |
+
+- Compressed request bodies aren't accepted in v1 (no decompression bombs).
+- The engine parses forms, multipart uploads, and JSON itself under these limits, before any handler runs, so app code only ever sees bounded values.
+- The `Server` header doesn't reveal the engine version.
+- HTTP/2 is supported where TLS is.
+
+#### Security headers by default
+
+Sent on every response, with no developer action:
+
+| Header | Default | Notes |
+|---|---|---|
+| `Strict-Transport-Security` | `max-age=31536000` | production only; `includeSubDomains` and preload are opt-in |
+| `Content-Security-Policy` | see below | |
+| `X-Frame-Options` | `DENY` | for old browsers; CSP `frame-ancestors` is the real control. Allowing specific embedding sites is a config option |
+| `X-Content-Type-Options` | `nosniff` | |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | |
+| `Cross-Origin-Opener-Policy` | `same-origin` | |
+| `Permissions-Policy` | camera, microphone, geolocation, etc. off | apps that need one enable it in config |
+
+#### Content Security Policy
+
+Because the engine renders every page, it can apply a **strict, nonce-based CSP** automatically, much as it adds CSRF tokens. It's a second wall against XSS behind the template rules: even if HTML gets in somewhere (a bug, or a careless `unsafeHTML`), a script without the nonce won't run.
+
+```
+default-src 'self'; script-src 'self' 'nonce-…'; style-src 'self' 'unsafe-inline';
+img-src 'self' https: data:; connect-src 'self'; object-src 'none';
+base-uri 'none'; form-action 'self'; frame-ancestors 'none'
+```
+
+- **A fresh nonce per response.** Templates are parsed at compile time, so the engine knows every `<script>` tag and adds the nonce to each one at render time, including the dev-mode live-reload script and the engine's own pages.
+- **This matches the template rules already in place.** Inline event handlers (`onclick=`) are already a compile error. The same rule extends to HTMX's ways of running inline JS: `hx-on*` attributes and `js:` values in `hx-vals` are compile errors, and HTMX is configured to use no inline styles or `eval`.
+- **Inline `style` attributes are allowed** (`'unsafe-inline'` for styles only), since designers use them constantly and the risk is much smaller than with scripts. A config option removes it for a stricter policy.
+- **The developer can add sources** in config, e.g. a CDN for scripts or a font host. There's no option for `'unsafe-inline'` or `'unsafe-eval'` in `script-src`.
+- **Violations are reported:** in dev mode, a CSP violation shows in the error overlay with the offending element; in production, it's logged to the engine log (rate-limited).
+- (**Open:** fragments returned to HTMX are rendered in a separate response, so a `<script>` inside one won't have the page's nonce. Tentatively, a fragment containing `<script>` is an error when returned as a fragment response, though it's fine in a static include or a page field.)
+
+#### Dev mode
+
+Dev mode serves plain HTTP on localhost: no HSTS, no ACME, no `Host` checks beyond localhost. Where a browser won't accept `Secure` or `__Host-` cookies over plain HTTP, dev mode uses an unprefixed, non-`Secure` session cookie; the difference is confined to dev. CSP is enforced in dev exactly as in production, so violations surface early.
+
+#### Still open
+
+- Whether the front process should also handle static files and caching for all apps, or stay a pure TLS router.
+- Wildcard and many-domain certificates (DNS-01 challenges) for hosts with many subdomains.
+- Rate limits per route for app endpoints (see Open questions: abuse of app endpoints), which would reuse the per-IP machinery here.
+
 ---
 
 ## 9. Local development
@@ -825,6 +1069,8 @@ Because local and production have the same structure, "works locally" means "wor
 - **Fake login:** a "sign in as…" picker with test users (see §5).
 - **Access report:** every URL with its effective access level and the rules that produced it (see §5).
 - **Outbound report:** allowed hosts, secret-to-host bindings, any `"*"`, and `webhook` endpoints (see §6).
+- **Jobs panel:** the queue, recent and dead jobs, the schedule, and "run now" (see §2, [Background jobs](#background-jobs)).
+- **Migrations panel:** applied, pending, and failed migrations, "redo last", and "reset dev data" with seed data (see §3).
 
 Production mode injects none of this.
 
@@ -889,7 +1135,11 @@ All the settings the design has called for so far:
 | Outbound | disable or cap the allowlist, allowed internal addresses, rate limit, size limit |
 | Secrets | values and host bindings (in `secrets.ms`) |
 | Logging | rotation and retention for engine logs |
-| Deploy | quiet period before recompiling |
+| Deploy | quiet period before recompiling; maximum wait during migrations; migration budget; clearing anonymous sessions after migrations |
+| Backups | schedule, retention, backup directory |
+| Jobs | budget, worker count, retry limit, time zone for schedules |
+| Server | TLS mode, ACME contact email, trusted proxies, connection and request limits |
+| Headers | CSP additions, allowed embedding sites, HSTS options, enabled browser features |
 
 ---
 
@@ -902,3 +1152,16 @@ All the settings the design has called for so far:
 
 - Fields in Markdown pages and fragments (see [Fields in Markdown](#fields-in-markdown-unresolved)).
 - Routes table format. Tentatively: a separate file from `access.ms`, with the same path syntax and the same compile-time evaluation, and optionally an inline access level per entry.
+- **Background and scheduled jobs.** Designed in §2, [Background jobs](#background-jobs); remaining questions are listed there.
+- **Serving on the open internet** (TLS, proxies, connection limits, security headers, CSP). Designed in §8, [Serving on the open internet](#serving-on-the-open-internet); remaining questions are listed there.
+- **Schema changes and migrations.** Designed in §3, [Schema changes and migrations](#schema-changes-and-migrations); remaining questions are listed there.
+- **Forms and input validation.** `req.form` is a map of untrusted strings. Needed: type and length checks, re-showing a form with errors *and* the visitor's input, and upload limits (size, count, types). Tentatively a small declarative validation helper whose output plugs directly into template fields.
+- **Email from app code** (contact forms, notifications). A `mail` module taking structured fields, never raw headers (PHP's `mail()` header injection is the classic hole), with bodies from templates. A per-app send rate limit, and perhaps a recipient restriction (signed-in users only, or an allowlist) in the "can only tighten" style of `outbound.ms`.
+- **Abuse of app endpoints** (e.g. guestbook spam). Sign-in is rate-limited, but app handlers aren't. Tentatively: declarative per-route rate limits (per IP or per user) alongside the access rules, plus a honeypot field the engine adds to forms and checks automatically, as it does CSRF tokens.
+- **Testing.** A `fourfold test` command that calls handlers with synthetic requests and fake users against a throwaway `data/`. The per-request model makes this easy: a handler is nearly a pure function of the request, `session`, and `data`.
+- **Non-browser clients.** `json()` exists, but CSRF and cookie sessions assume a browser. Mobile apps, scripts, and integrations need API tokens or keys, and CORS rules. Decide whether this is v1 or explicitly later.
+- **Caching:** ETags and `Cache-Control` for static files, response compression, and perhaps caching rendered output.
+- **Time zones and localization:** formatting is done in code (§4), so code needs good tools for dates, numbers, and translated strings.
+- **Production admin console:** users, roles, sessions, job queue, and logs, since the dev tools are off in production.
+- **Account deletion and data export** (GDPR and similar): ties into the auth store and data keyed by `user.id`.
+- **Engine and language versioning:** an app declares which Fourfold version it targets, so engine upgrades don't silently break it.
