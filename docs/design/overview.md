@@ -520,9 +520,10 @@ post.sign = function(req) ... end function    // POST /guestbook/sign
 |---|---|
 | `method`, `path` | `"GET"`, `"/guestbook"` |
 | `query` | map of URL query parameters |
-| `form` | map of submitted form fields |
+| `form` | map of submitted form fields: declared fields only, normalized and typed, if the handler has a `form` declaration (see [Forms and validation](#forms-and-validation)) |
+| `errors` | `null`, or a map of validation errors by field name |
 | `params` | values captured from route patterns (`{id}`) |
-| `files` | uploaded files (contents held by the engine, saved to `data/` explicitly) |
+| `files` | uploaded files (contents held by the engine, saved to `data/` explicitly; type-checked by content when declared) |
 | `headers` | read-only request headers |
 | `user` | the signed-in user, or `null` (see §5) |
 | `ip` | the client's address (from trusted proxy headers when behind a proxy; see §8) |
@@ -536,6 +537,7 @@ post.sign = function(req) ... end function    // POST /guestbook/sign
 | Handler returns | Response |
 |---|---|
 | a map (from `render` only) | the page, with its fields filled in |
+| `reshow(frag, errors)` | the form again, with errors and the visitor's input (see [Forms and validation](#forms-and-validation)) |
 | `frag(name, value)` | an HTML fragment |
 | `redirect(url)` | a 303 redirect (or the HTMX equivalent if `req.htmx`) |
 | `json(value)` | JSON, for API-style endpoints |
@@ -560,6 +562,101 @@ Errors, runtime failures, and budget overruns are all handled the same way:
 #### Progressive enhancement
 
 Forms should carry both a normal `action` and `hx-post`. With JavaScript, HTMX swaps the result in place. Without it, the form posts normally and the handler redirects back (redirect-after-POST, which also stops a reload from resubmitting). It's the same handler either way, distinguished by `req.htmx`. See the guestbook example in §7.
+
+### Forms and validation
+
+Everything in a submitted form is untrusted, and handling it well takes more than checking it: values need parsing and normalizing, unexpected fields need dropping, and a form with mistakes has to come back **with the errors and with what the visitor typed**, or they'll give up. Doing that by hand in every handler is tedious, so it gets done inconsistently. Instead, a handler **declares the fields it accepts**, and the engine does the rest before the handler runs.
+
+#### Declaring a form
+
+A `form` map, alongside `get` and `post`, describes the fields each handler accepts, keyed by handler name:
+
+```
+// code/pages/guestbook.ms
+form.sign = {
+    "who":   {"type": "text", "required": true, "max": 40},
+    "msg":   {"type": "multiline", "required": true, "max": 2000, "maxLinks": 2},
+    "mood":  {"type": "choice", "options": ["happy", "meh", "grumpy"]},
+    "photo": {"type": "file", "maxKB": 2048, "types": ["image/png", "image/jpeg"]}}
+```
+
+Like `access =`, `form` declarations are plain data, **read at compile time**. That lets the engine check them against the templates (below).
+
+| Type | Accepts | Becomes |
+|---|---|---|
+| `text` | one line; newlines rejected | string |
+| `multiline` | any text (line endings normalized to `\n`) | string |
+| `email` | a syntactically valid address | string |
+| `url` | http(s) only, the same rule as template URLs | string |
+| `number`, `int` | strict decimal; no `Infinity`, `NaN`, or `1e400` | number |
+| `bool` | a checkbox: present means true, absent means false | 1 or 0 |
+| `choice` | one of `options` (a select or radio group) | string |
+| `choices` | any subset of `options` (several checkboxes) | list of strings |
+| `date` | `YYYY-MM-DD` (what `<input type="date">` sends) | string |
+| `file` | an upload within `maxKB`, whose **content** matches `types` | upload handle (in `req.files`) |
+
+Rules: `required`, `min`/`max` (length for text, value for numbers), `maxLinks` (counts URLs in text, a cheap spam filter), and `messages` to replace the default error messages per rule (e.g. `"messages": {"required": "Please sign your name"}`).
+
+**What the engine does before the handler runs:**
+
+- **Normalizes text:** trims surrounding whitespace, applies Unicode NFC, and strips control characters (except newlines and tabs in `multiline`). A value that's empty after trimming counts as missing, so `required` means something.
+- **Converts types** as in the table, so `req.form.age` is a number, not a string.
+- **Drops undeclared fields.** A tampered form that adds `role=admin` or `price=0` never reaches the handler (no mass assignment). The same goes for a `choice` value that isn't in `options`, which a visitor can send by editing the page.
+- **Checks uploads by content**, not by the type the browser claims: a "PNG" must start like a PNG.
+- **Validates**, and puts the results in **`req.errors`**: `null` if everything passed, otherwise a map from field name to message. The handler still runs either way, since only it knows what to show next.
+
+A handler with no `form` declaration still gets `req.form`, as raw strings, still bounded by the engine's size limits (§8). The dev-mode access report flags `post` handlers that read `req.form` without a declaration.
+
+#### Showing errors and keeping input
+
+The form itself is a fragment, so it can be rendered both in the page and on its own:
+
+```html
+<!-- code/frags/signForm.html -->
+<form id="signForm" method="post" action="/guestbook/sign"
+      hx-post="/guestbook/sign" hx-target="#entries" hx-swap="beforeend">
+  <p class="error">{{errors.form}}</p>
+  <input name="who" value="{{who}}"> <span class="error">{{errors.who}}</span>
+  <textarea name="msg">{{msg}}</textarea> <span class="error">{{errors.msg}}</span>
+  <button>Sign</button>
+</form>
+```
+
+```
+render = function(req)
+    return {"entries": frag("entry", data.get("guestbook", [])),
+            "signForm": frag("signForm", formState("sign"))}
+end function
+
+post.sign = function(req)
+    if req.errors then return reshow("signForm")
+    if isBanned(req.form.who) then return reshow("signForm", {"who": "Sorry, not allowed."})
+    entry = {"who": req.form.who, "msg": req.form.msg}
+    data.append "guestbook", entry
+    if req.htmx then return frag("entry", entry)
+    return redirect("/guestbook")
+end function
+```
+
+- **`formState(name)`** returns the map a form fragment needs: the submitted values (by field name) and an `errors` map (with `errors.form` for errors that aren't about one field). Normally it's empty. Right after a failed submission, it holds what the visitor typed and what went wrong. A field named `errors` is therefore a compile error.
+- **`reshow(fragName, extraErrors)`** sends the form back with its errors, whichever way it was submitted:
+  - **With HTMX:** it renders the fragment and tells HTMX (with `HX-Retarget` and `HX-Reswap` headers) to replace the form itself, rather than appending to `#entries`. That's why the form's root element needs an `id`. The status is 422; the engine's HTMX configuration swaps 422 responses.
+  - **Without JavaScript:** it stores the values and errors as a one-time flash (§2) and redirects to the handler's own page (`/guestbook`, known from routing; never the `Referer`, so it can't become an open redirect). That page's `render` calls `formState("sign")`, which picks them up. Redirect-after-POST stays intact.
+- `extraErrors` covers checks only the handler can do ("that name is taken"); they're merged with the declared rules' errors.
+- Values are shown back through ordinary fields, so they're escaped like any other value.
+
+#### Checking forms against templates
+
+Because the engine parses templates at compile time, and `form` declarations are read at compile time, it can match each `<form>` to its handler by the `action`/`hx-post` URL and:
+
+- **Warn about mismatches** in dev mode: an input whose `name` isn't declared (usually a typo), or a declared field with no input.
+- **Add browser-side validation attributes** that match the declaration (`required`, `maxlength`, `min`, `max`) where the markup doesn't already have them, so visitors get instant feedback. The server still enforces everything; these attributes are only a convenience.
+
+#### Still open
+
+- Whether a `form` declaration should be **required** for any `post` handler that reads `req.form`, rather than just flagged.
+- A `pattern` rule needs regular expressions, which depend on what MS2 provides; and so does localization of the default messages (see Open questions).
+- Forms whose `options` are filled in by code can't be checked against the template at compile time.
 
 ### Markdown
 
@@ -782,6 +879,91 @@ Because the engine renders every page, it can protect forms automatically:
 GET requests are not token-checked, which is why state-changing handlers belong in `post`, not `get`. This is a documented rule, not enforced: making `data` read-only during GETs would break harmless side effects like the visitor counter in `render`.
 
 The one exception to token checking is `webhook` handlers, which receive POSTs from outside services (see §6).
+
+### Rate limits and spam
+
+Spam is the first problem almost every public form meets. The defenses are layered, from weakest to strongest. The defaults need no work from the developer; the stronger defenses are one line each.
+
+| Defense | Default | Stops |
+|---|---|---|
+| Rate limits | on, for every non-GET request | floods; a bot posting as fast as it can |
+| Content rules (`maxLinks`, nofollow links) | per form | link spam, and much of the motive for it |
+| Timing check | opt-in per route | bots that submit the moment they fetch a form |
+| Proof of work | opt-in per route | cheap bulk posting |
+| Requiring sign-in | opt-in per route | nearly everything |
+
+None of the middle three defeats a determined, targeted spammer. They raise the cost of each post above zero, and they work from **state on the server** (signed tokens, counters) that a bot can't see or fake.
+
+#### Rate limits
+
+**Default limits on everything but GET.** Every non-GET request is limited per client (e.g. 60 per minute per IP for anonymous visitors, more for signed-in users), so an unprotected form can't be flooded. Exceeding a limit gets a 429 with `Retry-After`, using `pages/429.html` if it exists.
+
+**Per-route rules** go in `code/limits.ms`, evaluated at compile time as data, like `access.ms`, with the same path rules (a rule covers its path and everything below it):
+
+```
+limits = {}
+limits["/guestbook/sign"] = ["5/minute", "50/day"]
+limits["/api"]            = "100/minute per user"
+limits["/forum/post"]     = {"rate": "10/hour", "minSeconds": 3, "challenge": true}
+```
+
+A string or list is shorthand for rates only; a map can also turn on the timing check (`minSeconds`) and proof of work (`challenge`), both below.
+
+- **Rate syntax:** `count/unit` with `second`, `minute`, `hour`, or `day`, optionally followed by `per ip`, `per user`, or `per session`. `per ip` is the default. `per user` falls back to per-IP for visitors who aren't signed in.  ` per ` and `/` are synonyms, so "100/minute/user", "100 per minute per user", and "100/minute per user" are all equivalent.
+- **Every applicable rule applies**, as with access rules: the defaults, any folder rule, and the route's own rule. Adding a rule can only tighten.
+- **IPv6 addresses are limited by /64 prefix**, not by full address, since anyone with one IPv6 address usually has a whole /64.
+- **Shared IPs are a real concern for this audience.** A classroom or school behind one IP address looks like one very busy visitor. That's why the defaults are generous, why signed-in users are counted per user rather than per IP, and why the dev-mode report shows each route's effective limits.
+- **Limits from code**, for keys only the app knows: `ratelimit("comment:" + postId, "20/hour")` returns true if the request is within the limit (and counts it), false if not.
+- Counters are kept in `private/state/` (cached in memory), so they work in CGI mode and survive restarts.
+
+The engine's own sign-in flows have their own fixed limits, including **per email address**, so nobody can use the magic-link form to flood someone else's inbox.
+
+#### Content rules
+
+- `maxLinks` in a form declaration (see §4, [Forms and validation](#forms-and-validation)) rejects link-stuffed messages, the commonest spam.
+- Visitor-supplied Markdown links are already `rel="nofollow ugc"` (§4, [Markdown](#markdown)), which removes much of the SEO motive.
+
+#### Timing check: `minSeconds`
+
+The engine already adds a token to every `<form method="post">` it renders (for CSRF). On routes with `minSeconds`, that token also carries **the time the form was rendered**, signed with a key only the engine has.
+
+- A submission that arrives sooner than `minSeconds` after the form was rendered is rejected before the handler runs, with a friendly "that was quick; please try again" response, since now and then it's a fast human. A bot can't forge an earlier time; it has to fetch the form and actually wait, which costs it time on every post.
+- It's opt-in, and best for forms where people type something. Fast humans are real: a one-button "like" form would trip it.
+- A request to the route without a valid timing token (e.g. a bot posting directly, without fetching the form) is rejected.
+- **Old forms aren't rejected by default,** because people leave tabs open overnight. A maximum age is an option.
+
+#### Proof of work: `challenge`
+
+On routes with `challenge`, the form carries a signed, single-use puzzle: find a number that, hashed with the server's random challenge, gives a result with a certain number of leading zero bits. The engine's JavaScript (served with HTMX) starts solving it when the visitor starts filling in the form, so it's normally done before they click Submit. The server checks the answer with a single hash.
+
+- **Invisible to people:** no images to decipher, nothing to click, no third party, no tracking. The difficulty is set so that solving takes a fraction of a second on a phone.
+- **A real cost for bulk posting:** each submission needs its own solution, and each challenge can be used once (the engine remembers used ones until they expire).
+- **It needs JavaScript**, which breaks the no-JS fallback (§4, [Progressive enhancement](#progressive-enhancement)) for that form. Visitors without JS see a message saying the form needs it. That's the main reason it's opt-in.
+- A spammer with plenty of computing power can pay the cost, so this reduces bulk spam rather than ending it.
+
+#### The strongest defense: signing in
+
+Requiring sign-in to post, which is one line in `access.ms` (`rules["/guestbook/sign"] = "login"`), stops nearly all spam, because every account needs a working email address, and limits can then be per user instead of per IP. The docs should present this as the first choice for anything beyond a toy.
+
+#### Considered and rejected: an automatic honeypot field
+
+A hidden field that people can't see but form-filling bots fill in. It catches only the most generic bots, and as a framework feature it's worse than useless:
+
+- **The same honeypot on every Fourfold site gets beaten on every Fourfold site.** It's worth a bot author's time to add one rule that skips it.
+- **Its giveaway markup is required for accessibility:** without `aria-hidden`, screen-reader users would hear a strange "leave this empty" field.
+- **Real people trip it:** browsers' autofill often ignores `autocomplete="off"`, and password managers fill hidden fields, so honest visitors get rejected with no visible reason.
+
+#### Dev mode
+
+- The access report shows each route's effective rate limits, timing check, and challenge next to its access level.
+- The request inspector shows which limits a request counted against and their current counts, and why a submission was rejected (too fast, missing token, bad challenge). The dev tools can reset counters.
+- Challenge difficulty is minimal in dev, so testing isn't slowed down.
+
+#### Still open
+
+- Whether timing tokens should be single-use. As designed, reuse of one token is bounded only by the rate limits.
+- Integration with a third-party challenge such as Cloudflare Turnstile, for apps that want it. It needs outbound access and CSP additions.
+- How the challenge difficulty should be set: fixed per route, or raised automatically when a route sees a burst of posts.
 
 ---
 
@@ -1048,7 +1230,7 @@ Dev mode serves plain HTTP on localhost: no HSTS, no ACME, no `Host` checks beyo
 
 - Whether the front process should also handle static files and caching for all apps, or stay a pure TLS router.
 - Wildcard and many-domain certificates (DNS-01 challenges) for hosts with many subdomains.
-- Rate limits per route for app endpoints (see Open questions: abuse of app endpoints), which would reuse the per-IP machinery here.
+- (Per-route rate limits for app endpoints use the same per-IP machinery; see §5, [Rate limits and spam](#rate-limits-and-spam).)
 
 ---
 
@@ -1067,7 +1249,7 @@ Because local and production have the same structure, "works locally" means "wor
 - **Request inspector:** for each request, the template fields that were filled, the queries that ran, and the instructions and memory used against the budget.
 - **REPL** against the dev instance, for poking at `data/` or calling handlers directly.
 - **Fake login:** a "sign in as…" picker with test users (see §5).
-- **Access report:** every URL with its effective access level and the rules that produced it (see §5).
+- **Access report:** every URL with its effective access level, its rate limits, and the rules that produced them; also `post` handlers that read `req.form` without a `form` declaration (see §4 and §5).
 - **Outbound report:** allowed hosts, secret-to-host bindings, any `"*"`, and `webhook` endpoints (see §6).
 - **Jobs panel:** the queue, recent and dead jobs, the schedule, and "run now" (see §2, [Background jobs](#background-jobs)).
 - **Migrations panel:** applied, pending, and failed migrations, "redo last", and "reset dev data" with seed data (see §3).
@@ -1133,6 +1315,7 @@ All the settings the design has called for so far:
 | Sessions | size cap, idle and absolute timeouts, anonymous-session caps |
 | Database | connection URL, role, credentials (by secret name) |
 | Outbound | disable or cap the allowlist, allowed internal addresses, rate limit, size limit |
+| Rate limits and spam | default limits for non-GET requests (anonymous and signed in); proof-of-work difficulty |
 | Secrets | values and host bindings (in `secrets.ms`) |
 | Logging | rotation and retention for engine logs |
 | Deploy | quiet period before recompiling; maximum wait during migrations; migration budget; clearing anonymous sessions after migrations |
@@ -1155,9 +1338,9 @@ All the settings the design has called for so far:
 - **Background and scheduled jobs.** Designed in §2, [Background jobs](#background-jobs); remaining questions are listed there.
 - **Serving on the open internet** (TLS, proxies, connection limits, security headers, CSP). Designed in §8, [Serving on the open internet](#serving-on-the-open-internet); remaining questions are listed there.
 - **Schema changes and migrations.** Designed in §3, [Schema changes and migrations](#schema-changes-and-migrations); remaining questions are listed there.
-- **Forms and input validation.** `req.form` is a map of untrusted strings. Needed: type and length checks, re-showing a form with errors *and* the visitor's input, and upload limits (size, count, types). Tentatively a small declarative validation helper whose output plugs directly into template fields.
+- **Forms and input validation.** Designed in §4, [Forms and validation](#forms-and-validation); remaining questions are listed there.
 - **Email from app code** (contact forms, notifications). A `mail` module taking structured fields, never raw headers (PHP's `mail()` header injection is the classic hole), with bodies from templates. A per-app send rate limit, and perhaps a recipient restriction (signed-in users only, or an allowlist) in the "can only tighten" style of `outbound.ms`.
-- **Abuse of app endpoints** (e.g. guestbook spam). Sign-in is rate-limited, but app handlers aren't. Tentatively: declarative per-route rate limits (per IP or per user) alongside the access rules, plus a honeypot field the engine adds to forms and checks automatically, as it does CSRF tokens.
+- **Abuse of app endpoints** (spam). Designed in §5, [Rate limits and spam](#rate-limits-and-spam); remaining questions are listed there.
 - **Testing.** A `fourfold test` command that calls handlers with synthetic requests and fake users against a throwaway `data/`. The per-request model makes this easy: a handler is nearly a pure function of the request, `session`, and `data`.
 - **Non-browser clients.** `json()` exists, but CSRF and cookie sessions assume a browser. Mobile apps, scripts, and integrations need API tokens or keys, and CORS rules. Decide whether this is v1 or explicitly later.
 - **Caching:** ETags and `Cache-Control` for static files, response compression, and perhaps caching rendered output.
