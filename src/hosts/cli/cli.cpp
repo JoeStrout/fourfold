@@ -12,7 +12,7 @@ namespace {
 constexpr int kExitOk = 0;
 constexpr int kExitError = 1;
 constexpr int kExitUsage = 2;
-constexpr uint16_t kDefaultPort = 8080;
+constexpr uint16_t kDefaultPort = 8090;
 
 void printUsage(std::ostream& out) {
     out << "Usage: fourfold <command> [arguments]\n"

@@ -8,7 +8,7 @@ wrong.
 ./build/dev/bin/fourfold dev examples/scripts
 ```
 
-Then open http://localhost:8080/.
+Then open http://localhost:8090/.
 
 | File | Shows |
 |---|---|

@@ -20,7 +20,7 @@ ctest --preset dev            # run all tests
 To run a sample app:
 
 ```sh
-./build/dev/bin/fourfold dev examples/static-site     # then open http://localhost:8080/
+./build/dev/bin/fourfold dev examples/static-site     # then open http://localhost:8090/
 ./build/dev/bin/fourfold dev examples/scripts         # pages with MiniScript (M2)
 ```
 

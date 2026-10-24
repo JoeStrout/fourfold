@@ -176,7 +176,7 @@ Implications for the milestones:
 
 ## MS2 issues for later
 
-None blocks M3–M4. The first two matter for M5.
+None blocks M3–M4. The first two matter for M5. Suggested changes, with workarounds and benefits, are kept up to date in [../ms-source-changes.md](../ms-source-changes.md).
 
 | Issue | Why it matters | Current workaround |
 |---|---|---|
