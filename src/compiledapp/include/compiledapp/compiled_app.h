@@ -1,4 +1,4 @@
-// AppImage: an immutable description of one compiled version of the app
+// CompiledApp: an immutable description of one compiled version of the app
 // (Arch §6). It's the only thing the engine knows about the app's code.
 // Plain data and lookups, no logic; the compiler builds it.
 //
@@ -78,7 +78,7 @@ private:
     std::map<RelPath, StaticFile> files_;
 };
 
-struct AppImage {
+struct CompiledApp {
     uint64_t generation = 0;
     RouteTable routes;
     StaticIndex statics;
@@ -86,8 +86,8 @@ struct AppImage {
     std::vector<Diagnostic> diagnostics;    // warnings that didn't stop the build
 };
 
-// A readable listing of the image: every route, then the diagnostics. Used
+// A readable listing of the app: every route, then the diagnostics. Used
 // for golden tests, and later for the dev tools' route report.
-std::string describe(const AppImage& image);
+std::string describe(const CompiledApp& app);
 
 }  // namespace fourfold

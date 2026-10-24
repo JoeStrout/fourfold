@@ -98,7 +98,7 @@ int runDev(const std::vector<std::string>& args, std::ostream& out, std::ostream
         err << "fourfold dev: " << engineCode.error().message << "\n";
         return kExitError;
     }
-    Engine engine(compiled.image, std::move(engineCode).value(), EngineOptions{localhostNames()});
+    Engine engine(compiled.app, std::move(engineCode).value(), EngineOptions{localhostNames()});
 
     auto loop = EventLoop::create();
     if (!loop) {

@@ -2,8 +2,8 @@
 
 namespace fourfold {
 
-Engine::Engine(std::shared_ptr<const AppImage> image, CodeTree code, EngineOptions options)
-    : image_(std::move(image)), code_(std::move(code)), options_(std::move(options)) {}
+Engine::Engine(std::shared_ptr<const CompiledApp> app, CodeTree code, EngineOptions options)
+    : app_(std::move(app)), code_(std::move(code)), options_(std::move(options)) {}
 
 HttpResponse Engine::handle(const HttpRequest& request) const {
     AdmittedRequest admitted;
@@ -11,8 +11,8 @@ HttpResponse Engine::handle(const HttpRequest& request) const {
     if (auto rejected = admit(request, options_, admitted)) {
         response = std::move(*rejected);
     } else {
-        RouteDecision decision = route(admitted, *image_);
-        response = dispatch(decision, *image_, code_);
+        RouteDecision decision = route(admitted, *app_);
+        response = dispatch(decision, *app_, code_);
     }
     addStandardHeaders(response);
     return response;

@@ -2,9 +2,9 @@
 
 namespace fourfold {
 
-RouteDecision route(const AdmittedRequest& request, const AppImage& image) {
+RouteDecision route(const AdmittedRequest& request, const CompiledApp& app) {
     RouteDecision decision;
-    const RouteEntry* entry = image.routes.find(request.path.path);
+    const RouteEntry* entry = app.routes.find(request.path.path);
     if (!entry) return decision;   // NotFound
 
     if (request.method != "GET" && request.method != "HEAD") {

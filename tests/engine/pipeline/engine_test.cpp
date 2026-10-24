@@ -11,7 +11,7 @@ namespace {
 
 RelPath rel(const char* p) { return RelPath::parse(p).value(); }
 
-// A small app: files on disk, and an image built by hand to match (these
+// A small app: files on disk, and a compiled app built by hand to match (these
 // tests are about the pipeline, not the compiler).
 struct App {
     TempDir dir;
@@ -25,21 +25,21 @@ struct App {
         dir.write("code/pages/style.css", "body{}");
         dir.write("code/pages/404.html", "<html>missing</html>");
 
-        auto image = std::make_shared<AppImage>();
-        image->routes.add("/", {RouteKind::Page, rel("pages/index.html")});
-        image->routes.add("/about", {RouteKind::Page, rel("pages/about.html")});
-        image->routes.add("/docs", {RouteKind::Page, rel("pages/docs/index.html"), true});
-        image->routes.add("/evil.com", {RouteKind::Page, rel("pages/evil.com/index.html"), true});
-        image->routes.add("/style.css", {RouteKind::Static, rel("pages/style.css")});
-        image->routes.add("/gone.css", {RouteKind::Static, rel("pages/gone.css")});
-        image->statics.add(rel("pages/style.css"), {"text/css; charset=utf-8", 6, 0});
-        if (withNotFoundPage) image->notFoundPage = rel("pages/404.html");
+        auto compiled = std::make_shared<CompiledApp>();
+        compiled->routes.add("/", {RouteKind::Page, rel("pages/index.html")});
+        compiled->routes.add("/about", {RouteKind::Page, rel("pages/about.html")});
+        compiled->routes.add("/docs", {RouteKind::Page, rel("pages/docs/index.html"), true});
+        compiled->routes.add("/evil.com", {RouteKind::Page, rel("pages/evil.com/index.html"), true});
+        compiled->routes.add("/style.css", {RouteKind::Static, rel("pages/style.css")});
+        compiled->routes.add("/gone.css", {RouteKind::Static, rel("pages/gone.css")});
+        compiled->statics.add(rel("pages/style.css"), {"text/css; charset=utf-8", 6, 0});
+        if (withNotFoundPage) compiled->notFoundPage = rel("pages/404.html");
 
         auto app = AppFolder::open(dir.path(), AppFolder::Missing::Create);
         REQUIRE(app.ok());
         auto code = app.value().codeTree();
         REQUIRE(code.ok());
-        engine = std::make_unique<Engine>(image, std::move(code).value(), options);
+        engine = std::make_unique<Engine>(compiled, std::move(code).value(), options);
     }
 
     HttpResponse get(const std::string& target, const std::string& method = "GET",
@@ -113,7 +113,7 @@ TEST_CASE("Engine: not found uses pages/404.html, with status 404") {
     CHECK_EQ(app.get("/About").status, 404);       // case matters
     CHECK_EQ(app.get("/index").status, 404);
     CHECK_EQ(app.get("/about.html").status, 404);
-    CHECK_EQ(app.get("/gone.css").status, 404);    // in the image, but deleted since
+    CHECK_EQ(app.get("/gone.css").status, 404);    // in the compiled app, but deleted since
 
     App bare(false);
     HttpResponse plain = bare.get("/nope");

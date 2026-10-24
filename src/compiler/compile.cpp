@@ -27,8 +27,8 @@ std::string codeFileName(const RelPath& path) {
 
 CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
     Diagnostics diagnostics;
-    auto image = std::make_shared<AppImage>();
-    image->generation = options.generation;
+    auto app = std::make_shared<CompiledApp>();
+    app->generation = options.generation;
 
     auto listing = code.list();
     if (!listing) {
@@ -42,11 +42,11 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
                             colon == std::string::npos ? "skipped" : skipped.substr(colon + 2) + "; ignored");
     }
 
-    routesPass(listing.value(), *image, diagnostics);
+    routesPass(listing.value(), *app, diagnostics);
 
     if (diagnostics.hasErrors()) return {nullptr, diagnostics.all()};
-    image->diagnostics = diagnostics.warnings();
-    return {std::move(image), diagnostics.all()};
+    app->diagnostics = diagnostics.warnings();
+    return {std::move(app), diagnostics.all()};
 }
 
 }  // namespace fourfold

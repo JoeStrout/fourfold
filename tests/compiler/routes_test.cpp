@@ -23,7 +23,7 @@ CompileOutput compileApp(const std::string& root, AppFolder::Missing missing = A
 
 const RouteEntry* route(const CompileOutput& out, const std::string& url) {
     REQUIRE(out.ok());
-    return out.image->routes.find(url);
+    return out.app->routes.find(url);
 }
 
 bool hasDiagnostic(const CompileOutput& out, const std::string& text) {
@@ -67,7 +67,7 @@ TEST_CASE("compile: pages map to clean URLs") {
         CHECK_EQ(r->source.str(), e.source);
         CHECK_EQ(r->trailingSlash, std::string(e.url) == "/docs");   // only folder index pages
     }
-    CHECK_EQ(out.image->routes.size(), 5u);
+    CHECK_EQ(out.app->routes.size(), 5u);
     CHECK(route(out, "/index") == nullptr);        // one URL per page
     CHECK(route(out, "/about.html") == nullptr);
     CHECK(route(out, "/caps") == nullptr);         // case matters
@@ -81,14 +81,14 @@ TEST_CASE("compile: static files keep their names and get a content type") {
     const RouteEntry* css = route(out, "/style.css");
     REQUIRE(css != nullptr);
     CHECK(css->kind == RouteKind::Static);
-    const StaticFile* f = out.image->statics.find(css->source);
+    const StaticFile* f = out.app->statics.find(css->source);
     REQUIRE(f != nullptr);
     CHECK_EQ(f->contentType, "text/css; charset=utf-8");
     CHECK_EQ(f->size, 6u);
 
     const RouteEntry* png = route(out, "/img/Logo.PNG");
     REQUIRE(png != nullptr);
-    CHECK_EQ(out.image->statics.find(png->source)->contentType, "image/png");
+    CHECK_EQ(out.app->statics.find(png->source)->contentType, "image/png");
 }
 
 TEST_CASE("compile: 404.html is the not-found page, not a route") {
@@ -97,8 +97,8 @@ TEST_CASE("compile: 404.html is the not-found page, not a route") {
     dir.write("code/pages/docs/404.html", "a page that happens to be called 404");
     CompileOutput out = compileApp(dir.path());
     REQUIRE(out.ok());
-    REQUIRE(out.image->notFoundPage.has_value());
-    CHECK_EQ(out.image->notFoundPage->str(), "pages/404.html");
+    REQUIRE(out.app->notFoundPage.has_value());
+    CHECK_EQ(out.app->notFoundPage->str(), "pages/404.html");
     CHECK(route(out, "/404") == nullptr);
     CHECK(route(out, "/docs/404") != nullptr);
 }
@@ -137,8 +137,8 @@ TEST_CASE("compile: warnings don't stop the build") {
     CHECK(hasDiagnostic(out, "code/pages/README: warning: file has no extension"));
     CHECK(hasDiagnostic(out, "code/pages/index.ms: warning: MiniScript and Markdown pages"));
     CHECK(hasDiagnostic(out, "code/pages/linked.css: warning: symbolic link (not followed); ignored"));
-    CHECK_EQ(out.image->diagnostics.size(), out.diagnostics.size());
-    CHECK_EQ(out.image->routes.size(), 1u);
+    CHECK_EQ(out.app->diagnostics.size(), out.diagnostics.size());
+    CHECK_EQ(out.app->routes.size(), 1u);
 }
 
 TEST_CASE("compile: an app with no pages warns") {
@@ -164,7 +164,7 @@ TEST_CASE("contentTypeForExtension") {
 TEST_CASE("compile: golden route table for tests/apps/static-site") {
     CompileOutput out = compileApp(FOURFOLD_TEST_APPS_DIR "/static-site", AppFolder::Missing::Fail);
     REQUIRE(out.ok());
-    std::string actual = describe(*out.image);
+    std::string actual = describe(*out.app);
     std::string goldenPath = FOURFOLD_TESTS_DIR "/compiler/golden/static-site.txt";
     if (std::getenv("FOURFOLD_UPDATE_GOLDEN")) {
         std::ofstream(goldenPath, std::ios::binary) << actual;

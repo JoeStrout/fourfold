@@ -5,7 +5,7 @@
 ## Approach
 
 - **Milestone 1 is a minimal, working skeleton**: it serves static pages, but through the real component structure, so every later milestone fills in a component rather than restructuring one.
-- **After that, risk decides the order.** The milestones that come first are the ones whose outcome could change the design or force large rewrites: the threading model, per-request VM cost, image swapping, and the template security core. Features that are large but well understood (TLS, job scheduling, the dev panels) come later, when the foundations under them are settled.
+- **After that, risk decides the order.** The milestones that come first are the ones whose outcome could change the design or force large rewrites: the threading model, per-request VM cost, swapping compiled apps, and the template security core. Features that are large but well understood (TLS, job scheduling, the dev panels) come later, when the foundations under them are settled.
 - **Each milestone ends with something runnable**, a sample app that exercises what's new, and automated tests. A milestone isn't done until its exit criteria are met, including any measurements.
 - **Security features arrive complete or not at all.** A milestone may leave a feature out, but never ships a weakened version of one. Where an early milestone runs without a protection that comes later (e.g. CSRF before M5), it runs only in dev mode on localhost, and says so at startup.
 
@@ -17,11 +17,11 @@ The risks most likely to change the design, and where each is retired:
 
 | # | Risk | Could force | Retired in |
 |---|---|---|---|
-| R1 | A fresh VM per request is too slow (load image, build `req`, run the file's top level, call the handler) | Rethinking the §2 execution model, e.g. VM reuse with reset | M2 |
+| R1 | A fresh VM per request is too slow (load the compiled app, build `req`, run the file's top level, call the handler) | Rethinking the §2 execution model, e.g. VM reuse with reset | M2 |
 | R2 | Interleaving many VMs on one script thread, with parked VMs for I/O, doesn't work cleanly with MS2's not-done intrinsics, or nests badly (an intrinsic calling back into script) | Redesigning `ScriptHost` and every async intrinsic | M2 |
 | R3 | MS2 can't enforce an instruction budget, or remove compiling intrinsics, without deep changes | Changes to MS2; the sandbox claims of §1 | M2 |
 | R4 | Per-VM memory budgets aren't feasible with a shared GC | The process model (several processes, restarted on overrun) | M2 (decision), M11 (final) |
-| R5 | Compiling (which needs MS2) can't share the script thread without stalling requests; bytecode can't be kept per generation and released safely | Where the compiler runs; bytecode serialization; image ownership | M3 |
+| R5 | Compiling (which needs MS2) can't share the script thread without stalling requests; bytecode can't be kept per generation and released safely | Where the compiler runs; bytecode serialization; ownership of compiled apps | M3 |
 | R6 | The contextual template parser (Go `html/template`-style) is harder in practice than on paper, or too strict for real templates | Template syntax and rules (§4) | M4 |
 | R7 | Session locks and file locks as scheduler waits are awkward, or SQLite-backed state is too slow for every request | Session design (§2), the "all cross-request state in files" rule | M5 |
 | R8 | CGI cold starts are too slow to be usable | Whether CGI mode exists; bytecode serialization priority | M5 (spike), M10 (full) |
@@ -36,7 +36,7 @@ The risks most likely to change the design, and where each is retired:
 
 **Scope:**
 - `base` (`Result`, errors), `partition` (`CodeTree` read-only, path canonicalization, traversal rules).
-- `image`: `AppImage` with a `RouteTable` and `StaticIndex`; no scripts or templates yet.
+- `compiledapp`: `CompiledApp` with a `RouteTable` and `StaticIndex`; no scripts or templates yet.
 - `compiler`: a first pass that scans `code/pages/` and builds routes for `.html` files (`/about` from `about.html`, `index.html` for folders) and static files; route-collision diagnostics.
 - `pipeline` stages Admit, Route, Dispatch (static only), Respond. Lookups only in the route table, never on the filesystem (§5); 404 with `pages/404.html`.
 - `http-server`: HTTP/1.1 on localhost, with the chosen event loop and parser; header and body limits.
@@ -76,17 +76,17 @@ The risks most likely to change the design, and where each is retired:
 
 ---
 
-## M3 — Live recompile and image swap
+## M3 — Live recompile and app swap
 
 **Goal:** the edit → save → see loop of §9. Retires R5.
 
 **Scope:**
-- `lifecycle`: watching `code/`, waiting for quiet, the `.deploy` trigger, compiling a new image while the old one serves, and swapping. A failed compile keeps the old image.
-- Image generations: requests pin a generation; `ScriptHost` owns each generation's bytecode and unroots it when the last request using it finishes.
-- **Decide where compiling runs** (Arch, Open questions): sliced on the script thread, or in a separate process returning a serialized image. Measure the delay a large compile causes to in-flight requests either way.
+- `lifecycle`: watching `code/`, waiting for quiet, the `.deploy` trigger, compiling a new version of the app while the old one serves, and swapping. A failed compile keeps the old version.
+- App generations: requests pin a generation; `ScriptHost` owns each generation's bytecode and unroots it when the last request using it finishes.
+- **Decide where compiling runs** (Arch, Open questions): sliced on the script thread, or in a separate process returning a serialized compiled app. Measure the delay a large compile causes to in-flight requests either way.
 - `Observer` interface, and the first of `devtools`: the error overlay (compile and runtime errors, with file, line, and code), and live reload over SSE (`/__dev/reload`), including CSS swapping in place.
 
-**Exit criteria:** editing an HTML, CSS, or `.ms` file shows up in the browser within about two seconds, without a manual reload; a syntax error shows the overlay and the site keeps serving the last good image; a stress test that swaps images repeatedly under load shows no leaked generations and no GC errors (including with forced full collections between steps).
+**Exit criteria:** editing an HTML, CSS, or `.ms` file shows up in the browser within about two seconds, without a manual reload; a syntax error shows the overlay and the site keeps serving the last good version; a stress test that swaps compiled apps repeatedly under load shows no leaked generations and no GC errors (including with forced full collections between steps).
 
 ---
 
@@ -118,7 +118,7 @@ The risks most likely to change the design, and where each is retired:
 - `flash`.
 - **CSRF:** tokens in every `<form method="post">` and in `hx-headers`, the `Origin` check, and rejection before handlers run. With this, the localhost-only restriction from M2 is lifted for non-dev runs.
 - The engine log in `private/state/logs/`, and the app's `dropbox` writer.
-- **CGI spike (R8):** a minimal CGI adapter running the M5 sample app; measure a cold start (compile, or load a cached image) and a warm one. Decide whether bytecode serialization is needed for v1, and confirm cross-process session locks and counters work.
+- **CGI spike (R8):** a minimal CGI adapter running the M5 sample app; measure a cold start (compile, or load a cached compiled app) and a warm one. Decide whether bytecode serialization is needed for v1, and confirm cross-process session locks and counters work.
 
 **Exit criteria:** the guestbook and a visitor counter persist across restarts; a concurrency test (many clients hitting `data.increment` and one session from several tabs) gives exact counts and no lost updates; a session over the cap returns a 500 without saving; the CGI decision is written down.
 
@@ -170,7 +170,7 @@ The risks most likely to change the design, and where each is retired:
 - Dev mode: automatic migrations after recompiling, the migrations panel, "redo last", "reset dev data", and `seed.ms`.
 - Decide the SQL dialect question (§3, Still open).
 
-**Exit criteria:** a migration that fails partway leaves the database and data files exactly as they were (tested by injecting failures at each step); a long migration under load holds requests and then serves them on the new image; Postgres and SQLite pass the same query tests.
+**Exit criteria:** a migration that fails partway leaves the database and data files exactly as they were (tested by injecting failures at each step); a long migration under load holds requests and then serves them on the new version; Postgres and SQLite pass the same query tests.
 
 ---
 
@@ -183,7 +183,7 @@ The risks most likely to change the design, and where each is retired:
 - `SecretVault` and `SecretRef`, secret handles in scripts, header and URL parts as lists of strings and handles.
 - `webhook.x` handlers with `req.rawBody`, exempt from CSRF.
 - The `mail` intrinsic for app code (from the open question in the overview, if decided by then).
-- `jobs`: `code/jobs/`, the `job` map, `enqueue` with commit-on-success and unique keys, `schedule.ms`, no self-overlap, missed runs run once, retries with backoff, dead jobs, the job budget and worker cap, jobs on whichever image is current.
+- `jobs`: `code/jobs/`, the `job` map, `enqueue` with commit-on-success and unique keys, `schedule.ms`, no self-overlap, missed runs run once, retries with backoff, dead jobs, the job budget and worker cap, jobs on whichever version of the app is current.
 - `push`: SSE channels and `publish`, from requests and jobs.
 - `devtools`: the outbound report, the jobs panel, outbound calls and enqueued jobs in the request inspector.
 
@@ -196,7 +196,7 @@ The risks most likely to change the design, and where each is retired:
 **Goal:** the reduced hosting mode of §8, building on the M5 spike.
 
 **Scope:**
-- The CGI and FastCGI adapters; image caching in `private/state/` (with bytecode serialization, if M5 decided it's needed); recompiling when `code/` changes or `.deploy` is touched.
+- The CGI and FastCGI adapters; caching the compiled app in `private/state/` (with bytecode serialization, if M5 decided it's needed); recompiling when `code/` changes or `.deploy` is touched.
 - File-based locks for sessions and the schema lock; migrations run by the first request that sees new code.
 - `fourfold cgi-setup` (the entry point and `.htaccess`, with the app folder outside the web root); refusing to start if the app folder is inside the web root.
 - `fourfold run-jobs` for cron.

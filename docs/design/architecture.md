@@ -24,7 +24,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 | The GC (`GCManager`) is **process-global static state**, with no locking. Every `Value` that refers to a list, map, big string, function, error, or handle points into it. | **Only one thread may touch `Value`s.** All VMs in a process run on that one thread. (See §3.) |
 | A `ValueDict`/`ValueList` held by host code is **not a GC root** unless wrapped and rooted (`StaticMap`, `AddRoot`). | Host code should hold `Value`s as briefly as possible. Long-lived host state should be in ordinary C++ types, converted to `Value`s on demand. |
 | An intrinsic can return a **not-done `IntrinsicResult`**, and the VM resumes it later; `vm.yielding` lets the host regain control. `RunUntilDone(timeLimit, returnEarly)` runs a time slice. | Many request VMs can be **interleaved on one thread**. An intrinsic that waits on I/O parks its VM instead of blocking the thread. |
-| `Interpreter::Reset(List<FuncDef>)` loads already-compiled functions. | A compiled image can be compiled once and loaded into each fresh VM cheaply (§2 of the overview). |
+| `Interpreter::Reset(List<FuncDef>)` loads already-compiled functions. | An app can be compiled once, and the result loaded into each fresh VM cheaply (§2 of the overview). |
 | **Handles** (`Value::NewHandle(ptr, finalizer)`) are opaque and unforgeable by scripts. | Rendered HTML, secrets, uploads, and DB handles are all handles (§4, §6). |
 | **Frozen** maps and lists exist. | `req`, `req.user`, and `args` are frozen. |
 | `String` (in `CS_String.h`) is `shared_ptr`-based and immutable, *not* GC-managed. `List<T>` and `Dictionary<K,V>` (`CS_List.h`, `CS_Dictionary.h`) are `shared_ptr`-based **reference types** with C# semantics. | These are safe off the script thread, but their reference semantics are surprising in C++ (see §4). |
@@ -34,7 +34,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 - An **instruction budget** per VM (count, then error), separate from wall-clock slices.
 - A **memory budget** per VM. Hard with a shared GC; possible approaches are per-VM allocation counters, or a process-level limit as a backstop (§3).
 - A way to **remove or replace compiling intrinsics** (`import`, any eval-like path) per VM, and an **import resolver hook** so `import` resolves within `code/lib/` through Fourfold.
-- **Bytecode serialization**, so CGI mode can load a cached image rather than recompiling (§8 of the overview). Without it, CGI mode recompiles `.ms` files when its cache is cold.
+- **Bytecode serialization**, so CGI mode can load a cached compiled app rather than recompiling (§8 of the overview). Without it, CGI mode recompiles `.ms` files when its cache is cold.
 - A clean **restricted VM** configuration (no I/O intrinsics) for evaluating declaration and config files as data.
 
 ---
@@ -49,14 +49,14 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
                 ┌──────────────▼───────────────────────────────▼────────────┐
   Engine        │  pipeline   policy   authflow   jobs   push   lifecycle   │
                 └───┬──────────────┬──────────────────┬──────────────┬──────┘
-                 AppImage       RunContext        store interfaces   AppConfig
+                 CompiledApp    RunContext        store interfaces   AppConfig
                 ┌───▼─────┐  ┌─────▼──────┐  ┌────────▼────────┐ ┌───▼─────┐
   Subsystems    │compiler │  │ script     │  │ state  appdata  │ │ config  │
                 │         │  │ (VMs +     │  │ outbound  mail  │ │         │
                 │         │  │  bindings) │  │                 │ │         │
                 └───┬─────┘  └─────┬──────┘  └────────┬────────┘ └───┬─────┘
                 ┌───▼──────────────▼──────────────────▼──────────────▼──────┐
-  Libraries     │  template   markdown   image (the AppImage model)         │
+  Libraries     │  template   markdown   compiledapp (CompiledApp)          │
                 └──────────────────────────────┬────────────────────────────┘
                 ┌──────────────────────────────▼────────────────────────────┐
   Foundation    │  base (Datum, codec, crypto, errors, time)  partition     │
@@ -77,8 +77,8 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 | **sqlite**, **net**, **threads**, **log** | Thin wrappers over third-party libraries and the OS | |
 | **template** | Parse templates with contextual escaping; render them | `CompiledTemplate`, `FieldSource` |
 | **markdown** | Fourfold Markdown (md4c, two profiles) | `renderMarkdown(text, profile)` |
-| **image** | The data model of a compiled app | `AppImage` |
-| **compiler** | `CodeTree` → `AppImage` + diagnostics | `compile(CodeTree, …)` |
+| **compiledapp** | The data model of a compiled app | `CompiledApp` |
+| **compiler** | `CodeTree` → `CompiledApp` + diagnostics | `compile(CodeTree, …)` |
 | **config** | `private/config` + server config → typed, clamped settings | `AppConfig` |
 | **script** | The script thread, VMs, scheduling, budgets, intrinsic modules | `ScriptHost`, `RunContext` |
 | **state** | Engine-owned stores in `private/state/` | `SessionStore`, `AuthStore`, `RateStore`, `JobQueue`, … |
@@ -119,7 +119,7 @@ Quick local work (reading a small template file, serializing a session) may run 
 | **I/O loop** (one, or a few) | Accepts connections, parses HTTP under limits, TLS, writes responses, holds SSE connections |
 | **Script thread** | Runs all VMs; renders templates (field values are `Value`s) |
 | **Worker pool** | SQLite and Postgres queries, file locking and atomic writes, outbound HTTP, DNS, SMTP, backups |
-| **Compile thread** | Builds a new `AppImage` while the old one keeps serving. The compiler needs MS2 to compile `.ms` files, so this step is posted to the script thread in pieces, or the compiler uses a separate process (see Open questions) |
+| **Compile thread** | Builds a new `CompiledApp` while the old one keeps serving. The compiler needs MS2 to compile `.ms` files, so this step is posted to the script thread in pieces, or the compiler uses a separate process (see Open questions) |
 
 ### Using more than one core
 
@@ -211,11 +211,11 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 
 **`markdown`.** `renderMarkdown(text, profile) → Html`, wrapping md4c with the profile rules, the URL rule (shared with `template`), link rewriting (given a route-lookup callback), and the size cap. Pure, and MS2-free.
 
-**`image`.** The data model of a compiled app, with no logic beyond lookups. Described in §6, since it's the most important seam.
+**`compiledapp`.** The data model of a compiled app, with no logic beyond lookups. Described in §6, since it's the most important seam.
 
 ### Subsystems
 
-**`compiler`.** Turns a snapshot of `CodeTree` into an `AppImage` plus a list of diagnostics (errors and warnings, each with file, line, and message). It:
+**`compiler`.** Turns a snapshot of `CodeTree` into an `CompiledApp` plus a list of diagnostics (errors and warnings, each with file, line, and message). It:
 
 - parses templates and Markdown (via `template` and `markdown`);
 - compiles `.ms` files into bytecode (via `script`'s `ScriptCompiler`, which takes `CodeFile`s);
@@ -223,7 +223,7 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 - builds the route table and computes each route's effective access, limits, and form spec;
 - runs the cross-checks: route collisions, unmatched access rules, forms against templates, links between `.md` files, jobs named by the schedule, migration numbering and checksums.
 
-The compiler is, apart from its use of `script`, **a pure function from files to an image**. It touches no stores and no network. That makes it the natural place for golden tests ("this app folder compiles to this route-table dump, with these diagnostics"), and the access report is just a printout of its output.
+The compiler is, apart from its use of `script`, **a pure function from files to a compiled app**. It touches no stores and no network. That makes it the natural place for golden tests ("this app folder compiles to this route-table dump, with these diagnostics"), and the access report is just a printout of its output.
 
 Internally it's a set of passes over a shared in-progress model, so each feature (forms, Markdown, migrations) adds a pass without disturbing the others.
 
@@ -233,14 +233,14 @@ Internally it's a set of passes over a shared in-progress model, so each feature
 
 - `ScriptCompiler`: `CodeFile` → compiled unit (bytecode + the declarations found at top level).
 - `DataEvaluator`: runs a declaration or config file in a restricted VM; returns a `Datum`.
-- `ScriptHost`: the script thread and its scheduler. Its main call is "run this handler, in this image, with this `RunContext`, and tell me the outcome".
+- `ScriptHost`: the script thread and its scheduler. Its main call is "run this handler, in this compiled app, with this `RunContext`, and tell me the outcome".
 
 The **`RunContext`** is the seam between the engine and the script bindings. It's a struct of service interfaces and request facts that one run may use:
 
 ```cpp
 struct RunContext {
     RunKind kind;                      // Request, Job, Migration, Seed
-    const AppImage& image;
+    const CompiledApp& app;
     const RequestFacts* request;       // null for jobs and migrations
     SessionAccess* session;            // null if there's no session in this kind of run
     DataFiles* data;
@@ -273,11 +273,11 @@ Each store's interface deals in `Datum`, bytes, and plain structs. Redis or Post
 **`appdata`.** The app's own data, in `data/` or a configured database:
 
 - `DataFiles`: Tier 1 operations (get, set, update, append, increment, compare-and-swap), on `DataDir`.
-- `Database`: the connection pool and named-query execution. `query()` takes a `NamedQuery`, constructible only from the image, so SQL injection is a type error (§3). Postgres and SQLite are implementations behind one interface.
-- `Migrator`: applies a list of migrations from the image, with checksum records, using `script` (via an engine-supplied callback) for `.ms` migrations.
+- `Database`: the connection pool and named-query execution. `query()` takes a `NamedQuery`, constructible only from the compiled app, so SQL injection is a type error (§3). Postgres and SQLite are implementations behind one interface.
+- `Migrator`: applies a list of migrations from the compiled app, with checksum records, using `script` (via an engine-supplied callback) for `.ms` migrations.
 - `BackupService`: consistent snapshots of `data/` and `private/state/`.
 
-**`outbound`.** `OutboundClient::send(OutboundRequest)` where header and URL parts are `std::variant<std::string, SecretRef>`. The client checks the allowlist (from the image) and the host config's tightening, resolves DNS, checks and pins IPs, follows redirects, enforces limits, and **substitutes secret values only as the bytes go out**. A `SecretRef` is a name; the script side wraps it in a handle. The secret's value never exists on the script thread, so no script bug can leak it into a page or a log.
+**`outbound`.** `OutboundClient::send(OutboundRequest)` where header and URL parts are `std::variant<std::string, SecretRef>`. The client checks the allowlist (from the compiled app) and the host config's tightening, resolves DNS, checks and pins IPs, follows redirects, enforces limits, and **substitutes secret values only as the bytes go out**. A `SecretRef` is a name; the script side wraps it in a handle. The secret's value never exists on the script thread, so no script bug can leak it into a page or a log.
 
 **`mail`.** `Mailer::send(Message)` with structured fields only (no raw headers). Used by `authflow` for magic links and by the `mail` intrinsic.
 
@@ -286,7 +286,7 @@ Each store's interface deals in `Datum`, bytes, and plain structs. Redis or Post
 **`pipeline`.** The request path, as a fixed sequence of small stages. Each takes and returns plain structs, so stages can be tested and reordered independently:
 
 1. **Admit:** check `Host`, determine `req.ip` (trusted proxies), canonicalize the path. (From `HttpRequest`.)
-2. **Route:** pin the current `AppImage` and `AppConfig` (`shared_ptr<const …>`), take the schema lock shared, and look the route up. Not found → 404.
+2. **Route:** pin the current `CompiledApp` and `AppConfig` (`shared_ptr<const …>`), take the schema lock shared, and look the route up. Not found → 404.
 3. **Identify:** read the session cookie, hash the ID, look up the user in `AuthStore`. The session's app part isn't loaded yet.
 4. **Gate:** `policy` decides allow or deny.
 5. **Parse:** parse the body under limits, then normalize and validate it against the route's `FormSpec`, giving `req.form`, `req.errors`, and `req.files`.
@@ -304,7 +304,7 @@ Reserved prefixes (`/__auth/`, `/__fourfold/`, `/__dev/`) are routed to their ow
 
 **`push`.** `PushHub`: channels mapped to subscriber connections, which the I/O loop owns. `publish` posts `(channel, Html)` from the script thread to the hub. Absent in CGI mode, so the `publish` service pointer is null there.
 
-**`lifecycle`.** `AppInstance` owns everything for one running app: the current `AppImage` and `AppConfig`, the stores, and the services. It watches `code/` and `private/config/` (waiting for quiet), runs the compiler, and performs the drain–backup–migrate–swap sequence (§3) using the schema lock. It also refuses unsafe swaps, such as code older than the applied migrations. Compiling, migrating, and serving are separate components; `lifecycle` is the only one that knows the order they happen in.
+**`lifecycle`.** `AppInstance` owns everything for one running app: the current `CompiledApp` and `AppConfig`, the stores, and the services. It watches `code/` and `private/config/` (waiting for quiet), runs the compiler, and performs the drain–backup–migrate–swap sequence (§3) using the schema lock. It also refuses unsafe swaps, such as code older than the applied migrations. Compiling, migrating, and serving are separate components; `lifecycle` is the only one that knows the order they happen in.
 
 ### Hosts
 
@@ -322,12 +322,12 @@ Dev mode's *behavioral* differences (unprefixed cookies over plain HTTP, minimal
 
 Most of the independence comes from five types. If these stay stable, work on either side of each one can proceed without the other.
 
-### `AppImage` (compiler → everything else)
+### `CompiledApp` (compiler → everything else)
 
-An immutable, self-contained description of one version of the app. It's the only thing the engine knows about the app's code.
+An immutable, self-contained description of one version of the app. It's the only thing the engine knows about the app's code. (Other systems call this an "image"; we don't, since in a web server that word suggests a picture.)
 
 ```cpp
-struct AppImage {
+struct CompiledApp {
     uint64_t generation;
     RouteTable routes;                    // canonical path → RouteEntry; plus parameterized routes
     TemplateSet templates;                // pages/ and frags/, by name
@@ -355,9 +355,9 @@ struct RouteEntry {
 
 Everything the request path needs is already resolved: the route's effective access, its limits, and its form spec. The engine does lookups, never pattern matching or rule combination (§5, Access is resolved per route).
 
-**The script half.** Compiled bytecode is made of MS2 objects, which live in the script thread's GC. So `ScriptUnits` holds opaque `ScriptUnitRef`s, and the bytecode itself is owned by `ScriptHost`, keyed by image generation. When the last request using an old image finishes, `ScriptHost` unroots that generation's bytecode. Everything else in `AppImage` is plain C++ and can be read from any thread.
+**The script half.** Compiled bytecode is made of MS2 objects, which live in the script thread's GC. So `ScriptUnits` holds opaque `ScriptUnitRef`s, and the bytecode itself is owned by `ScriptHost`, keyed by app generation. When the last request using an old compiled app finishes, `ScriptHost` unroots that generation's bytecode. Everything else in `CompiledApp` is plain C++ and can be read from any thread.
 
-**Serialization.** CGI mode caches the image in `private/state/`. The plain C++ parts serialize easily. The bytecode needs MS2 support (§1); until then, a CGI cold start recompiles the `.ms` files.
+**Serialization.** CGI mode caches the compiled app in `private/state/`. The plain C++ parts serialize easily. The bytecode needs MS2 support (§1); until then, a CGI cold start recompiles the `.ms` files.
 
 ### `HttpRequest` / `HttpResponse` (transports → engine)
 
@@ -399,7 +399,7 @@ Several of the overview's guarantees can be made structural in the C++ code itse
 A `POST /guestbook/sign` from a signed-in visitor, with HTMX:
 
 1. `http-server` parses the request under its limits and hands an `HttpRequest` to `Engine::handle`.
-2. `pipeline` admits it, pins image generation 42, finds the `RouteEntry` (kind Handler; `post.sign` in `pages/guestbook.ms`; access `login`; limits `5/minute`, `50/day`; a `FormSpec`).
+2. `pipeline` admits it, pins app generation 42, finds the `RouteEntry` (kind Handler; `post.sign` in `pages/guestbook.ms`; access `login`; limits `5/minute`, `50/day`; a `FormSpec`).
 3. It reads the session cookie and looks up the user in `AuthStore` (on the worker pool).
 4. `policy` checks login (yes), the CSRF token and `Origin` (valid), and the rate limits (`RateStore`, within limits). It returns a `GateApproval`.
 5. `pipeline` parses and validates the form, producing `req.form` and `req.errors` as `Datum`s.
@@ -421,7 +421,7 @@ fourfold/
     platform/      sqlite, net, threads, log
     template/
     markdown/
-    image/
+    compiledapp/
     compiler/      one file per pass
     config/
     script/        host/, bridge/, modules/ (one file per intrinsic module)
@@ -462,7 +462,7 @@ Some examples of changes, and what each one touches:
 
 ## Open questions
 
-- **Where the compiler's MS2 work runs.** The compiler needs MS2 to compile `.ms` files and evaluate declarations, but MS2 work must happen on the script thread. Options: run compile steps on the script thread in slices (simple, but a big compile delays requests); compile in a separate short-lived process that hands back a serialized image (isolated, and the same path CGI uses, but needs bytecode serialization); or a second GC heap once MS2 supports per-thread GCs.
+- **Where the compiler's MS2 work runs.** The compiler needs MS2 to compile `.ms` files and evaluate declarations, but MS2 work must happen on the script thread. Options: run compile steps on the script thread in slices (simple, but a big compile delays requests); compile in a separate short-lived process that hands back a serialized compiled app (isolated, and the same path CGI uses, but needs bytecode serialization); or a second GC heap once MS2 supports per-thread GCs.
 - **Per-VM memory budgets** with a shared GC. Maybe per-VM allocation accounting in MS2; otherwise a process-level limit plus restarting a worker process that exceeds it, which favors the several-processes model.
 - **Event loop and HTTP stack.** Asio vs. libuv vs. a small hand-rolled loop. HTTP/2 and TLS tilt toward existing libraries.
 - **`Datum` serialization format.** JSON is debuggable and matches `json()`; a binary format is smaller and faster. Possibly JSON first, behind the codec, so it can change later.

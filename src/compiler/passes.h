@@ -1,12 +1,12 @@
 // The compiler's passes, each in its own file. A pass reads the listing (and
-// files, through the CodeTree), adds to the image under construction, and
+// files, through the CodeTree), adds to the app under construction, and
 // reports problems through the Diagnostics it's given.
 #pragma once
 
 #include <string>
 #include <vector>
 
-#include "image/app_image.h"
+#include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
 
 namespace fourfold {
@@ -29,6 +29,6 @@ private:
 std::string codeFileName(const RelPath& path);
 
 // Routes for code/pages/: pages, static files, and the 404 page.
-void routesPass(const CodeListing& listing, AppImage& image, Diagnostics& diagnostics);
+void routesPass(const CodeListing& listing, CompiledApp& app, Diagnostics& diagnostics);
 
 }  // namespace fourfold

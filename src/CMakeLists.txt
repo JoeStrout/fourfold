@@ -13,14 +13,14 @@ fourfold_component(partition DEPS base)             # the four file areas; path 
 fourfold_component(platform DEPS base)             # event loop, sockets; later threads, log, sqlite
 
 # --- Libraries ---
-fourfold_component(image DEPS base partition)      # AppImage: the compiled app
+fourfold_component(compiledapp DEPS base partition)   # CompiledApp: the compiled form of an app
 
 # --- Subsystems ---
-fourfold_component(compiler DEPS base partition image)
+fourfold_component(compiler DEPS base partition compiledapp)
 
 # --- Engine ---
 fourfold_component(http DIR engine/http)           # HttpRequest/HttpResponse
-fourfold_component(pipeline DIR engine/pipeline DEPS base partition image http)
+fourfold_component(pipeline DIR engine/pipeline DEPS base partition compiledapp http)
 
 # --- Hosts ---
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)

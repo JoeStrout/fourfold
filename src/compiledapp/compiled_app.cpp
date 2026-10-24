@@ -1,4 +1,4 @@
-#include "image/app_image.h"
+#include "compiledapp/compiled_app.h"
 
 namespace fourfold {
 
@@ -36,19 +36,19 @@ const StaticFile* StaticIndex::find(const RelPath& source) const {
     return it == files_.end() ? nullptr : &it->second;
 }
 
-std::string describe(const AppImage& image) {
+std::string describe(const CompiledApp& app) {
     std::string s = "routes:\n";
-    for (const auto& [path, entry] : image.routes) {
+    for (const auto& [path, entry] : app.routes) {
         s += "  " + path + (entry.trailingSlash ? "/" : "") + "  " + routeKindName(entry.kind) + "  " +
              entry.source.str();
         if (entry.kind == RouteKind::Static) {
-            if (const StaticFile* f = image.statics.find(entry.source)) s += "  " + f->contentType;
+            if (const StaticFile* f = app.statics.find(entry.source)) s += "  " + f->contentType;
         }
         s += "\n";
     }
-    s += "not found page: " + (image.notFoundPage ? image.notFoundPage->str() : std::string("(none)")) + "\n";
+    s += "not found page: " + (app.notFoundPage ? app.notFoundPage->str() : std::string("(none)")) + "\n";
     s += "diagnostics:\n";
-    for (const Diagnostic& d : image.diagnostics) s += "  " + d.toString() + "\n";
+    for (const Diagnostic& d : app.diagnostics) s += "  " + d.toString() + "\n";
     return s;
 }
 

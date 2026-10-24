@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "http/message.h"
-#include "image/app_image.h"
+#include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
 #include "partition/paths.h"
 
@@ -38,7 +38,7 @@ struct AdmittedRequest {
 std::optional<HttpResponse> admit(const HttpRequest& request, const EngineOptions& options,
                                   AdmittedRequest& out);
 
-// --- Route: look the path up in the image's route table. ---
+// --- Route: look the path up in the app's route table. ---
 
 struct RouteDecision {
     enum class Kind {
@@ -52,11 +52,11 @@ struct RouteDecision {
     std::string location;                // when Redirect
 };
 
-RouteDecision route(const AdmittedRequest& request, const AppImage& image);
+RouteDecision route(const AdmittedRequest& request, const CompiledApp& app);
 
 // --- Dispatch: produce the response content. ---
 
-HttpResponse dispatch(const RouteDecision& decision, const AppImage& image, const CodeTree& code);
+HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, const CodeTree& code);
 
 // --- Respond: headers every response gets. ---
 

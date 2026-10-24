@@ -39,19 +39,19 @@ std::string urlFor(const std::vector<std::string_view>& segments, std::string_vi
     return url.empty() ? "/" : url;
 }
 
-void addRoute(AppImage& image, Diagnostics& diagnostics, const std::string& url, RouteEntry entry) {
-    const RouteEntry* existing = image.routes.find(url);
+void addRoute(CompiledApp& app, Diagnostics& diagnostics, const std::string& url, RouteEntry entry) {
+    const RouteEntry* existing = app.routes.find(url);
     if (existing) {
         diagnostics.error(codeFileName(entry.source), "URL " + url + " is also served by " +
                                                           codeFileName(existing->source));
         return;
     }
-    image.routes.add(url, std::move(entry));
+    app.routes.add(url, std::move(entry));
 }
 
 }  // namespace
 
-void routesPass(const CodeListing& listing, AppImage& image, Diagnostics& diagnostics) {
+void routesPass(const CodeListing& listing, CompiledApp& app, Diagnostics& diagnostics) {
     const RelPath pages = RelPath::parse("pages").value();
     bool anyPages = false;
 
@@ -76,18 +76,18 @@ void routesPass(const CodeListing& listing, AppImage& image, Diagnostics& diagno
 
         if (extension == ".html") {
             if (segments.size() == 2 && name == "404.html") {
-                image.notFoundPage = file.path;
+                app.notFoundPage = file.path;
                 continue;
             }
             std::string_view stem = name.substr(0, name.size() - extension.size());
             bool isIndex = stem == "index";
             std::string url = urlFor(segments, isIndex ? std::string_view() : stem);
-            addRoute(image, diagnostics, url, {RouteKind::Page, file.path, isIndex && url != "/"});
+            addRoute(app, diagnostics, url, {RouteKind::Page, file.path, isIndex && url != "/"});
         } else if (extension == ".ms" || extension == ".md") {
             diagnostics.warning(fileName, "MiniScript and Markdown pages aren't supported yet; ignored");
         } else if (const char* type = contentTypeForExtension(extension)) {
-            addRoute(image, diagnostics, urlFor(segments, name), {RouteKind::Static, file.path});
-            image.statics.add(file.path, {type, file.size, file.modifiedNs});
+            addRoute(app, diagnostics, urlFor(segments, name), {RouteKind::Static, file.path});
+            app.statics.add(file.path, {type, file.size, file.modifiedNs});
         } else {
             diagnostics.warning(fileName, extension.empty()
                                               ? "file has no extension, so no known type; not served"

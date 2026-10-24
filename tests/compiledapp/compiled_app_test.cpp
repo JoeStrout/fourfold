@@ -1,4 +1,4 @@
-#include "image/app_image.h"
+#include "compiledapp/compiled_app.h"
 
 #include "doctest.h"
 
@@ -17,13 +17,13 @@ TEST_CASE("RouteTable: exact lookups, no duplicates") {
 }
 
 TEST_CASE("describe and Diagnostic::toString") {
-    AppImage image;
+    CompiledApp app;
     RelPath css = RelPath::parse("pages/style.css").value();
-    image.routes.add("/style.css", {RouteKind::Static, css});
-    image.statics.add(css, {"text/css; charset=utf-8", 10, 0});
-    image.routes.add("/", {RouteKind::Page, RelPath::parse("pages/index.html").value()});
-    image.diagnostics.push_back({Diagnostic::Severity::Warning, "code/pages/x.xyz", 0, "unknown"});
-    CHECK_EQ(describe(image),
+    app.routes.add("/style.css", {RouteKind::Static, css});
+    app.statics.add(css, {"text/css; charset=utf-8", 10, 0});
+    app.routes.add("/", {RouteKind::Page, RelPath::parse("pages/index.html").value()});
+    app.diagnostics.push_back({Diagnostic::Severity::Warning, "code/pages/x.xyz", 0, "unknown"});
+    CHECK_EQ(describe(app),
              "routes:\n"
              "  /  page  pages/index.html\n"
              "  /style.css  static  pages/style.css  text/css; charset=utf-8\n"

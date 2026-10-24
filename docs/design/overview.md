@@ -32,7 +32,7 @@ Each app's files are split into four partitions, which are separate directory tr
 | **Data** `data/` | App data files, SQLite databases, user uploads | Read + write | Read + write |
 | **Dropbox** `dropbox/` | The app's own log files and other append-only output | Write / append only | Write / append only |
 | **Private** `private/config/` | App config, secrets (see §10) | Read only | None |
-| **Private** `private/state/` | Auth store, session store, rate-limit counters, compiled-image cache, engine logs | Read + write | None |
+| **Private** `private/state/` | Auth store, session store, rate-limit counters, compiled-app cache, engine logs | Read + write | None |
 
 ```
 myapp/
@@ -81,7 +81,7 @@ The developer can read, edit, move, and delete files in all the partitions, both
 Each HTTP request runs in a **fresh MiniScript VM**, discarded when the request finishes.
 
 - Between requests, the only things that persist are the read-only code and inert data (the `data` and `session` stores). No in-memory state can build up or linger.
-- **Startup cost:** the code partition is compiled once into a frozen bytecode image shared across all request VMs. Each request only allocates its own locals and globals.
+- **Startup cost:** the code partition is compiled once into frozen bytecode shared across all request VMs. Each request only allocates its own locals and globals.
 - **Resource budgets:** each request gets limits on instructions, memory, and wall-clock time, set in the host config. An infinite loop produces a friendly error, not an outage.
 
 ### Three scopes of state
@@ -239,7 +239,7 @@ schedule["report"]    = "0 6 1 * *"           // plain cron syntax also works
 - A failed job is retried with exponential backoff, up to a limit (default 5 attempts). After that it's marked **dead**: kept with its last error, written to the engine log, and shown in the dev tools.
 - **Jobs have their own budget**, set in the host config and separate from request budgets. The default wall-clock time is longer, e.g. 60 seconds.
 - **Jobs can't starve requests:** they run on a separate, capped worker pool (default: a couple of workers).
-- **Deploys:** a job runs on whichever image is current when it starts. If a deploy removes a job that still has queued entries, the compile step warns, and those entries go dead when they come up rather than vanishing silently.
+- **Deploys:** a job runs on whichever version of the app is current when it starts. If a deploy removes a job that still has queued entries, the compile step warns, and those entries go dead when they come up rather than vanishing silently.
 
 #### Dev mode
 
@@ -322,23 +322,23 @@ The record of applied migrations is stored **with the data it describes**, so re
 
 #### Applying migrations: drain, migrate, swap
 
-Pending migrations are applied as part of the whole-image compile and swap (§8):
+Pending migrations are applied as part of the whole-app compile and swap (§8):
 
-1. The new image compiles. If it fails, nothing else happens; the old image keeps serving.
+1. The new version compiles. If it fails, nothing else happens; the old version keeps serving.
 2. If it has no pending migrations, it's swapped in as usual. Most deploys stop here.
 3. Otherwise the engine **stops starting new requests and jobs**. New requests wait in a queue instead of failing.
-4. It **waits for in-flight requests and jobs** on the old image to finish (each is bounded by its budget).
+4. It **waits for in-flight requests and jobs** on the old version to finish (each is bounded by its budget).
 5. It **takes a backup** (below).
 6. It **runs the pending migrations in order.** Each `.sql` migration runs in its own transaction; SQLite and Postgres both support transactional schema changes.
-7. **On success:** the new image is swapped in and the queued requests proceed on it.
-   **On failure:** the database and data files are restored to the pre-migration backup, the old image resumes, and the error goes to the engine log (and the dev overlay). The site never runs old code against a new schema, or new code against an old one.
+7. **On success:** the new version is swapped in and the queued requests proceed on it.
+   **On failure:** the database and data files are restored to the pre-migration backup, the old version resumes, and the error goes to the engine log (and the dev overlay). The site never runs old code against a new schema, or new code against an old one.
 
-- **No old-image request ever sees the new schema**, because there are none left running when migration starts. That's the simplest rule that's always correct, and the pause is a second or less for typical hobby-scale migrations.
+- **No request on the old version ever sees the new schema**, because there are none left running when migration starts. That's the simplest rule that's always correct, and the pause is a second or less for typical hobby-scale migrations.
 - **If a migration runs long**, queued requests wait up to a configured limit (e.g. 30 seconds), then get a 503 with `pages/503.html` if it exists ("down for maintenance; back shortly"). Long migrations (an index on a big table) get their own generous budget, separate from requests and jobs.
 - **The same lock works in every hosting mode.** Every request and job holds a shared "schema lock" while it runs; the migrator takes it exclusively. In standalone mode this is in memory; in CGI mode it's a file lock in `private/state/`, so independent CGI processes coordinate too. In CGI mode, the first request that sees new code runs the migrations while later ones wait.
-- **Rolling back code past a migration is refused.** If the database is at migration 7 and the new image only knows 1–5 (an older version of the code was deployed), the swap is refused with a clear error, since old code would run against a schema it doesn't understand. The fix is to restore a backup, or deploy code that includes the migrations. An explicit override exists for emergencies.
+- **Rolling back code past a migration is refused.** If the database is at migration 7 and the new version only knows 1–5 (an older version of the code was deployed), the swap is refused with a clear error, since old code would run against a schema it doesn't understand. The fix is to restore a backup, or deploy code that includes the migrations. An explicit override exists for emergencies.
 
-**Considered: online ("expand/contract") migrations**, where migrations run while the old image is still serving and must therefore be compatible with both old and new code (add a column in one deploy, start using it in the next, drop the old one in a third). This avoids the pause but asks for discipline most hobby apps don't need. It may come later as an opt-in deploy mode for large apps.
+**Considered: online ("expand/contract") migrations**, where migrations run while the old version is still serving and must therefore be compatible with both old and new code (add a column in one deploy, start using it in the next, drop the old one in a third). This avoids the pause but asks for discipline most hobby apps don't need. It may come later as an opt-in deploy mode for large apps.
 
 #### What migrations don't cover
 
@@ -844,7 +844,7 @@ There's no per-handler form of `access =` in `.ms` files; exceptions within a fi
 
 ### Access is resolved per route, at compile time
 
-The compiled image contains a **route table** of every URL the app can serve: pages, `get`/`post` handlers, routes-table entries (including parameterized ones like `/user/{id}`), and static files. The compiler calculates each route's effective access level once and stores it on the route entry. At request time there is no pattern matching:
+The compiled app contains a **route table** of every URL the app can serve: pages, `get`/`post` handlers, routes-table entries (including parameterized ones like `/user/{id}`), and static files. The compiler calculates each route's effective access level once and stores it on the route entry. At request time there is no pattern matching:
 
 1. The request path is canonicalized once: percent-decoded, repeated slashes collapsed, dot segments rejected. Matching is case-sensitive.
 2. The route is looked up in the compiled table, **never on the filesystem**. A path not in the table is a 404.
@@ -1110,7 +1110,7 @@ No VM lives beyond its request, so the core security property still holds. WebSo
 ## 8. Deployment
 
 - The developer uploads files with plain **scp/rsync**. No special tooling is required.
-- **Whole-image compile and swap:** the engine compiles the entire code tree into a single image, then swaps it in atomically. If anything fails to compile, it keeps serving the old image and logs the error, so a broken or partial upload never takes the site down. Requests already running finish on the old image; new requests get the new one. If the new image has pending migrations, the swap waits for them (see §3, [Schema changes and migrations](#schema-changes-and-migrations)).
+- **Whole-app compile and swap:** the engine compiles the entire code tree into a single compiled app, then swaps it in atomically. If anything fails to compile, it keeps serving the old version and logs the error, so a broken or partial upload never takes the site down. Requests already running finish on the old version; new requests get the new one. If the new version has pending migrations, the swap waits for them (see §3, [Schema changes and migrations](#schema-changes-and-migrations)).
 - **Wait for quiet:** the engine watches `code/` and recompiles only once files have stopped changing for a second or two. Optionally, touching a trigger file (e.g. `code/.deploy`) means "load now."
 - An optional `fourfold deploy` wrapper could rsync to a staging folder and then swap directories atomically.
 - **Deploys should only touch `code/`.** The docs must warn that, for example, `rsync --delete` of the whole tree from a laptop would wipe production data.
@@ -1133,7 +1133,7 @@ But nearly every shared host runs CGI, and many run FastCGI. The execution model
 | | **Standalone server** (primary) | **CGI / FastCGI** (reduced) |
 |---|---|---|
 | Typical host | VPS, container platform, own machine; `fourfold dev` | Shared hosting behind Apache |
-| Startup per request | none (image held in memory) | loads the compiled image from `private/state/` (CGI); none once warm (FastCGI) |
+| Startup per request | none (compiled app held in memory) | loads the compiled app from `private/state/` (CGI); none once warm (FastCGI) |
 | Recompile on change | file watcher, wait for quiet | checked on request (`code/` changed, or `.deploy` touched) |
 | SSE push (§7) | yes | **no**: fall back to HTMX polling (`hx-trigger="every 5s"`) |
 | OS-level enforcement (§1) | separate engine user, read-only `code/` | **engine-only**: under suEXEC the engine runs as the developer |
