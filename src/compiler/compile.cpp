@@ -1,5 +1,7 @@
 #include "compiler/compiler.h"
 
+#include <cctype>
+
 #include "passes.h"
 
 namespace fourfold {
@@ -25,6 +27,12 @@ std::string codeFileName(const RelPath& path) {
     return path.isRoot() ? "code" : "code/" + path.str();
 }
 
+std::string lowerExtension(const RelPath& path) {
+    std::string result;
+    for (char c : path.extension()) result += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return result;
+}
+
 CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
     Diagnostics diagnostics;
     auto app = std::make_shared<CompiledApp>();
@@ -42,7 +50,9 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
                             colon == std::string::npos ? "skipped" : skipped.substr(colon + 2) + "; ignored");
     }
 
-    routesPass(listing.value(), *app, diagnostics);
+    templatesPass(listing.value(), code, *app, diagnostics);
+    auto handlers = scriptsPass(listing.value(), code, options.scripts, *app, diagnostics);
+    routesPass(listing.value(), handlers, *app, diagnostics);
 
     if (diagnostics.hasErrors()) return {nullptr, diagnostics.all()};
     app->diagnostics = diagnostics.warnings();

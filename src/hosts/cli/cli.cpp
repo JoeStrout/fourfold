@@ -3,11 +3,7 @@
 #include <ostream>
 
 #include "base/version.h"
-#include "compiler/compiler.h"
-#include "httpserver/http_server.h"
-#include "partition/app_folder.h"
-#include "pipeline/engine.h"
-#include "platform/event_loop.h"
+#include "dev_server.h"
 
 namespace fourfold::cli {
 
@@ -75,53 +71,16 @@ int runDev(const std::vector<std::string>& args, std::ostream& out, std::ostream
         return kExitUsage;
     }
 
-    auto app = AppFolder::open(dev.folder, AppFolder::Missing::Create);
-    if (!app) {
-        err << "fourfold dev: " << app.error().message << "\n";
-        return kExitError;
-    }
-    auto code = app.value().codeTree();
-    if (!code) {
-        err << "fourfold dev: " << code.error().message << "\n";
-        return kExitError;
-    }
+    auto server = DevServer::start(dev.folder, dev.port, out, err);
+    if (!server) return kExitError;
 
-    CompileOutput compiled = compile(code.value());
-    for (const Diagnostic& d : compiled.diagnostics) err << d.toString() << "\n";
-    if (!compiled.ok()) {
-        err << "fourfold dev: the app didn't compile.\n";
-        return kExitError;
-    }
-    // Code is read again per request, through a CodeTree of its own.
-    auto engineCode = app.value().codeTree();
-    if (!engineCode) {
-        err << "fourfold dev: " << engineCode.error().message << "\n";
-        return kExitError;
-    }
-    Engine engine(compiled.app, std::move(engineCode).value(), EngineOptions{localhostNames()});
-
-    auto loop = EventLoop::create();
-    if (!loop) {
-        err << "fourfold dev: " << loop.error().message << "\n";
-        return kExitError;
-    }
-    HttpServer server(*loop.value(), [&](HttpRequest request, Responder respond) {
-        HttpResponse response = engine.handle(request);
-        out << request.method << " " << request.target << " " << response.status << std::endl;
-        respond(std::move(response));
-    });
-    // Localhost only: dev mode lacks protections that later milestones add.
-    if (Status s = server.listen("127.0.0.1", dev.port); !s) {
-        err << "fourfold dev: can't listen on port " << dev.port << ": " << s.error().message << "\n";
-        return kExitError;
-    }
-
-    out << "Fourfold " << versionString() << ", serving " << app.value().root() << "\n"
-        << "  http://localhost:" << server.port() << "/\n"
-        << "Dev mode: localhost only. This build has no CSRF protection, sign-in, or\n"
-        << "recompiling yet; restart to see changes. Press Ctrl-C to stop.\n"
+    out << "Fourfold " << versionString() << ", serving " << server->root() << "\n"
+        << "  http://localhost:" << server->port() << "/\n"
+        << "Dev mode: localhost only. This build has no CSRF protection or sign-in yet,\n"
+        << "so it never listens on other addresses. No recompiling yet either: restart\n"
+        << "to see changes. Press Ctrl-C to stop.\n"
         << std::flush;
-    loop.value()->run();
+    server->loop().run();
     return kExitOk;
 }
 

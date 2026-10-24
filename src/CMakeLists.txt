@@ -13,16 +13,19 @@ fourfold_component(partition DEPS base)             # the four file areas; path 
 fourfold_component(platform DEPS base)             # event loop, sockets; later threads, log, sqlite
 
 # --- Libraries ---
-fourfold_component(compiledapp DEPS base partition)   # CompiledApp: the compiled form of an app
+fourfold_component(template DEPS base partition)      # M2: text-only fields; the full engine is M4
+fourfold_component(compiledapp DEPS base partition template)   # CompiledApp: the compiled form of an app
 
 # --- Subsystems ---
-fourfold_component(compiler DEPS base partition compiledapp)
+fourfold_component(script DEPS base partition platform template compiledapp
+    LIBS fourfold::ms2)                                 # the script thread; the only user of MS2
+fourfold_component(compiler DEPS base partition template compiledapp script)
 
 # --- Engine ---
 fourfold_component(http DIR engine/http)           # HttpRequest/HttpResponse
-fourfold_component(pipeline DIR engine/pipeline DEPS base partition compiledapp http)
+fourfold_component(pipeline DIR engine/pipeline DEPS base partition template compiledapp script http)
 
 # --- Hosts ---
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)
 fourfold_executable(fourfold DIR hosts/cli
-    DEPS base partition compiler pipeline platform httpserver)
+    DEPS base partition script compiler pipeline platform httpserver)

@@ -9,11 +9,15 @@
 
 #include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
+#include "script/script_host.h"
 
 namespace fourfold {
 
 struct CompileOptions {
     uint64_t generation = 1;
+    // Compiles the .ms files (normally the ScriptHost). Required if there are
+    // any; an app without code compiles without it.
+    ScriptCompiler* scripts = nullptr;
 };
 
 struct CompileOutput {

@@ -28,8 +28,16 @@ TEST_CASE("describe and Diagnostic::toString") {
              "  /  page  pages/index.html\n"
              "  /style.css  static  pages/style.css  text/css; charset=utf-8\n"
              "not found page: (none)\n"
+             "error page: (none)\n"
              "diagnostics:\n"
              "  code/pages/x.xyz: warning: unknown\n");
+
+    RouteEntry handler{RouteKind::Handler, RelPath::parse("pages/g.ms").value()};
+    handler.get = HandlerRef{HandlerRef::Kind::Get, handler.source, "more"};
+    handler.post = HandlerRef{HandlerRef::Kind::Post, handler.source, "more"};
+    app.routes.add("/g/more", handler);
+    CHECK(describe(app).find("  /g/more  handler  pages/g.ms  get.more in pages/g.ms  post.more in pages/g.ms\n") !=
+          std::string::npos);
 
     Diagnostic d{Diagnostic::Severity::Error, "code/pages/a.html", 3, "bad"};
     CHECK_EQ(d.toString(), "code/pages/a.html:3: error: bad");

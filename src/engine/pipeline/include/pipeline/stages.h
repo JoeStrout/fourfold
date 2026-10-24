@@ -1,17 +1,20 @@
 // The request pipeline's stages (Arch §5, pipeline). Each is a function over
 // plain structs, so it can be tested on its own. Engine::handle runs them in
-// order. M1 has Admit, Route, Dispatch (static files and pages as is), and
-// Respond; Identify, Gate, Parse and Commit arrive with their milestones.
+// order. M2 has Admit, Route, Parse (query and url-encoded forms, as raw
+// strings), Dispatch, and Respond; Identify, Gate and Commit arrive with
+// their milestones.
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
 
-#include "http/message.h"
 #include "compiledapp/compiled_app.h"
+#include "http/message.h"
 #include "partition/code_tree.h"
 #include "partition/paths.h"
+#include "script/script_host.h"
 
 namespace fourfold {
 
@@ -20,6 +23,12 @@ struct EngineOptions {
     // refused. Empty accepts any. Dev mode lists localhost's names, which
     // stops DNS-rebinding attacks on the dev server from a web page.
     std::vector<std::string> allowedHosts;
+    // Script errors are shown in the browser, with file and line, instead of
+    // the generic 500 page. Dev mode sets this.
+    bool showErrorDetails = false;
+    // Hears about every script error (dev mode prints them; the engine log
+    // arrives in M5). May be called on the script thread.
+    std::function<void(const ScriptError&)> onScriptError = nullptr;
 };
 
 // The host names `fourfold dev` answers to.
@@ -38,7 +47,7 @@ struct AdmittedRequest {
 std::optional<HttpResponse> admit(const HttpRequest& request, const EngineOptions& options,
                                   AdmittedRequest& out);
 
-// --- Route: look the path up in the app's route table. ---
+// --- Route: look the path up in the compiled app's route table. ---
 
 struct RouteDecision {
     enum class Kind {
@@ -48,17 +57,41 @@ struct RouteDecision {
         MethodNotAllowed,
     };
     Kind kind = Kind::NotFound;
-    const RouteEntry* entry = nullptr;   // when Found
-    std::string location;                // when Redirect
+    const RouteEntry* entry = nullptr;     // when Found
+    const HandlerRef* handler = nullptr;   // when Found, if script code handles it
+    std::string location;                  // when Redirect
+    std::string allow;                     // when MethodNotAllowed: "GET, HEAD, POST"
 };
 
 RouteDecision route(const AdmittedRequest& request, const CompiledApp& app);
 
-// --- Dispatch: produce the response content. ---
+// --- Parse: what a handler sees of the request. ---
 
+// "a=1&b=x+y" → {{"a","1"}, {"b","x y"}}. Percent escapes and '+' are decoded;
+// a malformed escape is kept as is, and invalid UTF-8 becomes U+FFFD, since
+// handlers get these as MiniScript strings.
+RequestFacts::Pairs parseUrlEncoded(std::string_view text);
+
+// The facts a handler's `req` is built from (overview §4, The request
+// object): the method, path, query, headers, and an url-encoded POST body.
+RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted);
+
+// --- Dispatch: produce the response content without running code. ---
+
+// Static files, pages with no code, redirects and errors. Not for routes with
+// a handler (decision.handler set), which go to the ScriptHost.
 HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, const CodeTree& code);
 
-// --- Respond: headers every response gets. ---
+// --- Respond: turn results into responses. ---
+
+// A handler's outcome as a response. `entry` is the route it ran for (a
+// render fills that page's template).
+HttpResponse respond(const HandlerOutcome& outcome, const RouteEntry& entry, const CompiledApp& app,
+                     const EngineOptions& options);
+
+// A 500 response for a script error: the details as plain text if
+// options.showErrorDetails, else pages/500.html or a generic message.
+HttpResponse errorResponse(const ScriptError& error, const CompiledApp& app, const EngineOptions& options);
 
 // Security headers (overview §8, "Security headers by default") and cache
 // rules. The CSP has no script nonce until templates add one (M4), so inline

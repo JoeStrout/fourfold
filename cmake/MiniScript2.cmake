@@ -8,12 +8,11 @@
 # We leave out its test and debug programs, the editline REPL, and App.g.cpp
 # (MS2's own main()).
 #
-# Only the `script` component should link this (Arch §2). Until that
-# component exists (M2), nothing does, and the library isn't built by default.
+# Only the `script` component may link this (Arch §2).
 
 if(NOT EXISTS ${FOURFOLD_MS2_DIR}/cpp/miniscript.h)
-    message(STATUS "MiniScript 2 not found at ${FOURFOLD_MS2_DIR}; fourfold::ms2 unavailable")
-    return()
+    message(FATAL_ERROR "MiniScript 2 not found at ${FOURFOLD_MS2_DIR}. Check it out "
+                        "next to this repository, or set FOURFOLD_MS2_DIR (see docs/building.md).")
 endif()
 
 file(GLOB MS2_SOURCES CONFIGURE_DEPENDS
@@ -23,10 +22,12 @@ file(GLOB MS2_SOURCES CONFIGURE_DEPENDS
 list(FILTER MS2_SOURCES EXCLUDE REGEX "/core/(test|debug)_[^/]*$")
 list(FILTER MS2_SOURCES EXCLUDE REGEX "/generated/App\\.g\\.cpp$")
 
-add_library(ff_ms2 STATIC EXCLUDE_FROM_ALL ${MS2_SOURCES})
+add_library(ff_ms2 STATIC ${MS2_SOURCES})
 add_library(fourfold::ms2 ALIAS ff_ms2)
 
-# MS2 relies on GNU extensions (computed goto, POSIX functions).
+# MS2 is C++11 and relies on GNU extensions (computed goto, POSIX functions).
+# Its own build uses gnu++11; we build it as gnu++17 like the rest of Fourfold,
+# since its headers are compiled into the script component as C++17 anyway.
 set_target_properties(ff_ms2 PROPERTIES C_STANDARD 99 C_EXTENSIONS ON CXX_EXTENSIONS ON)
 
 # SYSTEM: MS2's headers shouldn't trigger warnings in Fourfold's code.

@@ -1,0 +1,12 @@
+routes:
+  /  page  pages/index.html  fields: greeting count  render in pages/index.ms
+  /api  page  pages/api.ms  render in pages/api.ms
+  /docs/  page  pages/docs/index.html
+  /docs/more  handler  pages/docs/index.ms  get.more in pages/docs/index.ms
+  /guestbook  page  pages/guestbook.html
+  /guestbook/entries  handler  pages/guestbook.ms  get.entries in pages/guestbook.ms  post.entries in pages/guestbook.ms
+  /guestbook/sign  handler  pages/guestbook.ms  post.sign in pages/guestbook.ms
+  /style.css  static  pages/style.css  text/css; charset=utf-8
+not found page: pages/404.html
+error page: pages/500.html
+diagnostics:

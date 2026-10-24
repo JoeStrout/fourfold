@@ -1,0 +1,251 @@
+// ScriptHost: the script thread and its scheduler (Arch §3).
+//
+// Runnable VMs take turns, one slice each, round-robin. A slice is
+// `sliceInstructions` instructions, or less if the VM finishes, yields, or
+// parks. The scheduler runs slices in batches of a couple of milliseconds,
+// then lets the loop handle timers and posted work (new runs, finished worker
+// tasks) before the next batch.
+
+#include <atomic>
+#include <future>
+
+#include "bridge.h"
+#include "host_impl.h"
+
+namespace fourfold {
+
+namespace {
+
+constexpr auto kPumpBatch = std::chrono::milliseconds(2);
+
+std::atomic<bool> g_hostExists{false};
+
+HandlerOutcome errorOutcome(std::string message, std::string file) {
+    HandlerOutcome o;
+    o.kind = HandlerOutcome::Kind::Error;
+    o.error.message = std::move(message);
+    o.error.file = std::move(file);
+    return o;
+}
+
+std::string describeMs(std::chrono::milliseconds ms) {
+    if (ms.count() % 1000 == 0) return std::to_string(ms.count() / 1000) + " s";
+    return std::to_string(ms.count()) + " ms";
+}
+
+}  // namespace
+
+// --- On the script thread ---
+
+void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request,
+                                ScriptHost::Done done) {
+    const ScriptBundle* bundle = app ? app->scripts.get() : nullptr;
+    const PageProgram* page = bundle ? bundle->page(handler.source) : nullptr;
+    const HandlerStub* stub = bundle ? bundle->stub(handler) : nullptr;
+    if (!page || !stub) {
+        done(errorOutcome("no compiled handler " + handler.label() + " in code/" + handler.source.str(),
+                          "code/" + handler.source.str()));
+        return;
+    }
+
+    auto run = std::make_unique<Run>();
+    run->id = nextRunId++;
+    run->kind = Run::Kind::Request;
+    run->host = this;
+    run->fileName = page->fileName;
+    run->libs = &bundle->libs;
+    run->app = std::move(app);
+    run->bundle = bundle;
+    run->page = page;
+    run->stub = stub;
+    run->handler = std::move(handler);
+    run->request = std::move(request);
+    run->done = std::move(done);
+    prepareInterpreter(*run, page->functions);
+
+    uint64_t id = run->id;
+    run->deadline = loop->addTimer(options.budget.wallClock, [this, id] {
+        auto it = runs.find(id);
+        if (it == runs.end()) return;
+        it->second->deadline = 0;
+        finish(*it->second, errorOutcome("the request took longer than its time budget (" +
+                                             describeMs(options.budget.wallClock) + ")",
+                                         it->second->fileName));
+    });
+    runs.emplace(id, std::move(run));
+    runnable.push_back(id);
+    schedulePump();
+}
+
+void ScriptHost::Impl::schedulePump() {
+    if (pumpScheduled) return;
+    pumpScheduled = true;
+    loop->post([this] { pump(); });
+}
+
+void ScriptHost::Impl::pump() {
+    pumpScheduled = false;
+    auto start = EventLoop::Clock::now();
+    while (!runnable.empty()) {
+        uint64_t id = runnable.front();
+        runnable.pop_front();
+        auto it = runs.find(id);
+        if (it == runs.end() || it->second->parked) continue;
+        if (slice(*it->second)) runnable.push_back(id);
+        if (EventLoop::Clock::now() - start >= kPumpBatch) break;
+    }
+    // A GC tick (MiniScript counts ticks to decide when to collect).
+    MiniScript::GCManager::MaybeCollect(false);
+    if (!runnable.empty()) schedulePump();
+}
+
+bool ScriptHost::Impl::slice(Run& run) {
+    MiniScript::VM vm = run.interp.vm();
+    vm.set_yielding(false);
+    vm.Run(options.sliceInstructions);
+    run.instructions += options.sliceInstructions;
+
+    if (!vm.Error().IsNull()) {
+        HandlerOutcome o;
+        o.kind = HandlerOutcome::Kind::Error;
+        o.error = scriptErrorFrom(vm.Error(), run.fileName);
+        finish(run, std::move(o));
+        return false;
+    }
+    if (!vm.IsRunning()) {
+        if (run.phase == Run::Phase::TopLevel) {
+            // The top level has defined the page's functions; now call the
+            // handler, in the same namespace, through its stub.
+            run.phase = Run::Phase::Handler;
+            run.interp.SetGlobalValue("_ff_req", makeRequestValue(run.request));
+            vm.Reset(run.stub->functions, run.interp.GetGlobals());
+            return true;
+        }
+        finish(run, outcomeFromResult(run));
+        return false;
+    }
+    if (run.instructions >= options.budget.instructions) {
+        finish(run, errorOutcome("the request used more than its budget of " +
+                                     std::to_string(options.budget.instructions) +
+                                     " instructions (an endless loop?)",
+                                 run.fileName));
+        return false;
+    }
+    return !run.parked;
+}
+
+void ScriptHost::Impl::finish(Run& run, HandlerOutcome outcome) {
+    if (run.deadline) loop->cancelTimer(run.deadline);
+    ScriptHost::Done done = std::move(run.done);
+    run.interp.Reset();   // releases the namespace; the VM goes with the interpreter
+    run.interp = nullptr;
+    runs.erase(run.id);   // `run` is gone after this
+    done(std::move(outcome));
+}
+
+void ScriptHost::Impl::park(Run& run) {
+    run.parked = true;
+}
+
+void ScriptHost::Impl::resume(uint64_t runId) {
+    auto it = runs.find(runId);
+    if (it == runs.end() || !it->second->parked) return;
+    it->second->parked = false;
+    runnable.push_back(runId);
+    schedulePump();
+}
+
+// --- ScriptHost ---
+
+Result<std::unique_ptr<ScriptHost>> ScriptHost::create(ScriptHostOptions options) {
+    if (g_hostExists.exchange(true)) {
+        return makeError(ErrorCode::Conflict, "only one ScriptHost may exist at a time");
+    }
+    auto loop = EventLoop::create();
+    if (!loop) {
+        g_hostExists = false;
+        return loop.error();
+    }
+    auto impl = std::make_unique<Impl>();
+    impl->options = std::move(options);
+    if (impl->options.sliceInstructions == 0) impl->options.sliceInstructions = 1;
+    impl->loop = std::move(loop).value();
+    impl->workers = std::make_unique<WorkerPool>(impl->options.workerThreads);
+
+    Impl* p = impl.get();
+    std::promise<void> started;
+    impl->thread = std::thread([p, &started] {
+        setBundleDisposalLoop(p->loop.get());
+        initMiniScriptRuntime(p->options);
+        started.set_value();
+        p->loop->run();
+        // Stopped: abandon unfinished runs, and run what's been posted (e.g.
+        // bundles to dispose of) once more before letting go of the thread.
+        for (auto& [id, run] : p->runs) {
+            run->interp.Reset();
+            run->interp = nullptr;
+        }
+        p->runs.clear();
+        p->runnable.clear();
+        p->loop->runOnce(std::chrono::milliseconds(0));
+        setBundleDisposalLoop(nullptr);
+    });
+    started.get_future().wait();
+    return std::unique_ptr<ScriptHost>(new ScriptHost(std::move(impl)));
+}
+
+ScriptHost::ScriptHost(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
+
+ScriptHost::~ScriptHost() {
+    impl_->loop->stop();
+    impl_->thread.join();
+    impl_->workers.reset();   // workers may still post to the loop, which outlives them
+    impl_.reset();
+    g_hostExists = false;
+}
+
+CompiledScripts ScriptHost::compileScripts(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs) {
+    CompiledScripts result;
+    std::promise<void> finished;
+    impl_->loop->post([&] {
+        result = impl_->compile(pages, libs);
+        finished.set_value();
+    });
+    finished.get_future().wait();
+    return result;
+}
+
+void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done) {
+    // std::function needs a copyable callable, so the arguments ride in a
+    // shared struct.
+    struct Args {
+        std::shared_ptr<const CompiledApp> app;
+        HandlerRef handler;
+        RequestFacts request;
+        Done done;
+    };
+    auto args = std::make_shared<Args>(Args{std::move(app), std::move(handler), std::move(request), std::move(done)});
+    Impl* impl = impl_.get();
+    impl->loop->post([impl, args] {
+        impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->request),
+                       std::move(args->done));
+    });
+}
+
+ScriptHost::Stats ScriptHost::stats(bool collectFirst) {
+    Stats s;
+    std::promise<void> finished;
+    impl_->loop->post([&] {
+        if (collectFirst) MiniScript::GCManager::FullCollectGarbage();
+        s.activeRuns = impl_->runs.size();
+        for (const auto& [id, run] : impl_->runs) s.parkedRuns += run->parked ? 1 : 0;
+        s.liveMaps = MiniScript::GCManager::Maps.LiveCount();
+        s.liveLists = MiniScript::GCManager::Lists.LiveCount();
+        s.liveFunctions = MiniScript::GCManager::Functions.LiveCount();
+        finished.set_value();
+    });
+    finished.get_future().wait();
+    return s;
+}
+
+}  // namespace fourfold

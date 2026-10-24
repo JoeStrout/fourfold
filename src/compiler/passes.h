@@ -3,11 +3,13 @@
 // reports problems through the Diagnostics it's given.
 #pragma once
 
+#include <map>
 #include <string>
 #include <vector>
 
 #include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
+#include "script/script_host.h"
 
 namespace fourfold {
 
@@ -28,7 +30,20 @@ private:
 // "code/" + path, as diagnostics name files.
 std::string codeFileName(const RelPath& path);
 
-// Routes for code/pages/: pages, static files, and the 404 page.
-void routesPass(const CodeListing& listing, CompiledApp& app, Diagnostics& diagnostics);
+// The path's extension, lowercased (".html").
+std::string lowerExtension(const RelPath& path);
+
+// Parses every .html file in code/pages/ into app.templates.
+void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp& app, Diagnostics& diagnostics);
+
+// Compiles the .ms files in code/pages/ and code/lib/ into app.scripts, and
+// returns the handlers each page file defines.
+std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const CodeTree& code,
+                                            ScriptCompiler* compiler, CompiledApp& app, Diagnostics& diagnostics);
+
+// Routes for code/pages/: pages, handlers, static files, and the 404 and 500
+// pages.
+void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app,
+                Diagnostics& diagnostics);
 
 }  // namespace fourfold
