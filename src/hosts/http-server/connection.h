@@ -82,6 +82,7 @@ private:
 
     // The request being handled or answered.
     bool headRequest_ = false;
+    bool http10_ = false;   // an HTTP/1.0 request: keep-alive must be said explicitly
     bool closeAfterWrite_ = false;
 
     EventLoop::TimerId timer_ = 0;

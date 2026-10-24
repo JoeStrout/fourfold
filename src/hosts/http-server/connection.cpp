@@ -146,6 +146,7 @@ void HttpConnection::dispatch() {
     HttpRequest request = std::move(request_);
     request.peerAddress = peerAddress_;
     headRequest_ = request.method == "HEAD";
+    http10_ = request.versionMajor == 1 && request.versionMinor == 0;
     closeAfterWrite_ = closeAfterWrite_ || !keepAlive_;
 
     std::weak_ptr<HttpConnection> weak = shared_from_this();
@@ -171,7 +172,12 @@ void HttpConnection::respond(HttpResponse response) {
         out += f.name + ": " + f.value + "\r\n";
     }
     if (mayHaveBody) out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
-    if (closeAfterWrite_) out += "Connection: close\r\n";
+    if (closeAfterWrite_) {
+        out += "Connection: close\r\n";
+    } else if (http10_) {
+        // HTTP/1.0 closes after each response unless told otherwise (RFC 9112 §9.3).
+        out += "Connection: keep-alive\r\n";
+    }
     out += "\r\n";
     if (mayHaveBody && !headRequest_) out += response.body;
     outSent_ = 0;

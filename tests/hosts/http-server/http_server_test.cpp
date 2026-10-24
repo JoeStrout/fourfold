@@ -135,6 +135,23 @@ TEST_CASE("HttpServer: keeps the connection for further requests") {
     CHECK_FALSE(h.clientSawEof);
 }
 
+TEST_CASE("HttpServer: tells an HTTP/1.0 client when it keeps the connection") {
+    Harness h;
+    h.send("GET /one HTTP/1.0\r\nConnection: Keep-Alive\r\n\r\n");
+    h.waitForResponses(1);
+    CHECK(h.received.find("Connection: keep-alive\r\n") != std::string::npos);
+    h.send("GET /two HTTP/1.0\r\nConnection: keep-alive\r\n\r\n");
+    h.waitForResponses(2);
+    CHECK_EQ(countResponses(h.received), 2u);
+    CHECK_FALSE(h.clientSawEof);
+
+    Harness plain;
+    plain.send("GET /one HTTP/1.0\r\n\r\n");
+    plain.waitForResponses(1);
+    CHECK(plain.received.find("Connection: close\r\n") != std::string::npos);
+    CHECK(plain.received.find("keep-alive") == std::string::npos);
+}
+
 TEST_CASE("HttpServer: answers pipelined requests in order") {
     Harness h;
     h.send("GET /a HTTP/1.1\r\nHost: a\r\n\r\n"
