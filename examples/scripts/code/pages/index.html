@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fourfold: scripts</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>Scripts in the loop</h1>
+  <p>Pages with MiniScript, served by Fourfold M2. Each request runs in a fresh VM.</p>
+  <ul>
+    <li><a href="hello">Hello</a>: <code>render</code> fills a page's fields, using a module from <code>lib/</code>.</li>
+    <li><a href="contact">Contact</a>: a form posted to a <code>post</code> handler, which redirects.</li>
+    <li><a href="api/echo?x=1">api/echo</a>: a <code>get</code> handler returning JSON.</li>
+    <li><a href="slow">Slow</a>: waits a second without holding up anyone else.</li>
+    <li><a href="oops">Oops</a>: a runtime error, shown with its file and line (in dev mode).</li>
+    <li><a href="forever">Forever</a>: an endless loop, stopped by the instruction budget.</li>
+  </ul>
+</body>
+</html>

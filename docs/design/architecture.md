@@ -29,11 +29,11 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 | **Frozen** maps and lists exist. | `req`, `req.user`, and `args` are frozen. |
 | `String` (in `CS_String.h`) is `shared_ptr`-based and immutable, *not* GC-managed. `List<T>` and `Dictionary<K,V>` (`CS_List.h`, `CS_Dictionary.h`) are `shared_ptr`-based **reference types** with C# semantics. | These are safe off the script thread, but their reference semantics are surprising in C++ (see §4). |
 
-**Things Fourfold needs that MS2 may not have yet** (to confirm with the MS2 side):
+**Things Fourfold needs that MS2 may not have yet** (to confirm with the MS2 side). M2 checked these against MS2 as it stands; see [m2-results.md](m2-results.md) for what's worked around in `script` and what still needs MS2.
 
-- An **instruction budget** per VM (count, then error), separate from wall-clock slices.
-- A **memory budget** per VM. Hard with a shared GC; possible approaches are per-VM allocation counters, or a process-level limit as a backstop (§3).
-- A way to **remove or replace compiling intrinsics** (`import`, any eval-like path) per VM, and an **import resolver hook** so `import` resolves within `code/lib/` through Fourfold.
+- An **instruction budget** per VM (count, then error), separate from wall-clock slices. *M2: counted in whole slices via `VM::Run(maxCycles)`; exact counts need MS2.*
+- A **memory budget** per VM. Hard with a shared GC; possible approaches are per-VM allocation counters, or a process-level limit as a backstop (§3). *M2: missing, and needed (R4, open).*
+- A way to **remove or replace compiling intrinsics** (`import`, any eval-like path) per VM, and an **import resolver hook** so `import` resolves within `code/lib/` through Fourfold. *M2: done host-side. Shell intrinsics are never registered, and `import` is replaced, process-wide.*
 - **Bytecode serialization**, so CGI mode can load a cached compiled app rather than recompiling (§8 of the overview). Without it, CGI mode recompiles `.ms` files when its cache is cold.
 - A clean **restricted VM** configuration (no I/O intrinsics) for evaluating declaration and config files as data.
 

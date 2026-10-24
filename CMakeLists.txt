@@ -40,3 +40,6 @@ endif()
 
 add_subdirectory(third_party)
 add_subdirectory(src)
+if(FOURFOLD_BUILD_TESTS)
+    add_subdirectory(tests/bench)
+endif()

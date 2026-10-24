@@ -4,7 +4,7 @@
 
 - CMake 3.21 or later, and Ninja
 - A C++17 compiler: Clang 10+ (including Apple Clang) or GCC 9+
-- [MiniScript 2](https://github.com/JoeStrout/miniscript2), checked out next to this repository as `../miniscript2` (or set `FOURFOLD_MS2_DIR`). It isn't needed until M2, when the `script` component arrives.
+- [MiniScript 2](https://github.com/JoeStrout/miniscript2), checked out next to this repository as `../miniscript2` (or set `FOURFOLD_MS2_DIR`). Configuring fails without it.
 
 On macOS: `xcode-select --install`, then `brew install cmake ninja`. On Debian/Ubuntu: `apt install build-essential cmake ninja-build`.
 
@@ -17,10 +17,18 @@ ctest --preset dev            # run all tests
 ./build/dev/bin/fourfold help
 ```
 
-To run the sample site:
+To run a sample app:
 
 ```sh
 ./build/dev/bin/fourfold dev examples/static-site     # then open http://localhost:8080/
+./build/dev/bin/fourfold dev examples/scripts         # pages with MiniScript (M2)
+```
+
+Benchmarks are built with the tests but not run by ctest; use a release build for meaningful numbers:
+
+```sh
+cmake --preset release && cmake --build --preset release
+./build/release/bin/bench_script     # the cost of a fresh VM per request (see docs/design/m2-results.md)
 ```
 
 Presets (in `CMakePresets.json`):
@@ -58,6 +66,7 @@ fourfold/
     support/            doctest's main(), shared fakes and helpers
     <component>/        *_test.cpp for src/<component>, same relative path
     apps/               sample app folders used as test fixtures
+    bench/              benchmarks (built, not run by ctest)
   examples/             sample apps that demonstrate each milestone (from M1)
   third_party/          vendored libraries, one folder each, with license files
   docs/                 design notes and this guide

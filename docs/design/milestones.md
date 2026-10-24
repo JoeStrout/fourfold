@@ -72,6 +72,8 @@ The risks most likely to change the design, and where each is retired:
 - Many VMs parked at once on slow work, with the thread staying responsive.
 - **A decision on memory budgets (R4):** per-VM accounting in MS2, or a process-level limit with worker restarts. If the latter, the multi-process model moves earlier, into M5.
 
+**Decisions made here** (details and numbers in [m2-results.md](m2-results.md)): R1 retired. A fresh VM costs about 0.15 ms per run, against a target of 0.5 ms, so the execution model stands, with no VM pooling. R2 and R3 retired, with host-side workarounds for MS2 gaps: handlers are called through precompiled stubs; callbacks use `ManuallyPushCall`; the shared type maps are frozen; budgets are counted per slice. No MS2 changes were made in M2, by decision. **R4 is still open:** one request can allocate gigabytes within its budget. The recommendation is per-VM allocation accounting in MS2, with a process-level limit as backstop, landing before M5 lifts the localhost-only restriction.
+
 **Not yet:** no `data`, `session`, or CSRF. POST handlers run without CSRF protection, so M2 builds refuse to listen on anything but localhost.
 
 ---
