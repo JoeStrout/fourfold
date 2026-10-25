@@ -31,8 +31,11 @@ struct PageProgram {
 
 class ScriptBundle {
 public:
-    ScriptBundle() = default;
+    ScriptBundle();
     ~ScriptBundle();   // unroots everything rooted
+
+    // Bundles in existence, in the whole process (for leak tests).
+    static int liveCount();
 
     ScriptBundle(const ScriptBundle&) = delete;
     ScriptBundle& operator=(const ScriptBundle&) = delete;

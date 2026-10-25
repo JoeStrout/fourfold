@@ -152,6 +152,7 @@ public:
         int liveMaps = 0;          // MS2 GC counts, after a full collection
         int liveLists = 0;
         int liveFunctions = 0;
+        int liveBundles = 0;       // compiled .ms files of app generations not yet released
     };
     Stats stats(bool collectFirst = true);
 

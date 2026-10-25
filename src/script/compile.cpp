@@ -57,30 +57,6 @@ Diagnostic diagnosticFrom(const ScriptError& e) {
     return {Diagnostic::Severity::Error, e.file, e.line, e.message};
 }
 
-// Runs a page's top level to the end, synchronously, within the budget.
-// Returns false, with `error` set, if it fails.
-bool runTopLevel(Run& run, const ScriptHostOptions& options, ScriptError& error) {
-    MiniScript::VM vm = run.interp.vm();
-    auto start = std::chrono::steady_clock::now();
-    while (vm.IsRunning()) {
-        vm.set_yielding(false);
-        vm.Run(options.sliceInstructions);
-        run.instructions += options.sliceInstructions;
-        if (!vm.Error().IsNull()) {
-            error = scriptErrorFrom(vm.Error(), run.fileName);
-            return false;
-        }
-        if (!vm.IsRunning()) break;
-        bool overTime = std::chrono::steady_clock::now() - start > options.budget.wallClock;
-        if (run.instructions >= options.budget.instructions || overTime) {
-            error = {"the top level didn't finish within its budget; it should only define functions", run.fileName,
-                     0};
-            return false;
-        }
-    }
-    return true;
-}
-
 // Compiles "_ff_result = <call>" once per distinct call, shared by all pages.
 const List<FuncDef>* stubFor(const std::string& call, ScriptBundle& bundle,
                              std::map<std::string, List<FuncDef>>& cache) {
@@ -102,23 +78,55 @@ std::string callFor(const std::string& target, Value function) {
 
 }  // namespace
 
-CompiledScripts ScriptHost::Impl::compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs) {
+namespace {
+
+// One compile in progress, on the script thread. Each step is its own posted
+// task: a lib, or a page (compiled, then its top level scheduled as a
+// discovery run, whose end posts the next step).
+struct CompileJob : std::enable_shared_from_this<CompileJob> {
+    ScriptHost::Impl* host = nullptr;
+    const std::vector<CodeFile>* pages = nullptr;
+    const std::vector<CodeFile>* libs = nullptr;
+    std::function<void(CompiledScripts)> done;
+
     CompiledScripts out;
-    auto bundle = std::make_unique<ScriptBundle>();
+    std::unique_ptr<ScriptBundle> bundle = std::make_unique<ScriptBundle>();
     std::map<std::string, List<FuncDef>> stubCache;
     bool failed = false;
-    auto error = [&](ScriptError e) {
+    size_t next = 0;   // the next step: libs first, then pages
+
+    void error(ScriptError e) {
         out.diagnostics.push_back(diagnosticFrom(e));
         failed = true;
-    };
+    }
 
-    for (const CodeFile& lib : libs) {
+    void postNext() {
+        auto self = shared_from_this();
+        host->loop->post([self] { self->step(); });
+    }
+
+    void step() {
+        size_t i = next++;
+        if (i < libs->size()) {
+            compileLib((*libs)[i]);
+            postNext();
+        } else if (i - libs->size() < pages->size()) {
+            compilePage((*pages)[i - libs->size()]);   // posts the next step when it's done
+        } else {
+            if (!failed) out.bundle = makeBundlePtr(std::move(bundle));
+            bundle.reset();
+            auto finished = std::move(done);
+            finished(std::move(out));
+        }
+    }
+
+    void compileLib(const CodeFile& lib) {
         std::string fileName = codeFileName(lib.path());
         std::string_view name = lib.path().name();
         std::string importName(name.substr(0, name.size() - lib.path().extension().size()));
         if (!isIdentifier(importName)) {
             error({"can't be imported: the name before .ms must be a valid identifier", fileName, 0});
-            continue;
+            return;
         }
         Value compileError;
         const std::string& source = lib.contents();
@@ -126,36 +134,47 @@ CompiledScripts ScriptHost::Impl::compile(const std::vector<CodeFile>& pages, co
                                                                 String(fileName.c_str()), &compileError);
         if (!compileError.IsNull()) {
             error(scriptErrorFrom(compileError, fileName));
-            continue;
+            return;
         }
         bundle->root(module);
         bundle->libs[importName] = module;
     }
 
-    for (const CodeFile& file : pages) {
+    void compilePage(const CodeFile& file) {
         std::string fileName = codeFileName(file.path());
         Value compileError;
         List<FuncDef> functions = compileProgram(file.contents(), fileName, &compileError);
         if (!compileError.IsNull()) {
             error(scriptErrorFrom(compileError, fileName));
-            continue;
+            postNext();
+            return;
         }
         bundle->root(functions[0]);
 
-        // Find the handlers by running the top level, as each request will.
-        Run run;
-        run.kind = Run::Kind::Discovery;
-        run.host = this;
-        run.fileName = fileName;
-        run.libs = &bundle->libs;
-        prepareInterpreter(run, functions);
-        ScriptError runError;
-        if (!runTopLevel(run, options, runError)) {
-            run.interp.Reset();
-            error(runError);
-            continue;
-        }
+        // Find the handlers by running the top level, as each request will,
+        // in slices among the requests being served.
+        auto run = std::make_unique<Run>();
+        run->kind = Run::Kind::Discovery;
+        run->host = host;
+        run->fileName = fileName;
+        run->libs = &bundle->libs;
+        auto self = shared_from_this();
+        RelPath path = file.path();
+        run->discovered = [self, path, functions](Run& r, const HandlerOutcome& outcome) {
+            if (outcome.kind == HandlerOutcome::Kind::Error) {
+                self->error(outcome.error);
+            } else {
+                self->discover(r, path, functions);
+            }
+            self->postNext();
+        };
+        prepareInterpreter(*run, functions);
+        host->schedule(std::move(run));
+    }
 
+    // Reads a page's handlers from the globals its top level left.
+    void discover(Run& run, const RelPath& path, const List<FuncDef>& functions) {
+        const std::string& fileName = run.fileName;
         PageProgram program;
         program.fileName = fileName;
         program.functions = functions;
@@ -202,16 +221,24 @@ CompiledScripts ScriptHost::Impl::compile(const std::vector<CodeFile>& pages, co
             }
             std::sort(names.begin(), names.end());
         }
-        run.interp.Reset();   // releases the run's globals
 
         if (pageOk) {
-            out.pages[file.path()] = handlers;
-            bundle->pages.emplace(file.path(), std::move(program));
+            out.pages[path] = handlers;
+            bundle->pages.emplace(path, std::move(program));
         }
     }
+};
 
-    if (!failed) out.bundle = makeBundlePtr(std::move(bundle));
-    return out;
+}  // namespace
+
+void ScriptHost::Impl::compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs,
+                               std::function<void(CompiledScripts)> done) {
+    auto job = std::make_shared<CompileJob>();
+    job->host = this;
+    job->pages = &pages;
+    job->libs = &libs;
+    job->done = std::move(done);
+    job->step();
 }
 
 }  // namespace fourfold

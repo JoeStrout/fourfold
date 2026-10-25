@@ -3,6 +3,7 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <thread>
 #include <unordered_map>
@@ -40,6 +41,10 @@ struct Run {
     ScriptHost::Done done;
     EventLoop::TimerId deadline = 0;
 
+    // Discovery runs only: called as the run finishes, before its namespace
+    // is released, with an Error outcome if the top level failed.
+    std::function<void(Run&, const HandlerOutcome&)> discovered;
+
     MiniScript::Interpreter interp;
     uint64_t instructions = 0;   // counted in whole slices (see ScriptBudget)
     bool parked = false;         // waiting on a timer or a worker; not runnable
@@ -63,6 +68,9 @@ struct ScriptHost::Impl {
     // Starting and finishing request runs (scheduler.cpp).
     void startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request,
                   ScriptHost::Done done);
+    // Schedules a prepared run (a request or a discovery run), with its
+    // wall-clock deadline.
+    void schedule(std::unique_ptr<Run> run);
     void schedulePump();
     void pump();
     // Runs one slice of `run`; returns false once the run is finished.
@@ -75,8 +83,12 @@ struct ScriptHost::Impl {
     void park(Run& run);
     void resume(uint64_t runId);
 
-    // Compiling (compile.cpp).
-    CompiledScripts compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs);
+    // Compiling (compile.cpp). One file at a time, each in its own posted
+    // task, with each page's top level run as a scheduled discovery run, so
+    // requests keep being served during a long compile. `done` is called on
+    // the script thread. The files must stay alive until then.
+    void compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs,
+                 std::function<void(CompiledScripts)> done);
 };
 
 // One-time MiniScript setup, and Fourfold's intrinsics (runtime.cpp). Call on

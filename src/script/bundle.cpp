@@ -1,5 +1,6 @@
 #include "bundle.h"
 
+#include <atomic>
 #include <mutex>
 #include <thread>
 
@@ -10,10 +11,20 @@ namespace {
 std::mutex g_disposalMutex;
 EventLoop* g_disposalLoop = nullptr;
 std::thread::id g_scriptThread;
+std::atomic<int> g_liveBundles{0};
 
 }  // namespace
 
+ScriptBundle::ScriptBundle() {
+    g_liveBundles++;
+}
+
+int ScriptBundle::liveCount() {
+    return g_liveBundles;
+}
+
 ScriptBundle::~ScriptBundle() {
+    g_liveBundles--;
     for (const MiniScript::Value& v : roots_) MiniScript::GCManager::RemoveRoot(v);
 }
 

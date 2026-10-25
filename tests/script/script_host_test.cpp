@@ -47,13 +47,20 @@ struct Scripts {
 
     // Compiles every .ms file written so far.
     void compile() {
+        std::vector<CodeFile> pages, libs;
+        readFiles(pages, libs);
+        compiled = host->compileScripts(pages, libs);
+        app->scripts = compiled.bundle;
+    }
+
+    // Every .ms file written so far: pages, and libs in code/lib/.
+    void readFiles(std::vector<CodeFile>& pages, std::vector<CodeFile>& libs) {
         auto folder = AppFolder::open(dir.path(), AppFolder::Missing::Create);
         REQUIRE(folder.ok());
         auto code = folder.value().codeTree();
         REQUIRE(code.ok());
         auto listing = code.value().list();
         REQUIRE(listing.ok());
-        std::vector<CodeFile> pages, libs;
         RelPath lib = RelPath::parse("lib").value();
         for (const CodeEntry& e : listing.value().files) {
             if (e.path.extension() != ".ms") continue;
@@ -61,8 +68,6 @@ struct Scripts {
             REQUIRE(file.ok());
             (e.path.parent() == lib ? libs : pages).push_back(file.value());
         }
-        compiled = host->compileScripts(pages, libs);
-        app->scripts = compiled.bundle;
     }
 
     std::string diagnostics() const {
@@ -613,4 +618,52 @@ TEST_CASE("ScriptHost: a compiled app keeps its bytecode alive until released") 
     s.compiled = {};
     int functionsWithout = s.host->stats().liveFunctions;
     CHECK(functionsWithout < functionsWithApp);
+}
+
+TEST_CASE("ScriptHost: requests are served while a long compile runs") {
+    Scripts s;
+    s.write("pages/q.ms", "get.quick = function(req)\n  return \"quick\"\nend function\n");
+    s.compile();
+    REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
+
+    // Many pages whose top levels each take a while.
+    for (int i = 0; i < 20; i++) {
+        s.write("pages/slow" + std::to_string(i) + ".ms",
+                "n = 0\nfor i in range(30000)\n  n = n + i\nend for\n"
+                "render = function(req)\n  return {\"n\": n}\nend function\n");
+    }
+    std::vector<CodeFile> pages, libs;
+    s.readFiles(pages, libs);
+    auto t0 = Clock::now();
+    auto compiling = std::async(std::launch::async, [&] { return s.host->compileScripts(pages, libs); });
+    Clock::duration worst{};
+    int served = 0;
+    while (compiling.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
+        auto start = Clock::now();
+        HandlerOutcome o = s.call("pages/q.ms", "get.quick");
+        worst = std::max(worst, Clock::now() - start);
+        CHECK_EQ(o.body, "quick");
+        served++;
+    }
+    auto compileTime = Clock::now() - t0;
+    CompiledScripts result = compiling.get();
+    CHECK_MESSAGE(result.bundle, "compile failed");
+    CHECK_EQ(result.pages.size(), 21u);
+    MESSAGE("compile took ", std::chrono::duration_cast<std::chrono::milliseconds>(compileTime).count(),
+            " ms; ", served, " requests served meanwhile, the slowest in ",
+            std::chrono::duration_cast<std::chrono::microseconds>(worst).count(), " us");
+    CHECK(served > 5);
+    CHECK(worst < compileTime / 4);
+    CHECK(worst < std::chrono::milliseconds(100));
+}
+
+TEST_CASE("ScriptHost: bundles are counted until released") {
+    Scripts s;
+    int before = s.host->stats().liveBundles;
+    HandlerOutcome o = s.render("render = function(req)\n  return {}\nend function\n");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
+    CHECK_EQ(s.host->stats().liveBundles, before + 1);
+    s.app.reset();
+    s.compiled = {};
+    CHECK_EQ(s.host->stats().liveBundles, before);
 }

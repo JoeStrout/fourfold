@@ -18,6 +18,9 @@ namespace {
 
 constexpr auto kPumpBatch = std::chrono::milliseconds(2);
 
+const char* const kTopLevelOverBudget =
+    "the top level didn't finish within its budget; it should only define functions";
+
 std::atomic<bool> g_hostExists{false};
 
 HandlerOutcome errorOutcome(std::string message, std::string file) {
@@ -49,7 +52,6 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
     }
 
     auto run = std::make_unique<Run>();
-    run->id = nextRunId++;
     run->kind = Run::Kind::Request;
     run->host = this;
     run->fileName = page->fileName;
@@ -62,15 +64,22 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
     run->request = std::move(request);
     run->done = std::move(done);
     prepareInterpreter(*run, page->functions);
+    schedule(std::move(run));
+}
 
+void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
+    run->id = nextRunId++;
     uint64_t id = run->id;
     run->deadline = loop->addTimer(options.budget.wallClock, [this, id] {
         auto it = runs.find(id);
         if (it == runs.end()) return;
-        it->second->deadline = 0;
-        finish(*it->second, errorOutcome("the request took longer than its time budget (" +
-                                             describeMs(options.budget.wallClock) + ")",
-                                         it->second->fileName));
+        Run& r = *it->second;
+        r.deadline = 0;
+        finish(r, errorOutcome(r.kind == Run::Kind::Discovery
+                                   ? kTopLevelOverBudget
+                                   : "the request took longer than its time budget (" +
+                                         describeMs(options.budget.wallClock) + ")",
+                               r.fileName));
     });
     runs.emplace(id, std::move(run));
     runnable.push_back(id);
@@ -113,6 +122,10 @@ bool ScriptHost::Impl::slice(Run& run) {
         return false;
     }
     if (!vm.IsRunning()) {
+        if (run.kind == Run::Kind::Discovery) {
+            finish(run, HandlerOutcome{});   // the top level ran; `discovered` reads its globals
+            return false;
+        }
         if (run.phase == Run::Phase::TopLevel) {
             // The top level has defined the page's functions; now call the
             // handler, in the same namespace, through its stub.
@@ -125,9 +138,11 @@ bool ScriptHost::Impl::slice(Run& run) {
         return false;
     }
     if (run.instructions >= options.budget.instructions) {
-        finish(run, errorOutcome("the request used more than its budget of " +
-                                     std::to_string(options.budget.instructions) +
-                                     " instructions (an endless loop?)",
+        finish(run, errorOutcome(run.kind == Run::Kind::Discovery
+                                     ? kTopLevelOverBudget
+                                     : "the request used more than its budget of " +
+                                           std::to_string(options.budget.instructions) +
+                                           " instructions (an endless loop?)",
                                  run.fileName));
         return false;
     }
@@ -137,10 +152,11 @@ bool ScriptHost::Impl::slice(Run& run) {
 void ScriptHost::Impl::finish(Run& run, HandlerOutcome outcome) {
     if (run.deadline) loop->cancelTimer(run.deadline);
     ScriptHost::Done done = std::move(run.done);
+    if (run.discovered) run.discovered(run, outcome);
     run.interp.Reset();   // releases the namespace; the VM goes with the interpreter
     run.interp = nullptr;
     runs.erase(run.id);   // `run` is gone after this
-    done(std::move(outcome));
+    if (done) done(std::move(outcome));
 }
 
 void ScriptHost::Impl::park(Run& run) {
@@ -205,14 +221,20 @@ ScriptHost::~ScriptHost() {
 }
 
 CompiledScripts ScriptHost::compileScripts(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs) {
-    CompiledScripts result;
-    std::promise<void> finished;
-    impl_->loop->post([&] {
-        result = impl_->compile(pages, libs);
-        finished.set_value();
+    // If the host is destroyed mid-compile, the promise is broken, not kept.
+    auto finished = std::make_shared<std::promise<CompiledScripts>>();
+    std::future<CompiledScripts> result = finished->get_future();
+    Impl* impl = impl_.get();
+    impl->loop->post([impl, &pages, &libs, finished] {
+        impl->compile(pages, libs, [finished](CompiledScripts out) { finished->set_value(std::move(out)); });
     });
-    finished.get_future().wait();
-    return result;
+    try {
+        return result.get();
+    } catch (const std::future_error&) {
+        CompiledScripts out;
+        out.diagnostics.push_back({Diagnostic::Severity::Error, "code", 0, "the script host stopped while compiling"});
+        return out;
+    }
 }
 
 void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done) {
@@ -242,6 +264,7 @@ ScriptHost::Stats ScriptHost::stats(bool collectFirst) {
         s.liveMaps = MiniScript::GCManager::Maps.LiveCount();
         s.liveLists = MiniScript::GCManager::Lists.LiveCount();
         s.liveFunctions = MiniScript::GCManager::Functions.LiveCount();
+        s.liveBundles = ScriptBundle::liveCount();
         finished.set_value();
     });
     finished.get_future().wait();
