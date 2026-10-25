@@ -4,3 +4,7 @@
 add_executable(bench_script bench_script.cpp)
 target_link_libraries(bench_script PRIVATE fourfold::script fourfold_test_support)
 fourfold_set_options(bench_script)
+
+add_executable(bench_compile bench_compile.cpp)
+target_link_libraries(bench_compile PRIVATE fourfold::compiler fourfold::script fourfold_test_support)
+fourfold_set_options(bench_compile)

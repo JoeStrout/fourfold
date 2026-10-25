@@ -90,6 +90,8 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** editing an HTML, CSS, or `.ms` file shows up in the browser within about two seconds, without a manual reload; a syntax error shows the overlay and the site keeps serving the last good version; a stress test that swaps compiled apps repeatedly under load shows no leaked generations and no GC errors (including with forced full collections between steps).
 
+**Decisions made here** (details and numbers in [m3-results.md](m3-results.md)): R5 retired. Compiling runs on the script thread, sliced a file at a time, with each page's top level run as a scheduled discovery run; no separate process, so bytecode serialization isn't needed for this. Recompiling a 500-page app takes about 1.1 s and delays a request made meanwhile by about 2 ms (5 ms at worst). `code/` is watched by polling through `CodeTree` (250 ms, with 200 ms of quiet), not OS file events; a save reaches the browser in about 0.5 s. 200 swaps under load leave no generations behind. Live reload uses server-sent events, so `HttpServer` gained streamed responses. An app that doesn't compile at startup now starts anyway, and serves an error page until it does.
+
 ---
 
 ## M4 — Safe templates and Markdown

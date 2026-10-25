@@ -29,7 +29,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 | **Frozen** maps and lists exist. | `req`, `req.user`, and `args` are frozen. |
 | `String` (in `CS_String.h`) is `shared_ptr`-based and immutable, *not* GC-managed. `List<T>` and `Dictionary<K,V>` (`CS_List.h`, `CS_Dictionary.h`) are `shared_ptr`-based **reference types** with C# semantics. | These are safe off the script thread, but their reference semantics are surprising in C++ (see §4). |
 
-**Things Fourfold needs that MS2 may not have yet** (to confirm with the MS2 side). M2 checked these against MS2 as it stands; see [m2-results.md](m2-results.md) for what's worked around in `script` and what still needs MS2.
+**Things Fourfold needs that MS2 may not have yet** (to confirm with the MS2 side). M2 checked these against MS2 as it stands; see [m2-results.md](m2-results.md) for what's worked around in `script` and what still needs MS2, and [m3-results.md](m3-results.md) for compiling.
 
 - An **instruction budget** per VM (count, then error), separate from wall-clock slices. *M2: counted in whole slices via `VM::Run(maxCycles)`; exact counts need MS2.*
 - A **memory budget** per VM. Hard with a shared GC; possible approaches are per-VM allocation counters, or a process-level limit as a backstop (§3). *M2: missing, and needed (R4, open).*
@@ -119,7 +119,7 @@ Quick local work (reading a small template file, serializing a session) may run 
 | **I/O loop** (one, or a few) | Accepts connections, parses HTTP under limits, TLS, writes responses, holds SSE connections |
 | **Script thread** | Runs all VMs; renders templates (field values are `Value`s) |
 | **Worker pool** | SQLite and Postgres queries, file locking and atomic writes, outbound HTTP, DNS, SMTP, backups |
-| **Compile thread** | Builds a new `CompiledApp` while the old one keeps serving. The compiler needs MS2 to compile `.ms` files, so this step is posted to the script thread in pieces, or the compiler uses a separate process (see Open questions) |
+| **Lifecycle thread** (one per app) | Watches `code/`, and builds a new `CompiledApp` while the old one keeps serving. The compiler needs MS2 to compile `.ms` files, so that step is posted to the script thread a file at a time, between requests (decided in M3; see [m3-results.md](m3-results.md)) |
 
 ### Using more than one core
 
@@ -304,7 +304,7 @@ Reserved prefixes (`/__auth/`, `/__fourfold/`, `/__dev/`) are routed to their ow
 
 **`push`.** `PushHub`: channels mapped to subscriber connections, which the I/O loop owns. `publish` posts `(channel, Html)` from the script thread to the hub. Absent in CGI mode, so the `publish` service pointer is null there.
 
-**`lifecycle`.** `AppInstance` owns everything for one running app: the current `CompiledApp` and `AppConfig`, the stores, and the services. It watches `code/` and `private/config/` (waiting for quiet), runs the compiler, and performs the drain–backup–migrate–swap sequence (§3) using the schema lock. It also refuses unsafe swaps, such as code older than the applied migrations. Compiling, migrating, and serving are separate components; `lifecycle` is the only one that knows the order they happen in.
+**`lifecycle`.** `AppInstance` owns everything for one running app: the current `CompiledApp` and `AppConfig`, the stores, and the services. It watches `code/` and `private/config/` (by polling through `CodeTree`, waiting for quiet; built in M3 for `code/`), runs the compiler, and performs the drain–backup–migrate–swap sequence (§3) using the schema lock. It also refuses unsafe swaps, such as code older than the applied migrations. Compiling, migrating, and serving are separate components; `lifecycle` is the only one that knows the order they happen in.
 
 ### Hosts
 
@@ -312,7 +312,7 @@ Reserved prefixes (`/__auth/`, `/__fourfold/`, `/__dev/`) are routed to their ow
 - **`http-server`**: the standalone server: listening, TLS and ACME, HTTP/1.1 and HTTP/2, connection limits, SSE connections. It produces `HttpRequest`s and consumes `HttpResponse`s.
 - **`cgi`**: a thin adapter that builds an `HttpRequest` from CGI environment and stdin, runs the engine once, and writes the response. FastCGI is the same over a socket.
 - **`front`**: the multi-app TLS router (§8). Practically a separate program; it shares only `net` and the TLS code.
-- **`devtools`**: an `Observer` implementation plus handlers for `/__dev/*`. The core emits events (request started, route matched, policy decision, field filled, query run, outbound call, budget used, session before and after, job enqueued, compile finished, diagnostics), and `devtools` records and displays them. The live-reload script, the error overlay, and the "sign in as…" picker are injected through a render hook. **In production the observer is a no-op**, and `devtools` isn't linked into the request path at all.
+- **`devtools`**: an `Observer` implementation plus handlers for `/__dev/*`. The core emits events (request started, route matched, policy decision, field filled, query run, outbound call, budget used, session before and after, job enqueued, compile finished, diagnostics), and `devtools` records and displays them. The live-reload script, the error overlay, and the "sign in as…" picker are injected through a render hook: `EngineHooks` (in `pipeline`), which also routes `/__dev/*` to the dev tools after Admit, and makes the dev error page. Only the host links the two together. **In production the observer is a no-op**, and `devtools` isn't linked into the request path at all.
 
 Dev mode's *behavioral* differences (unprefixed cookies over plain HTTP, minimal challenge difficulty, fake login enabled, seed data) are settings in `AppConfig`, chosen by `config` when the mode is dev. Components read their settings; they never ask "are we in dev mode?" That keeps `if (dev)` checks from spreading through the code.
 
@@ -462,7 +462,7 @@ Some examples of changes, and what each one touches:
 
 ## Open questions
 
-- **Where the compiler's MS2 work runs.** The compiler needs MS2 to compile `.ms` files and evaluate declarations, but MS2 work must happen on the script thread. Options: run compile steps on the script thread in slices (simple, but a big compile delays requests); compile in a separate short-lived process that hands back a serialized compiled app (isolated, and the same path CGI uses, but needs bytecode serialization); or a second GC heap once MS2 supports per-thread GCs.
+- ~~**Where the compiler's MS2 work runs.**~~ *Decided in M3:* on the script thread, sliced a file at a time, with each page's top level run as a scheduled discovery run. A request made during a large compile waits about one file's compile time (a few ms), not the whole compile's. A separate process (needing bytecode serialization) or a second GC heap (needing per-thread GCs) remain options if very large files make this a problem. See [m3-results.md](m3-results.md).
 - **Per-VM memory budgets** with a shared GC. Maybe per-VM allocation accounting in MS2; otherwise a process-level limit plus restarting a worker process that exceeds it, which favors the several-processes model.
 - **Event loop and HTTP stack.** Asio vs. libuv vs. a small hand-rolled loop. HTTP/2 and TLS tilt toward existing libraries.
 - **`Datum` serialization format.** JSON is debuggable and matches `json()`; a binary format is smaller and faster. Possibly JSON first, behind the codec, so it can change later.

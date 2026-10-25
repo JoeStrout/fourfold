@@ -24,11 +24,14 @@ To run a sample app:
 ./build/dev/bin/fourfold dev examples/scripts         # pages with MiniScript (M2)
 ```
 
+`fourfold dev` watches `code/`: save a file, and open pages reload (or, for a stylesheet, swap it in place). Compile errors show as an overlay on open pages, while the last version that compiled keeps serving. Touching `code/.deploy` recompiles at once.
+
 Benchmarks are built with the tests but not run by ctest; use a release build for meaningful numbers:
 
 ```sh
 cmake --preset release && cmake --build --preset release
 ./build/release/bin/bench_script     # the cost of a fresh VM per request (see docs/design/m2-results.md)
+./build/release/bin/bench_compile    # what recompiling costs requests meanwhile (see docs/design/m3-results.md)
 ```
 
 Presets (in `CMakePresets.json`):

@@ -1,6 +1,6 @@
 # Suggested changes to MiniScript 2
 
-*Started 2026-10-24, after M2. A running list of changes to MiniScript 2 (`../miniscript2`) that would help Fourfold. Each entry gives the problem, a suggested shape for the change, Fourfold's current workaround, and what the change would buy us. The shapes are suggestions; the MS2 side knows best how to fit them in. Background and measurements are in [design/m2-results.md](design/m2-results.md).*
+*Started 2026-10-24, after M2. A running list of changes to MiniScript 2 (`../miniscript2`) that would help Fourfold. Each entry gives the problem, a suggested shape for the change, Fourfold's current workaround, and what the change would buy us. The shapes are suggestions; the MS2 side knows best how to fit them in. Background and measurements are in [design/m2-results.md](design/m2-results.md) and [design/m3-results.md](design/m3-results.md).*
 
 File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` is transpiled from.
 
@@ -21,8 +21,9 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 | 11 | `Globals` id counter that can't overflow | Low (easy) | None |
 | 12 | `RunFunction` fails cleanly if the callee yields or waits | Low | Never use it |
 | 13 | Not-done intrinsics yield by default | Low | Fourfold's intrinsics set `yielding` themselves |
-| 14 | Bytecode serialization | Later (M3, M10) | Recompile |
+| 14 | Bytecode serialization | Later (M5 decides, M10) | Recompile |
 | 15 | A GC per thread | Later (M11) | Several processes |
+| 16 | Resumable compiling (one file in slices) | Low | Compile a file at a time |
 
 ---
 
@@ -215,10 +216,10 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 **Suggested shape.** Save a compiled program (functions and their constants) to bytes, and load it back.
 
-**Workaround today.** Recompile. M2 compiles at startup only.
+**Workaround today.** Recompile. Since M3, compiling runs on the script thread, a file at a time, between requests; measured, that's good enough (m3-results.md).
 
 **Benefit.**
-- In M3, compiling can run in a separate process that hands back a serialized compiled app. That isolates long compiles from serving, one of the options for where compiling runs (Arch, Open questions).
+- Compiling could run in a separate process that hands back a serialized compiled app, isolating long compiles from serving. M3 didn't need this.
 - In CGI mode (M10), a request can load the cached compiled app from `private/state/` instead of recompiling every `.ms` file on a cold start (overview §8; risk R8).
 
 ## 15. A GC per thread
@@ -231,4 +232,14 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 **Benefit.**
 - Several script threads in one engine process (Arch §3, "Using more than one core"): simpler deployment, shared caches, and SSE `publish` without fan-out between processes.
-- A separate GC heap for compiling, so a large compile needn't share the request thread (another of M3's options).
+- A separate GC heap for compiling, so a large compile needn't share the request thread (another of M3's options, not needed so far).
+
+## 16. Resumable compiling
+
+**Problem.** Parsing and generating code for one file is a single call. Fourfold compiles on the script thread a file at a time, so a request arriving during a compile waits for the current file: about 20 µs per line, measured in M3. Files of normal size cost a few milliseconds, but a 5,000-line file would stall requests for about 0.1 s.
+
+**Suggested shape.** A parser and code generator that can stop after a budget of work and continue later, like `Run(maxCycles)`.
+
+**Workaround today.** One file per step. Only very large files are a problem, and in dev mode only for the developer who saved one.
+
+**Benefit.** A request's worst delay during a compile no longer depends on the largest file in the app.
