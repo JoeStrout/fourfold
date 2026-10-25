@@ -29,6 +29,7 @@ fourfold_component(lifecycle DIR engine/lifecycle   # watch, compile, swap
     DEPS base partition compiledapp script compiler observer pipeline platform)
 
 # --- Hosts ---
+fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform)
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)
 fourfold_executable(fourfold DIR hosts/cli
-    DEPS base partition script compiler observer pipeline lifecycle platform httpserver)
+    DEPS base partition script compiler observer pipeline lifecycle devtools platform httpserver)
