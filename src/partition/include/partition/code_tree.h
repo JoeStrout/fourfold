@@ -13,6 +13,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -64,6 +65,12 @@ public:
     Result<CodeListing> list() const;
 
     Result<CodeEntry> stat(const RelPath& path) const;
+
+    // The modification time of the deploy trigger, code/.deploy (overview
+    // §8: touching it means "load now"), or nullopt if there's no such
+    // regular file. The one dot-file the tree looks at; it's never listed,
+    // read, or compiled. A symbolic link there counts as missing.
+    std::optional<int64_t> deployTrigger() const;
 
     // The whole file. Fails with NotFound if it's missing, a symbolic link,
     // or not a regular file, and TooLarge past maxFileBytes.

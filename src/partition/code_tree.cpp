@@ -91,6 +91,14 @@ Result<CodeEntry> CodeTree::stat(const RelPath& path) const {
     return CodeEntry{path, static_cast<uint64_t>(info.st_size), modifiedTimeNs(info)};
 }
 
+std::optional<int64_t> CodeTree::deployTrigger() const {
+    struct stat info;
+    if (fstatat(root_.get(), ".deploy", &info, AT_SYMLINK_NOFOLLOW) < 0 || !S_ISREG(info.st_mode)) {
+        return std::nullopt;
+    }
+    return modifiedTimeNs(info);
+}
+
 Result<CodeFile> CodeTree::read(const RelPath& path) const {
     struct stat info;
     auto fd = openFileForRead(root_.get(), path, kPartition, &info);

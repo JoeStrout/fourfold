@@ -1,6 +1,8 @@
 #include "partition/code_tree.h"
 
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "doctest.h"
 #include "partition/app_folder.h"
@@ -165,4 +167,36 @@ TEST_CASE("CodeTree: limits") {
     auto deepListing = openCode(deep, shallow).list();
     REQUIRE_FALSE(deepListing.ok());
     CHECK(deepListing.error().code == ErrorCode::TooLarge);
+}
+
+TEST_CASE("CodeTree: the deploy trigger") {
+    TempDir dir;
+    dir.write("code/pages/index.html", "home");
+    CodeTree code = openCode(dir);
+    CHECK_FALSE(code.deployTrigger());
+
+    dir.write("code/.deploy", "");
+    auto first = code.deployTrigger();
+    REQUIRE(first);
+    struct timespec times[2] = {{0, UTIME_OMIT}, {1'000'000'000, 0}};   // set mtime to a known value
+    REQUIRE(utimensat(AT_FDCWD, dir.at("code/.deploy").c_str(), times, 0) == 0);
+    auto second = code.deployTrigger();
+    REQUIRE(second);
+    CHECK_EQ(*second, int64_t(1'000'000'000) * 1'000'000'000);
+    CHECK_NE(*first, *second);
+
+    // Not a file in the listing.
+    for (const CodeEntry& e : code.list().value().files) CHECK_NE(e.path.str(), ".deploy");
+
+    SUBCASE("a symbolic link counts as missing") {
+        dir.write("elsewhere", "");
+        REQUIRE(unlink(dir.at("code/.deploy").c_str()) == 0);
+        dir.symlink("../elsewhere", "code/.deploy");
+        CHECK_FALSE(code.deployTrigger());
+    }
+    SUBCASE("so does a folder") {
+        REQUIRE(unlink(dir.at("code/.deploy").c_str()) == 0);
+        dir.write("code/.deploy/x", "");
+        CHECK_FALSE(code.deployTrigger());
+    }
 }
