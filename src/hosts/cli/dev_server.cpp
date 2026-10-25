@@ -2,13 +2,12 @@
 
 #include <ostream>
 
-#include "compiler/compiler.h"
 #include "partition/app_folder.h"
 
 namespace fourfold::cli {
 
 std::unique_ptr<DevServer> DevServer::start(const std::string& folder, uint16_t port, std::ostream& out,
-                                            std::ostream& err) {
+                                            std::ostream& err, LifecycleOptions lifecycle) {
     std::unique_ptr<DevServer> dev(new DevServer(out, err));
 
     auto app = AppFolder::open(folder, AppFolder::Missing::Create);
@@ -17,10 +16,16 @@ std::unique_ptr<DevServer> DevServer::start(const std::string& folder, uint16_t 
         return nullptr;
     }
     dev->root_ = app.value().root();
-    auto code = app.value().codeTree();
-    if (!code) {
-        err << "fourfold dev: " << code.error().message << "\n";
-        return nullptr;
+    // The app instance, the engine (for static files) and the dev tools (for
+    // the code around errors) each read code/ through a CodeTree of their own.
+    auto watchedCode = app.value().codeTree();
+    auto engineCode = app.value().codeTree();
+    auto devCode = app.value().codeTree();
+    for (auto* code : {&watchedCode, &engineCode, &devCode}) {
+        if (!*code) {
+            err << "fourfold dev: " << code->error().message << "\n";
+            return nullptr;
+        }
     }
 
     auto loop = EventLoop::create();
@@ -42,35 +47,35 @@ std::unique_ptr<DevServer> DevServer::start(const std::string& folder, uint16_t 
     }
     dev->scripts_ = std::move(scripts).value();
 
-    CompileOptions compileOptions;
-    compileOptions.scripts = dev->scripts_.get();
-    CompileOutput compiled = compile(code.value(), compileOptions);
-    for (const Diagnostic& d : compiled.diagnostics) err << d.toString() << "\n";
-    if (!compiled.ok()) {
-        err << "fourfold dev: the app didn't compile.\n";
-        return nullptr;
-    }
+    dev->devtools_ = std::make_unique<DevTools>(*dev->loop_, std::move(devCode).value());
+    dev->observers_.add(self);
+    dev->observers_.add(dev->devtools_.get());
 
-    // Static files are read per request, through a CodeTree of the engine's own.
-    auto engineCode = app.value().codeTree();
-    if (!engineCode) {
-        err << "fourfold dev: " << engineCode.error().message << "\n";
-        return nullptr;
-    }
     EngineOptions engineOptions{localhostNames()};
     engineOptions.showErrorDetails = true;
-    engineOptions.observer = self;
-    dev->engine_ = std::make_unique<Engine>(compiled.app, std::move(engineCode).value(), dev->scripts_.get(),
+    engineOptions.observer = &dev->observers_;
+    engineOptions.hooks = dev->devtools_.get();
+    dev->engine_ = std::make_unique<Engine>(nullptr, std::move(engineCode).value(), dev->scripts_.get(),
                                             std::move(engineOptions));
+
+    auto instance = AppInstance::create(std::move(watchedCode).value(), dev->scripts_.get(), *dev->engine_,
+                                        &dev->observers_, lifecycle);
+    if (!instance) {
+        err << "fourfold dev: " << instance.error().message << "\n";
+        return nullptr;
+    }
+    dev->instance_ = std::move(instance).value();
+    dev->instance_->start();   // reports through compileFinished
 
     dev->server_ = std::make_unique<HttpServer>(*dev->loop_, [self](HttpRequest request, Responder respond) {
         std::string line = request.method + " " + request.target;
+        bool quiet = request.target.compare(0, 7, "/__dev/") == 0;   // the dev tools' own traffic
         // The response may come from the script thread; the server wants it
         // on its own loop.
-        self->engine_->handle(request, [self, respond, line](HttpResponse response) {
+        self->engine_->handle(request, [self, respond, line, quiet](HttpResponse response) {
             auto shared = std::make_shared<HttpResponse>(std::move(response));
-            self->loop_->post([self, respond, line, shared] {
-                self->say(line + " " + std::to_string(shared->status));
+            self->loop_->post([self, respond, line, quiet, shared] {
+                if (!quiet) self->say(line + " " + std::to_string(shared->status));
                 respond(std::move(*shared));
             });
         });
@@ -84,22 +89,48 @@ std::unique_ptr<DevServer> DevServer::start(const std::string& folder, uint16_t 
 }
 
 DevServer::~DevServer() {
-    // The server first, then the script host (which stops its thread, so
-    // nothing more is posted to the loop), and the loop last.
+    // The server first (closing connections), then the app instance (no more
+    // compiles), then the script host (its thread stops, so no run calls
+    // back into the engine's options or hooks), and the rest after.
     server_.reset();
-    engine_.reset();
+    instance_.reset();
     scripts_.reset();
+    engine_.reset();
+    devtools_.reset();
     loop_.reset();
 }
 
-void DevServer::say(const std::string& line) {
-    std::lock_guard<std::mutex> lock(outMutex_);
-    out_ << line << std::endl;
+void DevServer::compileFinished(const CompileReport& report) {
+    for (const Diagnostic& d : report.diagnostics) sayError(d.toString());
+    bool first = !started_;
+    started_ = true;
+    if (first) {
+        firstCompileOk_ = report.ok;
+        if (!report.ok) sayError("fourfold dev: the app didn't compile; serving an error page until it does.");
+        return;
+    }
+    if (!report.ok) {
+        sayError(report.generation ? "Didn't compile; still serving the last version that did."
+                                   : "Didn't compile; nothing to serve yet.");
+        return;
+    }
+    std::string changed;
+    for (size_t i = 0; i < report.changed.size() && i < 3; i++) {
+        changed += (i ? ", " : "") + report.changed[i].str();
+    }
+    if (report.changed.size() > 3) changed += ", and " + std::to_string(report.changed.size() - 3) + " more";
+    say("Recompiled (" + (changed.empty() ? std::string("no changes") : changed) + ") in " +
+        std::to_string(report.duration.count()) + " ms" + (report.cssOnly ? "; swapping stylesheets" : ""));
 }
 
 void DevServer::scriptError(const ScriptError& e) {
     std::string where = e.file + (e.line > 0 ? ":" + std::to_string(e.line) : "");
     sayError(where + ": error: " + e.message);
+}
+
+void DevServer::say(const std::string& line) {
+    std::lock_guard<std::mutex> lock(outMutex_);
+    out_ << line << std::endl;
 }
 
 void DevServer::sayError(const std::string& line) {

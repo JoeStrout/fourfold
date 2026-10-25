@@ -77,8 +77,8 @@ int runDev(const std::vector<std::string>& args, std::ostream& out, std::ostream
     out << "Fourfold " << versionString() << ", serving " << server->root() << "\n"
         << "  http://localhost:" << server->port() << "/\n"
         << "Dev mode: localhost only. This build has no CSRF protection or sign-in yet,\n"
-        << "so it never listens on other addresses. No recompiling yet either: restart\n"
-        << "to see changes. Press Ctrl-C to stop.\n"
+        << "so it never listens on other addresses. Watching code/: saved changes are\n"
+        << "recompiled, and open pages reload. Press Ctrl-C to stop.\n"
         << std::flush;
     server->loop().run();
     return kExitOk;

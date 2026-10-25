@@ -186,7 +186,9 @@ TEST_CASE("CodeTree: the deploy trigger") {
     CHECK_NE(*first, *second);
 
     // Not a file in the listing.
-    for (const CodeEntry& e : code.list().value().files) CHECK_NE(e.path.str(), ".deploy");
+    auto listing = code.list();
+    REQUIRE(listing.ok());
+    for (const CodeEntry& e : listing.value().files) CHECK_NE(e.path.str(), ".deploy");
 
     SUBCASE("a symbolic link counts as missing") {
         dir.write("elsewhere", "");
