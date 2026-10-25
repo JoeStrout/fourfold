@@ -21,6 +21,28 @@ bool isFramingHeader(const std::string& name) {
 
 }  // namespace
 
+// The StreamWriter handed to a streamed response. It holds the connection
+// weakly, so a stream outliving its client just finds itself closed.
+class ConnectionStreamWriter : public StreamWriter {
+public:
+    explicit ConnectionStreamWriter(std::weak_ptr<HttpConnection> connection) : connection_(std::move(connection)) {}
+
+    bool write(std::string bytes) override {
+        auto c = connection_.lock();
+        return c && c->streamWrite(std::move(bytes));
+    }
+    void close() override {
+        if (auto c = connection_.lock()) c->endStream();
+    }
+    bool isOpen() const override {
+        auto c = connection_.lock();
+        return c && c->state_ == HttpConnection::State::Streaming && !c->streamEnding_;
+    }
+
+private:
+    std::weak_ptr<HttpConnection> connection_;
+};
+
 HttpConnection::HttpConnection(HttpServer& server, Fd fd, std::string peerAddress)
     : server_(server),
       loop_(server.loop_),
@@ -77,9 +99,11 @@ void HttpConnection::setInterest(uint32_t interest) {
 
 void HttpConnection::onIo(uint32_t events) {
     auto keep = shared_from_this();   // close() may drop the server's reference
-    if ((events & io::kWritable) && state_ == State::Writing) flush();
+    if ((events & io::kWritable) && (state_ == State::Writing || state_ == State::Streaming)) flush();
     if ((events & io::kReadable) && (state_ == State::Reading || state_ == State::Draining)) {
         onReadable();
+    } else if ((events & io::kReadable) && state_ == State::Streaming) {
+        discardInput();
     }
 }
 
@@ -163,6 +187,12 @@ void HttpConnection::respond(HttpResponse response) {
 
     int status = response.status;
     bool mayHaveBody = !(status < 200 || status == 204 || status == 304);
+    bool streamed = response.stream && mayHaveBody && !headRequest_;
+    if (streamed) {
+        // The body ends when the connection does.
+        closeAfterWrite_ = true;
+        pendingStream_ = std::move(response.stream);
+    }
 
     std::string& out = outbuf_;
     out = "HTTP/1.1 " + std::to_string(status) + " " + statusReason(status) + "\r\n";
@@ -171,7 +201,7 @@ void HttpConnection::respond(HttpResponse response) {
         if (isFramingHeader(f.name) || hasLineBreak(f.name) || hasLineBreak(f.value)) continue;
         out += f.name + ": " + f.value + "\r\n";
     }
-    if (mayHaveBody) out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
+    if (mayHaveBody && !streamed) out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
     if (closeAfterWrite_) {
         out += "Connection: close\r\n";
     } else if (http10_) {
@@ -179,7 +209,7 @@ void HttpConnection::respond(HttpResponse response) {
         out += "Connection: keep-alive\r\n";
     }
     out += "\r\n";
-    if (mayHaveBody && !headRequest_) out += response.body;
+    if (mayHaveBody && !headRequest_ && !streamed) out += response.body;
     outSent_ = 0;
 
     state_ = State::Writing;
@@ -209,10 +239,33 @@ void HttpConnection::flush() {
     }
     outbuf_.clear();
     outSent_ = 0;
+    if (state_ == State::Streaming) {
+        if (streamEnding_) {
+            pendingStream_ = nullptr;
+            state_ = State::Writing;
+            finishResponse();   // closeAfterWrite_ is set: drains, then closes
+        } else {
+            setInterest(io::kReadable);   // to notice the client leaving
+        }
+        return;
+    }
     finishResponse();
 }
 
 void HttpConnection::finishResponse() {
+    if (pendingStream_) {
+        // The headers are out; hand the stream its writer.
+        state_ = State::Streaming;
+        loop_.cancelTimer(timer_);
+        timer_ = 0;
+        setInterest(io::kReadable);
+        if (state_ == State::Closed) return;
+        auto start = std::move(pendingStream_);
+        pendingStream_ = nullptr;
+        auto keep = shared_from_this();
+        start(std::make_shared<ConnectionStreamWriter>(weak_from_this()));
+        return;
+    }
     if (closeAfterWrite_) {
         // Shut our side and discard what the client still sends, so closing
         // doesn't reset the connection before the client reads the response.
@@ -229,6 +282,39 @@ void HttpConnection::finishResponse() {
     setInterest(io::kReadable);
     armTimer(limits_.idleTimeout);
     parseBuffered();   // a pipelined request may already be waiting
+}
+
+bool HttpConnection::streamWrite(std::string bytes) {
+    if (state_ != State::Streaming || streamEnding_) return false;
+    if (outbuf_.size() - outSent_ + bytes.size() > limits_.maxStreamBufferBytes) {
+        close();   // the client isn't reading
+        return false;
+    }
+    outbuf_ += bytes;
+    flush();
+    return state_ == State::Streaming;
+}
+
+void HttpConnection::endStream() {
+    if (state_ != State::Streaming || streamEnding_) return;
+    streamEnding_ = true;
+    flush();   // finishes at once if nothing is waiting
+}
+
+void HttpConnection::discardInput() {
+    char buffer[kReadChunk];
+    for (;;) {
+        auto n = readSome(fd_.get(), buffer, sizeof buffer);
+        if (!n) {
+            if (n.error().code == ErrorCode::WouldBlock) return;
+            close();
+            return;
+        }
+        if (n.value() == 0) {
+            close();   // the client has gone
+            return;
+        }
+    }
 }
 
 void HttpConnection::armTimer(std::chrono::milliseconds delay) {

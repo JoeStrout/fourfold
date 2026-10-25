@@ -8,6 +8,10 @@
 // The handler may respond at once, or later (e.g. after the script thread
 // runs). Either way, it must call the Responder on the loop thread. If the
 // connection has closed meanwhile, the response is dropped.
+//
+// A response with a `stream` (server-sent events) is sent without a
+// Content-Length, and ends the connection when the stream closes. Streams
+// aren't subject to the request or idle timeouts.
 #pragma once
 
 #include <chrono>
@@ -34,6 +38,9 @@ struct HttpServerLimits {
     std::chrono::milliseconds requestTimeout{30000};
     // Time an idle keep-alive connection is kept open.
     std::chrono::milliseconds idleTimeout{60000};
+    // A streamed response (server-sent events) is closed if this much of it
+    // is waiting for a client that isn't reading.
+    size_t maxStreamBufferBytes = 1024 * 1024;
 };
 
 using Responder = std::function<void(HttpResponse)>;

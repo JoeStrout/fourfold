@@ -3,6 +3,8 @@
 // structs, so the engine can't tell which transport a request came from.
 #pragma once
 
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -46,10 +48,27 @@ struct HttpRequest {
     std::string peerAddress;     // numeric IP of the connection's other end
 };
 
+// The writing end of a streamed response body (server-sent events). Its
+// methods must be called on the transport's thread (for HttpServer, its
+// loop). Once the client has gone, isOpen() is false and writes are dropped.
+class StreamWriter {
+public:
+    virtual ~StreamWriter() = default;
+    // False if the stream is closed, or the client isn't keeping up (it's
+    // then closed).
+    virtual bool write(std::string bytes) = 0;
+    virtual void close() = 0;
+    virtual bool isOpen() const = 0;
+};
+
 struct HttpResponse {
     int status = 200;
     Headers headers;
     std::string body;
+    // If set, the body is streamed instead: after the headers are sent, the
+    // transport calls this, on its own thread, with the writer to send the
+    // body through. The connection ends when the stream does.
+    std::function<void(std::shared_ptr<StreamWriter>)> stream;
 
     // A plain-text response, e.g. for errors.
     static HttpResponse text(int status, std::string body);

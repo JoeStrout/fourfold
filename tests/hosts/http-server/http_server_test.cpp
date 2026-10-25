@@ -324,6 +324,82 @@ TEST_CASE("HttpServer: timeouts") {
     }
 }
 
+namespace {
+
+// A handler that answers with a stream, keeping the writer for the test.
+RequestHandler streamingHandler(std::shared_ptr<StreamWriter>& writer) {
+    return [&writer](HttpRequest, Responder respond) {
+        HttpResponse r;
+        r.headers.set("Content-Type", "text/event-stream");
+        r.stream = [&writer](std::shared_ptr<StreamWriter> w) {
+            w->write("event: hello\n\n");
+            writer = std::move(w);
+        };
+        respond(std::move(r));
+    };
+}
+
+}  // namespace
+
+TEST_CASE("HttpServer: streams a response body") {
+    std::shared_ptr<StreamWriter> writer;
+    HttpServerLimits limits;
+    limits.requestTimeout = milliseconds(30);
+    limits.idleTimeout = milliseconds(30);
+    Harness h(limits, streamingHandler(writer));
+    h.send("GET /events HTTP/1.1\r\nHost: a\r\n\r\n");
+    for (int i = 0; i < 20 && !contains(h.received, "hello"); i++) h.pump();
+    REQUIRE(writer);
+    CHECK(writer->isOpen());
+    CHECK_EQ(h.received.rfind("HTTP/1.1 200 OK\r\n", 0), 0u);
+    CHECK_FALSE(contains(h.received, "Content-Length"));
+    CHECK(contains(h.received, "Connection: close\r\n"));
+    CHECK(contains(h.received, "\r\n\r\nevent: hello\n\n"));
+
+    SUBCASE("timeouts don't apply, and later writes arrive") {
+        for (int i = 0; i < 20; i++) h.pump(milliseconds(5));   // well past both timeouts
+        CHECK(writer->isOpen());
+        CHECK(writer->write("data: 1\n\n"));
+        h.pump();
+        CHECK(contains(h.received, "data: 1\n\n"));
+        CHECK_FALSE(h.clientSawEof);
+    }
+    SUBCASE("closing the stream ends the connection") {
+        writer->write("data: last\n\n");
+        writer->close();
+        CHECK_FALSE(writer->isOpen());
+        CHECK_FALSE(writer->write("dropped"));
+        h.waitForEof();
+        CHECK(h.clientSawEof);
+        CHECK(contains(h.received, "data: last\n\n"));
+        CHECK_FALSE(contains(h.received, "dropped"));
+    }
+    SUBCASE("the client leaving closes the stream") {
+        h.client.reset();
+        for (int i = 0; i < 20 && writer->isOpen(); i++) h.loop->runOnce(milliseconds(5));
+        CHECK_FALSE(writer->isOpen());
+        CHECK_FALSE(writer->write("data: x\n\n"));
+        CHECK_EQ(h.server->connectionCount(), 0u);
+    }
+    SUBCASE("a client that doesn't read is dropped") {
+        std::string chunk(64 * 1024, 'x');
+        bool ok = true;
+        for (int i = 0; i < 100 && ok; i++) ok = writer->write(chunk);   // 6.4 MB, past the 1 MB cap
+        CHECK_FALSE(ok);
+        CHECK_FALSE(writer->isOpen());
+    }
+}
+
+TEST_CASE("HttpServer: HEAD of a streamed response gets headers only") {
+    std::shared_ptr<StreamWriter> writer;
+    Harness h({}, streamingHandler(writer));
+    h.send("HEAD /events HTTP/1.1\r\nHost: a\r\n\r\n");
+    h.waitForResponses(1);
+    CHECK_FALSE(writer);
+    CHECK_EQ(h.received.rfind("HTTP/1.1 200 OK\r\n", 0), 0u);
+    CHECK_FALSE(contains(h.received, "hello"));
+}
+
 TEST_CASE("HttpServer: framing headers are the server's, and line breaks are dropped") {
     Harness h({}, [](HttpRequest, Responder respond) {
         HttpResponse r = HttpResponse::text(200, "body");

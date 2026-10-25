@@ -22,11 +22,14 @@ public:
     void close();
 
 private:
+    friend class ConnectionStreamWriter;
+
     enum class State {
         Reading,     // waiting for (more of) a request
         Handling,    // a request is with the handler; not reading
         Writing,     // sending a response
         Draining,    // response sent, write side shut; discarding input until EOF
+        Streaming,   // headers sent; the body is written as the stream provides it
         Closed,
     };
 
@@ -39,6 +42,10 @@ private:
     void flush();
     void finishResponse();
     void onTimeout();
+    // Streamed responses.
+    bool streamWrite(std::string bytes);
+    void endStream();
+    void discardInput();
     void armTimer(std::chrono::milliseconds delay);
     void resetRequest();
     void setInterest(uint32_t interest);
@@ -84,6 +91,10 @@ private:
     bool headRequest_ = false;
     bool http10_ = false;   // an HTTP/1.0 request: keep-alive must be said explicitly
     bool closeAfterWrite_ = false;
+
+    // A streamed response: started once its headers are sent.
+    std::function<void(std::shared_ptr<StreamWriter>)> pendingStream_;
+    bool streamEnding_ = false;   // the stream closed; finish once the buffer is sent
 
     EventLoop::TimerId timer_ = 0;
 };
