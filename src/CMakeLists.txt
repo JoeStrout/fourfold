@@ -23,9 +23,10 @@ fourfold_component(compiler DEPS base partition template compiledapp script)
 
 # --- Engine ---
 fourfold_component(http DIR engine/http)           # HttpRequest/HttpResponse
-fourfold_component(pipeline DIR engine/pipeline DEPS base partition template compiledapp script http)
+fourfold_component(observer DIR engine/observer DEPS base partition compiledapp script)   # events for the dev tools
+fourfold_component(pipeline DIR engine/pipeline DEPS base partition template compiledapp script http observer)
 
 # --- Hosts ---
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)
 fourfold_executable(fourfold DIR hosts/cli
-    DEPS base partition script compiler pipeline platform httpserver)
+    DEPS base partition script compiler observer pipeline platform httpserver)

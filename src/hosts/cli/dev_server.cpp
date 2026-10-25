@@ -59,10 +59,7 @@ std::unique_ptr<DevServer> DevServer::start(const std::string& folder, uint16_t 
     }
     EngineOptions engineOptions{localhostNames()};
     engineOptions.showErrorDetails = true;
-    engineOptions.onScriptError = [self](const ScriptError& e) {
-        std::string where = e.file + (e.line > 0 ? ":" + std::to_string(e.line) : "");
-        self->sayError(where + ": error: " + e.message);
-    };
+    engineOptions.observer = self;
     dev->engine_ = std::make_unique<Engine>(compiled.app, std::move(engineCode).value(), dev->scripts_.get(),
                                             std::move(engineOptions));
 
@@ -98,6 +95,11 @@ DevServer::~DevServer() {
 void DevServer::say(const std::string& line) {
     std::lock_guard<std::mutex> lock(outMutex_);
     out_ << line << std::endl;
+}
+
+void DevServer::scriptError(const ScriptError& e) {
+    std::string where = e.file + (e.line > 0 ? ":" + std::to_string(e.line) : "");
+    sayError(where + ": error: " + e.message);
 }
 
 void DevServer::sayError(const std::string& line) {

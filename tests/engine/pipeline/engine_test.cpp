@@ -211,20 +211,64 @@ TEST_CASE("Engine: every response gets the security headers") {
     }
 }
 
+// --- Swapping apps, and the dev tools' hooks ---
+
+namespace {
+
+struct FakeHooks : EngineHooks {
+    std::vector<std::string> reservedPaths;
+    std::vector<uint64_t> decorated;   // generations
+    std::mutex mutex;
+
+    std::optional<HttpResponse> reserved(const HttpRequest&, const AdmittedRequest& admitted) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        reservedPaths.push_back(admitted.path.path);
+        if (admitted.path.path != "/__dev/ping") return std::nullopt;
+        return HttpResponse::text(200, "pong");
+    }
+    void decorate(HttpResponse& response, uint64_t generation) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        decorated.push_back(generation);
+        response.body += "<!--dev-->";
+    }
+    HttpResponse scriptErrorPage(const ScriptError& error) override {
+        HttpResponse r = HttpResponse::text(500, "overlay: " + error.message);
+        r.headers.set("Content-Type", "text/html; charset=utf-8");
+        return r;
+    }
+};
+
+std::shared_ptr<CompiledApp> oneStaticApp(uint64_t generation, const char* css) {
+    auto app = std::make_shared<CompiledApp>();
+    app->generation = generation;
+    app->routes.add(std::string("/") + css, {RouteKind::Static, rel((std::string("pages/") + css).c_str())});
+    app->statics.add(rel((std::string("pages/") + css).c_str()), {"text/css; charset=utf-8", 6, 0});
+    return app;
+}
+
+}  // namespace
+
 // --- Pages and handlers with code ---
 
 namespace {
 
 // A small app with code: .ms files compiled by a real ScriptHost, routes
 // built by hand.
-struct ScriptApp {
+struct ScriptApp : Observer {
     TempDir dir;
     std::unique_ptr<ScriptHost> scripts;
     std::unique_ptr<Engine> engine;
     std::vector<ScriptError> errors;
     std::mutex errorsMutex;
 
-    explicit ScriptApp(bool showErrorDetails = false) {
+    void scriptError(const ScriptError& e) override {
+        std::lock_guard<std::mutex> lock(errorsMutex);
+        errors.push_back(e);
+    }
+
+    FakeHooks hooks;
+
+    explicit ScriptApp(bool showErrorDetails = false, bool withHooks = false) {
         dir.write("code/pages/hello.html", "<p>Hello, {{name}}!</p>");
         dir.write("code/pages/hello.ms",
                   "render = function(req)\n"
@@ -274,10 +318,8 @@ struct ScriptApp {
 
         EngineOptions options{localhostNames()};
         options.showErrorDetails = showErrorDetails;
-        options.onScriptError = [this](const ScriptError& e) {
-            std::lock_guard<std::mutex> lock(errorsMutex);
-            errors.push_back(e);
-        };
+        options.observer = this;
+        if (withHooks) options.hooks = &hooks;
         engine = std::make_unique<Engine>(app, std::move(code), scripts.get(), options);
     }
 
@@ -370,6 +412,13 @@ TEST_CASE("Engine: script errors are 500s, with the 500 page or (in dev) the det
         CHECK_EQ(app.errors[0].file, "code/pages/hello.ms");
         CHECK_EQ(app.errors[0].line, 17);
     }
+    SUBCASE("dev, with the dev tools: their error page") {
+        ScriptApp app(true, true);
+        HttpResponse r = app.get("/hello/boom");
+        CHECK_EQ(r.status, 500);
+        CHECK(r.body.find("overlay: ") == 0);
+        CHECK(r.body.find("<!--dev-->") != std::string::npos);
+    }
     SUBCASE("dev: plain-text details") {
         ScriptApp app(true);
         HttpResponse r = app.get("/hello/boom");
@@ -385,6 +434,67 @@ TEST_CASE("Engine: render returning fields for a page with no template is an err
     HttpResponse r = app.get("/api");
     CHECK_EQ(r.status, 500);
     CHECK(r.body.find("no .html template") != std::string::npos);
+}
+
+TEST_CASE("Engine: setApp swaps the app for later requests") {
+    App app;
+    CHECK_EQ(app.get("/about").status, 200);
+    std::weak_ptr<const CompiledApp> first = app.engine->app();
+    app.engine->setApp(oneStaticApp(2, "style.css"));
+    CHECK_EQ(app.engine->app()->generation, 2u);
+    CHECK_EQ(app.get("/about").status, 404);
+    CHECK_EQ(app.get("/style.css").status, 200);
+    CHECK(first.expired());   // nothing else held it
+}
+
+TEST_CASE("Engine: with no app yet, pages are 503") {
+    App app;
+    app.engine->setApp(nullptr);
+    HttpResponse r = app.get("/about");
+    CHECK_EQ(r.status, 503);
+    CHECK_EQ(header(r, "Content-Type"), "text/html; charset=utf-8");
+    CHECK(r.body.find("hasn't compiled") != std::string::npos);
+    CHECK_EQ(header(r, "X-Content-Type-Options"), "nosniff");
+}
+
+TEST_CASE("Engine: /__dev/ goes to the hooks, after the Host check") {
+    FakeHooks hooks;
+    EngineOptions options{localhostNames()};
+    options.hooks = &hooks;
+    App app(true, options);
+
+    HttpResponse r = app.get("/__dev/ping");
+    CHECK_EQ(r.status, 200);
+    CHECK_EQ(r.body, "pong");
+    CHECK_EQ(header(r, "X-Frame-Options"), "DENY");
+    CHECK_EQ(app.get("/__dev/other").status, 404);
+    CHECK_EQ(app.get("/__dev").status, 404);
+    CHECK_EQ(app.get("/__dev/ping", "GET", "evil.example").status, 400);   // DNS rebinding
+    std::lock_guard<std::mutex> lock(hooks.mutex);
+    CHECK_EQ(hooks.reservedPaths, std::vector<std::string>{"/__dev/ping", "/__dev/other", "/__dev"});
+}
+
+TEST_CASE("Engine: without hooks, /__dev/ is not found") {
+    App app;
+    CHECK_EQ(app.get("/__dev/ping").status, 404);
+}
+
+TEST_CASE("Engine: hooks decorate HTML responses only, with their generation") {
+    FakeHooks hooks;
+    EngineOptions options{localhostNames()};
+    options.hooks = &hooks;
+    App app(true, options);
+    auto withGeneration = std::make_shared<CompiledApp>(*app.engine->app());
+    withGeneration->generation = 7;
+    app.engine->setApp(withGeneration);
+
+    CHECK_EQ(app.get("/about").body, "<html>about</html><!--dev-->");
+    CHECK_EQ(app.get("/nope").body, "<html>missing</html><!--dev-->");   // the 404 page
+    CHECK_EQ(app.get("/style.css").body, "body{}");
+    app.engine->setApp(nullptr);
+    CHECK(app.get("/about").body.find("<!--dev-->") != std::string::npos);
+    std::lock_guard<std::mutex> lock(hooks.mutex);
+    CHECK_EQ(hooks.decorated, std::vector<uint64_t>{7, 7, 0});
 }
 
 TEST_CASE("parseUrlEncoded") {

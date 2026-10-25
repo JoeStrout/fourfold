@@ -9,13 +9,14 @@
 #include <string>
 
 #include "httpserver/http_server.h"
+#include "observer/observer.h"
 #include "pipeline/engine.h"
 #include "platform/event_loop.h"
 #include "script/script_host.h"
 
 namespace fourfold::cli {
 
-class DevServer {
+class DevServer : private Observer {
 public:
     // Opens and compiles the app at `folder` (creating missing partitions),
     // and listens on 127.0.0.1:port (0 picks a free port). Diagnostics go to
@@ -39,6 +40,8 @@ private:
     // Output comes from the I/O loop and the script thread; a line at a time.
     void say(const std::string& line);
     void sayError(const std::string& line);
+
+    void scriptError(const ScriptError& e) override;
 
     std::ostream& out_;
     std::ostream& err_;

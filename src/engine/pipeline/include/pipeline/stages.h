@@ -12,8 +12,10 @@
 
 #include "compiledapp/compiled_app.h"
 #include "http/message.h"
+#include "observer/observer.h"
 #include "partition/code_tree.h"
 #include "partition/paths.h"
+#include "pipeline/hooks.h"
 #include "script/script_host.h"
 
 namespace fourfold {
@@ -27,8 +29,11 @@ struct EngineOptions {
     // the generic 500 page. Dev mode sets this.
     bool showErrorDetails = false;
     // Hears about every script error (dev mode prints them; the engine log
-    // arrives in M5). May be called on the script thread.
-    std::function<void(const ScriptError&)> onScriptError = nullptr;
+    // arrives in M5). May be null. Must outlive the engine.
+    Observer* observer = nullptr;
+    // The dev tools' part in requests: /__dev/ routes, the injected client
+    // script, and the error page. Null in production. Must outlive the engine.
+    EngineHooks* hooks = nullptr;
 };
 
 // The host names `fourfold dev` answers to.

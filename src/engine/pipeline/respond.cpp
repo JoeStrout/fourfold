@@ -25,7 +25,8 @@ HttpResponse withBody(int status, const char* contentType, std::string body) {
 }  // namespace
 
 HttpResponse errorResponse(const ScriptError& error, const CompiledApp& app, const EngineOptions& options) {
-    if (options.onScriptError) options.onScriptError(error);
+    if (options.observer) options.observer->scriptError(error);
+    if (options.showErrorDetails && options.hooks) return options.hooks->scriptErrorPage(error);
     if (options.showErrorDetails) {
         // Plain text, so nothing in the message can become markup.
         std::string where = error.file.empty() ? "a script" : error.file;

@@ -3,6 +3,7 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 
 #include "compiledapp/compiled_app.h"
 #include "http/message.h"
@@ -17,8 +18,15 @@ public:
     using Done = std::function<void(HttpResponse)>;
 
     // `scripts` runs the app's handlers; it may be null for an app without
-    // code (app->scripts null).
+    // code (app->scripts null). `app` may be null until the first successful
+    // compile; requests are answered 503 meanwhile.
     Engine(std::shared_ptr<const CompiledApp> app, CodeTree code, ScriptHost* scripts, EngineOptions options);
+
+    // Thread-safe. Each request pins the app current when it arrives, so a
+    // swap never changes the app under a request in progress; the old app is
+    // released when its last request finishes.
+    void setApp(std::shared_ptr<const CompiledApp> app);
+    std::shared_ptr<const CompiledApp> app() const;
 
     // Handles one request, and calls `done` exactly once with the response:
     // before returning, for anything that runs no code, or later, on the
@@ -27,7 +35,8 @@ public:
     void handle(const HttpRequest& request, Done done) const;
 
 private:
-    std::shared_ptr<const CompiledApp> app_;   // swapped on recompile from M3
+    mutable std::mutex appMutex_;
+    std::shared_ptr<const CompiledApp> app_;   // guarded by appMutex_; swapped on recompile
     CodeTree code_;
     ScriptHost* scripts_;
     std::shared_ptr<const EngineOptions> options_;   // shared with runs in progress
