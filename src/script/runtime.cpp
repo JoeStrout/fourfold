@@ -344,6 +344,8 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addMarkdown();
     addUnsafeHtml();
     addData();
+    addRawData();
+    addFile();
     addDropbox();
     addTestSlowWork();
     addTestWithValue();

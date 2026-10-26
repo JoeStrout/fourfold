@@ -29,7 +29,7 @@ public:
         std::mutex m;
         std::condition_variable cv;
         bool done = false;
-        ticket_ = data.locks().acquire(DataFiles::lockKey(n), [&](Status, LockService::Ticket) {
+        ticket_ = data.locks().acquire(DataFiles::valueLockKey(n), [&](Status, LockService::Ticket) {
             std::lock_guard<std::mutex> lock(m);
             done = true;
             cv.notify_all();
@@ -147,4 +147,89 @@ TEST_CASE("DataFiles: concurrent increments under the lock lose nothing") {
     for (auto& th : threads) th.join();
     for (const auto& e : errors) CHECK_EQ(e, "");
     CHECK_EQ(f.data.get(n).value()->asNumber(), 400);
+}
+
+TEST_CASE("DataFiles: file paths") {
+    CHECK_EQ(DataFiles::checkPath("notes/about.md", false).value().str(), "notes/about.md");
+    CHECK(DataFiles::checkPath("votes.json", false));
+    CHECK(DataFiles::checkPath("", true).value().isRoot());
+    for (const char* bad : {"", "/etc/passwd", "/x", "../x", "a/../b", ".hidden", "a/.hidden", ".fourfold/locks/x",
+                            "a//b", "a\\b", "x/"}) {
+        INFO(bad);
+        CHECK_FALSE(DataFiles::checkPath(bad, false));
+    }
+    CHECK_FALSE(DataFiles::checkPath("..", true));
+}
+
+TEST_CASE("DataFiles: lock keys are shared between file and data") {
+    RelPath votes = name("votes");
+    CHECK_EQ(DataFiles::valueLockKey(votes), DataFiles::lockKey(DataFiles::checkPath("votes.json", false).value()));
+    CHECK_EQ(DataFiles::lockKey(DataFiles::checkPath("Polls/Votes.JSON", false).value()), "polls/votes.json");
+}
+
+TEST_CASE("DataFiles: whole files") {
+    Fixture f;
+    RelPath about = DataFiles::checkPath("pages/about.md", false).value();
+    CHECK_FALSE(f.data.readFile(about).value());
+    REQUIRE(f.data.writeFile(about, "# About\n"));
+    CHECK_EQ(*f.data.readFile(about).value(), "# About\n");
+    std::string binary("\x00\x01\xff", 3);
+    RelPath raw = DataFiles::checkPath("raw.bin", false).value();
+    REQUIRE(f.data.writeFile(raw, binary));
+    CHECK_EQ(*f.data.readFile(raw).value(), binary);
+
+    auto info = f.data.info(about).value();
+    REQUIRE(info);
+    CHECK_EQ(info->size, 8u);
+    CHECK(f.data.info(about.parent()).value()->isFolder);
+    CHECK_EQ(f.data.children(RelPath()).value(), std::vector<std::string>{"pages", "raw.bin"});
+    CHECK(f.data.children(about).error().code == ErrorCode::Conflict);
+    CHECK(f.data.children(DataFiles::checkPath("nope", false).value()).error().code == ErrorCode::NotFound);
+    CHECK(f.data.readFile(about.parent()).error().code == ErrorCode::Conflict);
+
+    REQUIRE(f.data.makeFolder(DataFiles::checkPath("empty", false).value()));
+    CHECK_FALSE(f.data.removeFile(about.parent()));   // not empty
+    CHECK(f.data.removeFile(about).value());
+    CHECK_FALSE(f.data.removeFile(about).value());
+    CHECK(f.data.removeFile(about.parent()).value());
+    CHECK(f.data.removeFile(DataFiles::checkPath("empty", false).value()).value());
+}
+
+TEST_CASE("DataFiles: file and data see the same files") {
+    Fixture f;
+    RelPath votes = DataFiles::checkPath("votes.json", false).value();
+    REQUIRE(f.data.set(name("votes"), Datum::map({{"yes", Datum::number(2)}})));
+    CHECK_EQ(*f.data.readFile(votes).value(), "{\"yes\":2}");
+    REQUIRE(f.data.writeFile(votes, "[1, 2]"));
+    CHECK_EQ(toJson(*f.data.get(name("votes")).value()), "[1,2]");
+    REQUIRE(f.data.writeFile(votes, "not json"));
+    CHECK_FALSE(f.data.get(name("votes")));
+}
+
+TEST_CASE("DataFiles: the size cap covers files") {
+    TempDir dir;
+    AppFolder app = AppFolder::open(dir.at("app"), AppFolder::Missing::Create).value();
+    DataLimits limits;
+    limits.maxBytes = 10;
+    DataFiles data(app.dataDir().value(), limits);
+    RelPath p = DataFiles::checkPath("a.txt", false).value();
+    CHECK(data.writeFile(p, "0123456789"));
+    CHECK(data.writeFile(p, "0123456789x").error().code == ErrorCode::TooLarge);
+    std::ofstream(dir.at("app/data/big.txt")) << "0123456789x";
+    CHECK(data.readFile(DataFiles::checkPath("big.txt", false).value()).error().code == ErrorCode::TooLarge);
+}
+
+TEST_CASE("DataFiles: lines") {
+    using V = std::vector<std::string>;
+    CHECK_EQ(DataFiles::splitLines("").value(), V{});
+    CHECK_EQ(DataFiles::splitLines("a").value(), V{"a"});
+    CHECK_EQ(DataFiles::splitLines("a\n").value(), V{"a"});
+    CHECK_EQ(DataFiles::splitLines("a\n\nb").value(), V{"a", "", "b"});
+    CHECK_EQ(DataFiles::splitLines("a\r\nb\rc\n").value(), V{"a", "b", "c"});
+    CHECK_EQ(DataFiles::splitLines("\n").value(), V{""});
+    CHECK_EQ(DataFiles::splitLines("caf\xc3\xa9").value(), V{"caf\xc3\xa9"});
+    CHECK(DataFiles::splitLines(std::string("a\0b", 3)).error().code == ErrorCode::Invalid);
+    CHECK(DataFiles::splitLines("\xff\xfe").error().code == ErrorCode::Invalid);
+    CHECK_EQ(DataFiles::joinLines({"a", "", "b"}), "a\n\nb\n");
+    CHECK_EQ(DataFiles::joinLines({}), "");
 }

@@ -11,6 +11,8 @@
 // the worker pool.
 #pragma once
 
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -25,6 +27,12 @@ namespace fourfold {
 struct DirEntry {
     std::string name;
     bool isFolder = false;
+};
+
+struct FileInfo {
+    bool isFolder = false;
+    uint64_t size = 0;          // bytes; 0 for a folder
+    int64_t modifiedNs = 0;     // since the epoch
 };
 
 class DataDir {
@@ -43,6 +51,12 @@ public:
     Result<bool> exists(const RelPath& path) const;
     // Sorted; leaves out dot-names, links and special files.
     Result<std::vector<DirEntry>> list(const RelPath& folder) const;
+    // Creates a folder (and any above it); fine if it exists.
+    Status makeFolder(const RelPath& folder) const;
+    // An empty folder only: Conflict if it has anything in it.
+    Status removeFolder(const RelPath& folder) const;
+    // nullopt if there's no file or folder there.
+    Result<std::optional<FileInfo>> info(const RelPath& path) const;
 
     // The lock file for `key`, in data/.fourfold/locks/ (engine use only:
     // RelPath can't name that folder, so app code can't reach it).

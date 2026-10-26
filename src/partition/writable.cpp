@@ -250,6 +250,59 @@ Result<bool> fileExists(int rootFd, const RelPath& path, const std::string& part
     return S_ISREG(info.st_mode);
 }
 
+Status makeFolder(int rootFd, const RelPath& dir, mode_t mode, const std::string& partition) {
+    // openOrMakeFolder refuses (as ENOTDIR or ELOOP) a file or link in the way.
+    auto fd = ensureFolder(rootFd, dir, mode, partition);
+    if (!fd) {
+        Error e = fd.error();
+        if (e.code == ErrorCode::NotFound) {
+            return makeError(ErrorCode::Conflict, describe(partition, dir) + ": a file is in the way");
+        }
+        return e;
+    }
+    return {};
+}
+
+Status removeFolder(int rootFd, const RelPath& dir, const std::string& partition) {
+    if (dir.isRoot()) return makeError(ErrorCode::Invalid, partition + ": can't remove the partition itself");
+    auto folder = openFolder(rootFd, dir.parent(), partition);
+    if (!folder) return folder.error();
+    std::string what = describe(partition, dir);
+    std::string name(dir.name());
+    struct stat st;
+    if (fstatat(folder.value().get(), name.c_str(), &st, AT_SYMLINK_NOFOLLOW) < 0) return fileError(errno, what);
+    if (!S_ISDIR(st.st_mode)) return makeError(ErrorCode::NotFound, what + ": not a folder");
+    if (unlinkat(folder.value().get(), name.c_str(), AT_REMOVEDIR) < 0) {
+        if (errno == ENOTEMPTY || errno == EEXIST) return makeError(ErrorCode::Conflict, what + ": not empty");
+        return fileError(errno, what);
+    }
+    return {};
+}
+
+Result<std::optional<FileInfo>> info(int rootFd, const RelPath& path, const std::string& partition) {
+    struct stat st;
+    if (path.isRoot()) {
+        if (fstat(rootFd, &st) < 0) return fileError(errno, partition);
+    } else {
+        auto folder = openFolder(rootFd, path.parent(), partition);
+        if (!folder) {
+            if (folder.error().code == ErrorCode::NotFound) return std::optional<FileInfo>();
+            return folder.error();
+        }
+        std::string name(path.name());
+        if (fstatat(folder.value().get(), name.c_str(), &st, AT_SYMLINK_NOFOLLOW) < 0) {
+            if (errno == ENOENT || errno == ENOTDIR) return std::optional<FileInfo>();
+            return fileError(errno, describe(partition, path));
+        }
+    }
+    FileInfo out;
+    if (S_ISDIR(st.st_mode)) out.isFolder = true;
+    else if (S_ISREG(st.st_mode)) out.size = static_cast<uint64_t>(st.st_size);
+    else return std::optional<FileInfo>();
+    out.modifiedNs = modifiedTimeNs(st);
+    return std::optional<FileInfo>(out);
+}
+
 Result<std::vector<DirEntry>> list(int rootFd, const RelPath& dir, const std::string& partition) {
     auto folder = openFolder(rootFd, dir, partition);
     if (!folder) {

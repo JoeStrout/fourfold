@@ -19,11 +19,14 @@
 
 namespace fourfold {
 
+struct RawBudget;
+
 // What work done off the script thread for an intrinsic brings back: plain
 // data, turned into a MiniScript value when the intrinsic resumes.
 struct AsyncResult {
     std::optional<Error> error;
     Datum value;
+    std::string bytes;   // file.loadRaw: the file's bytes
     bool found = true;   // false: there was nothing to read
 };
 
@@ -60,6 +63,8 @@ struct Run {
     std::map<std::string, LockService::Ticket> dataLocks;
     // The names of the data.update calls in progress, innermost last.
     std::vector<RelPath> updates;
+    // What this run's RawData buffers hold (made on first use).
+    std::shared_ptr<RawBudget> rawBudget;
 
     // Discovery runs only: called as the run finishes, before its namespace
     // is released, with an Error outcome if the top level failed.

@@ -1,9 +1,9 @@
-# Guestbook (M4 and M5 sample)
+# Guestbook (M4, M5 and M5.1 sample)
 
 The guestbook from the design notes (overview §7): templates with fields,
-fragments, an include, Markdown, and HTMX; and (M5) entries stored in
-`data/`, a visit counter, the visitor's own count in `session`, and a flash
-message.
+fragments, an include, Markdown, and HTMX; (M5) entries stored in `data/`, a
+visit counter, the visitor's own count in `session`, and a flash message; and
+(M5.1) a news page kept as a Markdown file in `data/`.
 
 ```sh
 ./build/dev/bin/fourfold dev examples/guestbook
@@ -27,6 +27,10 @@ Then open http://localhost:8090/.
   HTMX sends it in a header (the engine sets `hx-headers` on `<body>`). A
   form posted from another site is refused before the handler runs.
 - `/about` is a Markdown page, wrapped in `frags/layout/markdown.html`.
+- `/news` is Markdown too, but kept in `data/news.md`, which the app owns:
+  `news.ms` reads it with `file.readLines` and renders it with `markdown()`.
+  Edit the file and reload; no redeploy. The first visit writes a starter
+  version. The file itself is never served by URL.
 
 | File | Shows |
 |---|---|
@@ -35,4 +39,5 @@ Then open http://localhost:8090/.
 | `frags/entry.html` | the one place an entry's HTML lives, used for the page and for HTMX |
 | `frags/header.html` | a static include |
 | `pages/about.md`, `frags/layout/markdown.html` | a Markdown page in the app's own layout |
+| `pages/news.ms` | `file.readLines`, `file.writeLines`, and `markdown()` of a list of lines |
 | `pages/guestbook.js` | reading the page's JSON from a script file (inline scripts need the engine's nonce) |

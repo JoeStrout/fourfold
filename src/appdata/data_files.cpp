@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "base/utf8.h"
+
 namespace fourfold {
 
 namespace {
@@ -54,11 +56,36 @@ Result<RelPath> DataFiles::checkFolder(std::string_view folder) {
     return path;
 }
 
-RelPath DataFiles::valuePath(const RelPath& name) const {
+Result<RelPath> DataFiles::checkPath(std::string_view path, bool allowRoot) {
+    if (path.empty()) {
+        if (allowRoot) return RelPath();
+        return makeError(ErrorCode::Invalid, "a file path can't be empty");
+    }
+    if (path.front() == '/') {
+        return makeError(ErrorCode::Invalid, "file paths are relative to data/, so they can't start with '/' (\"" +
+                                                 std::string(path) + "\")");
+    }
+    auto parsed = RelPath::parse(path);
+    if (!parsed) return makeError(ErrorCode::Invalid, "bad file path \"" + std::string(path) + "\": " +
+                                                          parsed.error().message);
+    return parsed;
+}
+
+std::string DataFiles::lockKey(const RelPath& file) {
+    std::string key = file.str();
+    for (char& c : key) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return key;
+}
+
+std::string DataFiles::valueLockKey(const RelPath& name) { return lockKey(valuePath(name)); }
+
+RelPath DataFiles::valuePath(const RelPath& name) {
     return RelPath::parse(name.str() + ".json").value();
 }
 
-RelPath DataFiles::logPath(const RelPath& name) const {
+RelPath DataFiles::logPath(const RelPath& name) {
     return RelPath::parse(name.str() + ".jsonl").value();
 }
 
@@ -196,6 +223,84 @@ Result<bool> DataFiles::compareAndSet(const RelPath& name, const Datum& expected
     if (toJson(now) != toJson(expected)) return false;
     if (Status s = set(name, replacement); !s) return s.error();
     return true;
+}
+
+Result<std::optional<std::string>> DataFiles::readFile(const RelPath& path) const {
+    auto bytes = dir_.read(path, limits_.maxBytes);
+    if (!bytes) {
+        if (bytes.error().code == ErrorCode::NotFound) {
+            // A folder isn't a missing file: say so.
+            auto i = dir_.info(path);
+            if (i && i.value() && i.value()->isFolder) {
+                return makeError(ErrorCode::Conflict, "data/" + path.str() + " is a folder");
+            }
+            return std::optional<std::string>();
+        }
+        return bytes.error();
+    }
+    return std::optional<std::string>(std::move(bytes).value());
+}
+
+Status DataFiles::writeFile(const RelPath& path, std::string_view bytes) const {
+    if (bytes.size() > limits_.maxBytes) {
+        return makeError(ErrorCode::TooLarge, "data/" + path.str() + ": over " + std::to_string(limits_.maxBytes) +
+                                                  " bytes");
+    }
+    return dir_.write(path, bytes);
+}
+
+Result<bool> DataFiles::removeFile(const RelPath& path) const {
+    auto i = dir_.info(path);
+    if (!i) return i.error();
+    if (!i.value()) return false;
+    Status s = i.value()->isFolder ? dir_.removeFolder(path) : dir_.remove(path);
+    if (!s) {
+        if (s.error().code == ErrorCode::NotFound) return false;   // removed meanwhile
+        return s.error();
+    }
+    return true;
+}
+
+Status DataFiles::makeFolder(const RelPath& path) const { return dir_.makeFolder(path); }
+
+Result<std::optional<FileInfo>> DataFiles::info(const RelPath& path) const { return dir_.info(path); }
+
+Result<std::vector<std::string>> DataFiles::children(const RelPath& folder) const {
+    auto i = dir_.info(folder);
+    if (!i) return i.error();
+    if (!i.value()) return makeError(ErrorCode::NotFound, "data/" + folder.str() + ": not found");
+    if (!i.value()->isFolder) return makeError(ErrorCode::Conflict, "data/" + folder.str() + " isn't a folder");
+    auto entries = dir_.list(folder);
+    if (!entries) return entries.error();
+    std::vector<std::string> out;
+    for (const DirEntry& e : entries.value()) out.push_back(e.name);
+    return out;
+}
+
+Result<std::vector<std::string>> DataFiles::splitLines(std::string_view bytes) {
+    if (bytes.find('\0') != std::string_view::npos || !isValidUtf8(bytes)) {
+        return makeError(ErrorCode::Invalid, "isn't UTF-8 text (use file.loadRaw for binary files)");
+    }
+    std::vector<std::string> lines;
+    size_t start = 0;
+    for (size_t i = 0; i < bytes.size(); i++) {
+        char c = bytes[i];
+        if (c != '\n' && c != '\r') continue;
+        lines.emplace_back(bytes.substr(start, i - start));
+        if (c == '\r' && i + 1 < bytes.size() && bytes[i + 1] == '\n') i++;
+        start = i + 1;
+    }
+    if (start < bytes.size()) lines.emplace_back(bytes.substr(start));
+    return lines;
+}
+
+std::string DataFiles::joinLines(const std::vector<std::string>& lines) {
+    std::string out;
+    for (const std::string& line : lines) {
+        out += line;
+        out += '\n';
+    }
+    return out;
 }
 
 }  // namespace fourfold

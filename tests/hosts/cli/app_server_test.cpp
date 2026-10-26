@@ -371,6 +371,10 @@ TEST_CASE("AppServer: the guestbook example, with HTMX") {
     CHECK(contains(plain, "Location: /\r\n"));
 
     CHECK(contains(get(port, "/about"), "<h1 id=\"about-this-guestbook\">"));
+    // The news page is a Markdown file in data/, written on the first visit.
+    CHECK(contains(get(port, "/news"), "<h1 id=\"news\">News</h1>"));
+    CHECK(contains(get(port, "/news"), "<strong>data/news.md</strong>"));
+    CHECK(contains(get(port, "/news.md"), "404 Not Found"));
     std::string htmx = get(port, "/__fourfold/htmx.js");
     CHECK(contains(htmx, "htmx.config.allowEval = false;"));
 

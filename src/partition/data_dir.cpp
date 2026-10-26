@@ -44,6 +44,18 @@ Result<std::vector<DirEntry>> DataDir::list(const RelPath& folder) const {
     return writable::list(fd_.get(), folder, kData);
 }
 
+Status DataDir::makeFolder(const RelPath& folder) const {
+    return writable::makeFolder(fd_.get(), folder, 0755, kData);
+}
+
+Status DataDir::removeFolder(const RelPath& folder) const {
+    return writable::removeFolder(fd_.get(), folder, kData);
+}
+
+Result<std::optional<FileInfo>> DataDir::info(const RelPath& path) const {
+    return writable::info(fd_.get(), path, kData);
+}
+
 Result<Fd> DataDir::lockFile(std::string_view key) const {
     return lockFileIn(fd_.get(), {".fourfold", "locks"}, key, kData);
 }

@@ -25,17 +25,18 @@ for the language. This guide covers what Fourfold adds to it.
 7. [The request: req](#the-request-req)
 8. [What a handler returns](#what-a-handler-returns)
 9. [Shared code: code/lib](#shared-code-codelib)
-10. [Storing data: data](#storing-data-data)
-11. [Remembering visitors: session](#remembering-visitors-session)
-12. [One-time messages: session.flash](#one-time-messages-sessionflash)
-13. [Forms and CSRF protection](#forms-and-csrf-protection)
-14. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
-15. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
-16. [Output: print and the dropbox](#output-print-and-the-dropbox)
-17. [Errors and limits](#errors-and-limits)
-18. [Deploying changes](#deploying-changes)
-19. [Developing on your own machine](#developing-on-your-own-machine)
-20. [Quick reference](#quick-reference)
+10. [Persistent site-wide data: data](#persistent-site-wide-data-data)
+11. [Files in data/: file and RawData](#files-in-data-file-and-rawdata)
+12. [Remembering visitors: session](#remembering-visitors-session)
+13. [One-time messages: session.flash](#one-time-messages-sessionflash)
+14. [Forms and CSRF protection](#forms-and-csrf-protection)
+15. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
+16. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
+17. [Output: print and the dropbox](#output-print-and-the-dropbox)
+18. [Errors and limits](#errors-and-limits)
+19. [Deploying changes](#deploying-changes)
+20. [Developing on your own machine](#developing-on-your-own-machine)
+21. [Quick reference](#quick-reference)
 
 ---
 
@@ -46,7 +47,7 @@ An app is one folder with four parts:
 | Folder | Holds | Your code can |
 |---|---|---|
 | `code/` | Your site: pages, templates, MiniScript, images, CSS | nothing at run time; it's compiled when deployed |
-| `data/` | What the app stores, through [`data`](#storing-data-data) | read and write it |
+| `data/` | What the app stores, through [`data`](#persistent-site-wide-data-data) and [`file`](#files-in-data-file-and-rawdata) | read and write it |
 | `dropbox/` | The app's output: logs it writes, and `print` output | only add to it |
 | `private/` | Fourfold's own files: sessions, logs, keys | nothing |
 
@@ -300,7 +301,8 @@ side by side in `frags/` is a compile error.
 ### Markdown from code: `markdown(text, profile)`
 
 `markdown(text, profile)` renders a string of Markdown, such as a visitor's comment,
-and returns rendered HTML, like `frag` does:
+and returns rendered HTML, like `frag` does. `text` can also be a list of
+lines, as [`file.readLines`](#files-in-data-file-and-rawdata) returns them:
 
 ```
 showEntry = function(e)
@@ -361,7 +363,7 @@ define functions and set simple variables. Calls that do real work (`data`,
 
 Each request runs in a **fresh MiniScript VM**, thrown away when the request
 ends. Globals don't carry over from one request to the next. To keep
-something, use [`data`](#storing-data-data) (shared, permanent) or
+something, use [`data`](#persistent-site-wide-data-data) (shared, permanent) or
 [`session`](#remembering-visitors-session) (one visitor's).
 
 ### `render`: filling the page
@@ -614,6 +616,155 @@ yourself.
 `data` is your app's own folder. You (or an admin) can look at, back up, or
 edit the files in `data/` directly; they're plain JSON. Avoid editing them
 while the site is busy, since your edit isn't locked.
+
+---
+
+## Files in `data/`: `file` and `RawData`
+
+`data` keeps JSON values and logs. For any other file of your own (a Markdown
+page, a CSV export, an image your code made), use `file`. It reads and writes
+whole files anywhere in `data/`, as text or as bytes:
+
+```
+lines = file.readLines("pages/news.md")       // a list of strings, or null
+file.writeLines "exports/votes.csv", rows      // replaces the file
+pic = file.loadRaw("images/logo.png")         // RawData, or null
+file.saveRaw "images/copy.png", pic
+```
+
+The names are those of MiniScript's standard `file` module, so they'll be
+familiar if you've used command-line MiniScript or Mini Micro.
+
+### Paths
+
+Paths are relative to `data/`, with `/` between folders: `"notes.txt"`,
+`"pages/news.md"`. They can't start with `/`, contain `..`, or have any part
+that starts with a dot, so there's no way out of `data/`. Symbolic links are
+never followed. Folders are created as needed when you write.
+
+There's no current folder; every path starts at `data/`.
+
+### Whole files, all at once
+
+`file` reads a whole file, and writes a whole file. There's no opening a file
+and writing to it bit by bit, and no appending (use
+[`data.append`](#persistent-site-wide-data-data) for logs). A write replaces the file all
+at once: anyone reading it sees the old file or the new one, never part of
+either, even if the server crashes mid-write.
+
+A file can be up to 16 MB, read or written.
+
+### `file` functions
+
+| Call | Does |
+|---|---|
+| `file.readLines(path)` | the text file's lines, as a list of strings; `null` if there's no such file |
+| `file.writeLines(path, lines)` | replaces the file with the lines (a list of strings, or one string), each followed by a line break; returns how many |
+| `file.loadRaw(path)` | the file's bytes, as `RawData`; `null` if there's no such file |
+| `file.saveRaw(path, data)` | replaces the file with a `RawData`'s bytes |
+| `file.exists(path)` | 1 if there's a file or folder there, else 0 |
+| `file.info(path)` | a map: `path`, `isDirectory` (1 or 0), `size` (bytes) and `date` (`"yyyy-MM-dd HH:mm:ss"`, in UTC); `null` if there's nothing there |
+| `file.children(path="")` | the names of the files and folders in a folder, sorted |
+| `file.makedir(path)` | creates a folder (and any folders above it) |
+| `file.delete(path)` | removes a file, or an empty folder; 1 if it did, 0 if there was nothing there |
+| `file.name(path)` | the last part: `file.name("a/b.txt")` is `"b.txt"` |
+| `file.parent(path)` | the folder part: `file.parent("a/b.txt")` is `"a"` |
+| `file.child(folder, name)` | the two joined: `file.child("a", "b.txt")` is `"a/b.txt"` |
+
+`file.name`, `file.parent` and `file.child` only work on the strings; they
+don't look at the disk. Leaving out the path in `file.children` or
+`file.info` means `data/` itself.
+
+### Text and lines
+
+Text files are UTF-8. `readLines` splits a file at its line breaks (`\n`,
+`\r\n` or `\r`), without including them; a line break at the very end
+doesn't add an empty last line. A file that isn't UTF-8 text, such as an
+image, can't be read with `readLines` (it's an error); use `loadRaw`.
+
+To show a Markdown file from `data/`, pass its lines straight to
+`markdown`:
+
+```
+render = function(req)
+    return {"news": markdown(file.readLines("pages/news.md"), "full")}
+end function
+```
+
+Since it's data, you (or the site's editors, through your code) can change
+the file without deploying, and the next request shows the change.
+
+### Binary files: `RawData`
+
+`RawData` is a buffer of bytes. `file.loadRaw` gives you one, and you can
+make one with `new RawData`:
+
+```
+r = new RawData
+r.resize 8                // 8 zero bytes; or: r.len = 8
+r.setUint 0, 3000000000
+r.setFloat 4, 1.5
+file.saveRaw "numbers.dat", r
+```
+
+| Member | Is |
+|---|---|
+| `len` | the size, in bytes; assign to it to resize |
+| `resize(bytes=32)` | changes the size, keeping what fits, and adding zeros |
+| `littleEndian` | byte order for numbers wider than a byte: 1 (the default) for little-endian, 0 for big-endian |
+| `byte(offset)`, `setByte(offset, value)` | an unsigned 8-bit number |
+| `sbyte`, `setSbyte` | a signed 8-bit number |
+| `ushort`, `setUshort` | an unsigned 16-bit number |
+| `short`, `setShort` | a signed 16-bit number |
+| `uint`, `setUint` | an unsigned 32-bit number |
+| `int`, `setInt` | a signed 32-bit number |
+| `float`, `setFloat` | a 32-bit floating-point number |
+| `double`, `setDouble` | a 64-bit floating-point number |
+| `utf8(offset=0, bytes=-1)` | text from the bytes, up to a zero byte or the end; any bytes that aren't valid UTF-8 come out as `�` |
+| `setUtf8(offset, text)` | stores text as UTF-8, as much as fits; returns how many bytes it stored |
+
+A negative offset counts from the end: `r.byte(-1)` is the last byte. An
+offset outside the buffer is an error.
+
+A `RawData` can be up to 16 MB, and all the `RawData` one request makes can
+total up to 64 MB. `RawData` can't be stored in `session` or `data`, or sent
+with `json()`; save it with `file.saveRaw`.
+
+### Many visitors at once
+
+Every write (`writeLines`, `saveRaw`, `delete`) locks its file while it
+happens, and `data` locks the same files the same way. So
+`file.writeLines("votes.json", ...)` waits for a `data.update("votes", ...)`
+in progress, and lands after it, not in the middle. Reads don't wait, and
+always see a whole file.
+
+There's no `update` for files: if you read a file, change it, and write it
+back, another request's write can come between. For values that change
+often, use `data`.
+
+`data.append` doesn't lock, so that appends stay fast. Don't rewrite or
+delete a log with `file` while the site might be appending to it; an entry
+appended at that moment can be lost.
+
+### `file` and `data` together
+
+`data`'s values and logs are ordinary files in `data/`: the value `"votes"`
+is `data/votes.json`, and the log `"guestbook"` is `data/guestbook.jsonl`.
+`file` can read them, and write them too (as long as what it writes is
+valid JSON, or `data.get` will report the file as damaged).
+
+### Never served by URL
+
+Nothing in `data/` has a URL, now or ever. A visitor sees a file's contents
+only if your code reads it and puts it in a page: escaped like any other
+value, or rendered with `markdown`.
+
+### Errors
+
+Like `data`, `file` returns an **error value** when a call fails: a bad
+path, a file that's too big, a folder where a file was expected. Test for
+one with `isa error`. A missing file isn't an error: `readLines`, `loadRaw`
+and `info` return `null`.
 
 ---
 
@@ -930,7 +1081,9 @@ you'll usually get an error that names it.
 | One string or list | 16 million characters or items | an error value |
 | Request body | 1 MB | 413 |
 | A session | 64 KB | error; the session isn't saved |
-| A data value or log | 16 MB | an error value |
+| A data value or log, or a file | 16 MB | an error value |
+| One `RawData` | 16 MB | an error value |
+| All of a request's `RawData` | 64 MB | an error value |
 | Text given to `markdown()` | 256 KB | an error value |
 
 `wait(seconds)` pauses a request without holding up anyone else, but the time
@@ -944,8 +1097,10 @@ That limit will come; until then, take care with loops that grow data.
 
 Some of MiniScript's standard built-ins don't exist or don't work in
 Fourfold, since a web request has no use for them or they'd affect other
-requests: `file`, `exec`, `env`, `exit`, `input`, `reset`, and
-`gc.collect`. The built-in types (`string`, `list`, `map`, ...) can't be
+requests: `exec`, `env`, `exit`, `input`, `reset`, and `gc.collect`. `file`
+is Fourfold's own, confined to `data/` (see
+[Files in `data/`](#files-in-data-file-and-rawdata)): it has no `open`, no
+current folder (`curdir`, `setdir`), and no `move` or `copy`. The built-in types (`string`, `list`, `map`, ...) can't be
 extended: `string.shout = ...` is an error.
 
 ---
@@ -1033,7 +1188,7 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | Call | Returns |
 |---|---|
 | `frag(name, value)` | rendered HTML; a list of maps renders it once each |
-| `markdown(text, profile="comment")` | rendered HTML |
+| `markdown(text, profile="comment")` | rendered HTML (`text` can be a list of lines) |
 | `unsafeHTML(text)` | `text`, as HTML, unchecked |
 | `redirect(url)` | a redirect response |
 | `json(value)` | a JSON response |
@@ -1049,6 +1204,17 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `data.delete(name)` | 1 if removed, 0 if there was nothing |
 | `data.exists(name)` | 1 or 0 |
 | `data.names(folder="")` | a sorted list of names |
+| `file.readLines(path)` | a list of lines, or null |
+| `file.writeLines(path, lines)` | the number of lines |
+| `file.loadRaw(path)` | `RawData`, or null |
+| `file.saveRaw(path, data)` | null |
+| `file.exists(path)` | 1 or 0 |
+| `file.info(path)` | `{path, isDirectory, size, date}`, or null |
+| `file.children(path="")` | a sorted list of names |
+| `file.makedir(path)` | null |
+| `file.delete(path)` | 1 if removed, 0 if there was nothing |
+| `file.name`, `file.parent`, `file.child` | path strings |
+| `new RawData` | an empty buffer of bytes |
 | `dropbox.write(name, text)` | null |
 
 ### Globals

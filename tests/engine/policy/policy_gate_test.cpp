@@ -49,7 +49,8 @@ TEST_CASE("PolicyGate: CSRF, table-driven") {
         {"empty token", post(std::nullopt, cookie, std::string()), false},
         {"another cookie's token", post(std::nullopt, cookie, gate.tokenFor(other)), false},
         {"the cookie as token", post(std::nullopt, cookie, cookie), false},
-        {"token off by one char", post(std::nullopt, cookie, token.substr(0, token.size() - 1) + "A"), false},
+        {"token off by one char",
+         post(std::nullopt, cookie, token.substr(0, token.size() - 1) + (token.back() == 'A' ? "B" : "A")), false},
     };
     for (const Case& c : cases) {
         INFO(c.name);

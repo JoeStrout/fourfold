@@ -3,6 +3,8 @@
 //
 // - frag, markdown, unsafeHTML: make HTML; each returns an Html handle.
 // - data: the app's data files (data.get, data.set, ...).
+// - file: any file in data/, whole (file.readLines, file.saveRaw, ...).
+// - RawData: a buffer of bytes, for binary files (raw_data.h).
 // - dropbox: the app's append-only output (dropbox.write).
 #pragma once
 
@@ -18,6 +20,8 @@ void addFrag();
 void addMarkdown();
 void addUnsafeHtml();
 void addData();
+void addFile();
+void addRawData();
 void addDropbox();
 
 // An intrinsic's error result.

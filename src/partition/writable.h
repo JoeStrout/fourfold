@@ -3,6 +3,7 @@
 // above, never following a symbolic link.
 #pragma once
 
+#include <optional>
 #include <string>
 #include <string_view>
 #include <sys/types.h>
@@ -48,6 +49,18 @@ Status removeFile(int rootFd, const RelPath& path, const std::string& partition)
 
 // Whether `path` is a regular file.
 Result<bool> fileExists(int rootFd, const RelPath& path, const std::string& partition);
+
+// Creates folder `dir` and any missing folders above it. Fine if it exists;
+// Conflict if something else is in the way.
+Status makeFolder(int rootFd, const RelPath& dir, mode_t mode, const std::string& partition);
+
+// Removes an empty folder: NotFound if there's none, Conflict if it isn't
+// empty. Never the root.
+Status removeFolder(int rootFd, const RelPath& dir, const std::string& partition);
+
+// A file's or folder's kind, size and time, or nullopt if there's neither
+// (a link or special file counts as neither). The root is a folder.
+Result<std::optional<FileInfo>> info(int rootFd, const RelPath& path, const std::string& partition);
 
 // The files and folders in `dir`, sorted by name. Leaves out dot-names
 // (temporary files, .fourfold/), links, and anything else that isn't a

@@ -275,6 +275,8 @@ Three tiers, all following the core rule (data is inert; executable things live 
 
 *As built in M5* ([m5-results.md](m5-results.md)): a name like `"guestbook"` or `"polls/lunch"` holds either a value (`data/guestbook.json`, read with `data.get` and replaced whole with `data.set` or `data.update`) or a log (`data/guestbook.jsonl`, added to with `data.append` and read with `data.get` as a list). The module also has `data.increment`, `data.compareAndSet`, `data.delete`, `data.exists` and `data.names`. Failures come back as error values.
 
+*Added in M5.1* ([m5.1-results.md](m5.1-results.md)): a `file` module reaches any file in `data/`, whole, as text (`file.readLines`, `file.writeLines`) or bytes (`file.loadRaw`, `file.saveRaw`, with Fourfold's own `RawData`), plus `exists`, `info`, `children`, `makedir`, `delete` and the path helpers. Paths are relative to `data/` and can't leave it. Writes are atomic and take the file's lock, the same one `data` takes, so `data` is a convenience layer over files. Nothing in `data/` is ever served by URL.
+
 ### Middle tier: SQLite
 
 A single file in `data/`: real transactions, no separate server. Probably the right choice for most apps that outgrow plain files. It uses the same query API as Tier 2, so moving to Postgres later is mostly a configuration change.
@@ -676,7 +678,7 @@ Plain GFM is **not** safe: it passes raw HTML through, and GitHub is safe only b
 - **Linear-time parser, capped input.** Rendering runs in native code, outside the VM's instruction budget, so the parser must not slow down on pathological input (nested brackets, emphasis runs). md4c and cmark-gfm are both designed for this, and md4c has a built-in no-HTML flag. Text rendered at runtime is also capped in size.
 - Task-list checkboxes are rendered `disabled`.
 
-Markdown with no raw HTML (and no fields; but see [below](#fields-in-markdown-unresolved)) can't execute or include anything, so it is **inert data** under the core rule. It can be rendered from anywhere, including `data/`: a wiki or blog stored as data can be shown with `markdown(file.read(path), "full")`.
+Markdown with no raw HTML (and no fields; but see [below](#fields-in-markdown-unresolved)) can't execute or include anything, so it is **inert data** under the core rule. It can be rendered from anywhere, including `data/`: a wiki or blog stored as data can be shown with `markdown(file.readLines(path), "full")` (`markdown` takes a list of lines as well as a string; M5.1).
 
 #### Markdown pages
 

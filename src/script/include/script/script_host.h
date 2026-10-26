@@ -45,6 +45,10 @@ struct ScriptBudget {
     // The longest string or list that repetition or concatenation may build
     // (MS2's MAX_COLLECTION_SIZE). Process-wide in MS2.
     int maxCollectionSize = 16 * 1024 * 1024;
+    // RawData buffers live outside MS2's heap: the largest one (the same as
+    // the largest file in data/), and all of one run's together.
+    size_t maxRawDataBytes = 16 * 1024 * 1024;
+    size_t maxRawDataTotal = 64 * 1024 * 1024;
 };
 
 struct ScriptHostOptions {

@@ -256,7 +256,7 @@ struct RunContext {
 
 *As built in M5* (`script/script_host.h`): the request facts, the render options (nonce, CSRF token), `SessionAccess` (which the host calls to lock and load the session before the page's code runs), the session size cap, `DataFiles` and `Dropbox`. The app is passed to `ScriptHost::run` beside it, with the `GateApproval`. `script` depends on `appdata` for `DataFiles`; both are plain C++ below the engine.
 
-The intrinsic modules (`data`, `db`, `http`, `secrets`, `session`, `users`, `mail`, `frag`, `markdown`, `redirect`, `json`, `status`, `enqueue`, `publish`, `formState`, `reshow`, `ratelimit`, `unsafeHTML`, …) are **each a separate file**, depending only on `RunContext` and the bridge. A VM gets a module only if its service pointer is non-null. So the per-kind restrictions in the overview (no `http` in migrations, no `session` in jobs, no `job` map outside `code/jobs/`) come from which services the engine supplies, not from checks scattered through the modules.
+The intrinsic modules (`data`, `file`, `RawData`, `db`, `http`, `secrets`, `session`, `users`, `mail`, `frag`, `markdown`, `redirect`, `json`, `status`, `enqueue`, `publish`, `formState`, `reshow`, `ratelimit`, `unsafeHTML`, …) are **each a separate file**, depending only on `RunContext` and the bridge. A VM gets a module only if its service pointer is non-null. So the per-kind restrictions in the overview (no `http` in migrations, no `session` in jobs, no `job` map outside `code/jobs/`) come from which services the engine supplies, not from checks scattered through the modules.
 
 Return values from handlers are converted into an engine-side `HandlerOutcome` (render with fields, fragment, redirect, JSON, status, reshow, no content, or error) before leaving `script`. Pending side effects (session changes, enqueued jobs, flash) are collected in the `RunContext`'s services and committed, or dropped, by the engine afterward.
 
@@ -275,7 +275,7 @@ Each store's interface deals in `Datum`, bytes, and plain structs. Redis or Post
 
 **`appdata`.** The app's own data, in `data/` or a configured database:
 
-- `DataFiles`: Tier 1 operations (get, set, update, append, increment, compare-and-swap), on `DataDir`.
+- `DataFiles`: Tier 1 operations (get, set, update, append, increment, compare-and-swap), on `DataDir`; and (M5.1) whole files for the `file` module (read, atomic write, remove, folders, info). Locks are per file, keyed by path, so `data` and `file` share them.
 - `Database`: the connection pool and named-query execution. `query()` takes a `NamedQuery`, constructible only from the compiled app, so SQL injection is a type error (§3). Postgres and SQLite are implementations behind one interface.
 - `Migrator`: applies a list of migrations from the compiled app, with checksum records, using `script` (via an engine-supplied callback) for `.ms` migrations.
 - `BackupService`: consistent snapshots of `data/` and `private/state/`.

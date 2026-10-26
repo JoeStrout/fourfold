@@ -154,6 +154,8 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** tests that `file` can't leave `data/` (`..`, absolute paths, symbolic links in `data/`, dot-names, `data/.fourfold/`); concurrent `file.writeLines` and `data.update` on one file lose no update; a binary round trip through `RawData`; the size cap on writes and on `RawData.resize`; a Markdown page kept in `data/` and rendered by a handler.
 
+**Decisions made here** (details in [m5.1-results.md](m5.1-results.md)): built as decided above, with no MS2 changes. A path that starts with `/` is an error, not taken as relative to `data/`. Lock keys are file paths, lowercased, so two spellings of one file on a case-insensitive file system share a lock. Besides the 16 MB cap per buffer, all of one request's `RawData` together is capped at 64 MB, since the buffers live outside MS2's heap (R4); reaching it first runs a garbage collection. `RawData` keeps command-line MiniScript's API, including `len =`; `utf8` stops at a zero byte (as there) and shows invalid UTF-8 as U+FFFD. `file.info`'s date is in UTC. `markdown()` takes a list of lines, so `markdown(file.readLines(path), "full")` works. `data.append` stays lock-free: rewriting a log with `file` while appends happen can lose one, which the user guide says.
+
 ---
 
 ## M6 — Configuration, auth, and access control

@@ -5,6 +5,7 @@
 #include <unordered_set>
 
 #include "host_impl.h"
+#include "modules/raw_data.h"
 #include "template/template.h"
 #include "value_map.h"
 
@@ -70,6 +71,11 @@ std::optional<Datum> toDatumAt(Value v, std::string& error, int depth) {
         return Datum::list(std::move(items));
     }
     if (v.IsMap()) {
+        if (isRawData(v)) {
+            error = "is RawData (binary data can't be stored in session or data, or sent by json(); save it with "
+                    "file.saveRaw)";
+            return std::nullopt;
+        }
         Datum::MapItems items;
         MiniScript::MapIterator it = v.Iterator();
         Value key, item;
@@ -184,6 +190,7 @@ FieldValue fieldFrom(Value v, bool forScript) {
     }
     if (v.IsString()) return FieldValue::string(toStdString(v));
     if (v.IsNumber()) return FieldValue::number(toStdString(v));   // MiniScript's own format
+    if (isRawData(v)) return FieldValue::error("is RawData (binary data, which a page can't show)");
     if (v.IsMap()) return FieldValue::composite("a map");
     if (v.IsList()) return FieldValue::composite("a list");
     if (v.IsFuncRef()) return FieldValue::error("is a function (did you mean to call it?)");

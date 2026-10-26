@@ -126,6 +126,51 @@ TEST_CASE("DataDir: links and the engine's folder are out of reach") {
     for (const auto& e : listed) CHECK_NE(e.name, ".fourfold");
 }
 
+TEST_CASE("DataDir: folders, and info") {
+    App app;
+    DataDir data = app.folder.dataDir().value();
+    REQUIRE(data.makeFolder(rel("a/b")));
+    REQUIRE(data.makeFolder(rel("a/b")));   // already there: fine
+    REQUIRE(data.write(rel("a/note.txt"), "hello"));
+    CHECK(data.makeFolder(rel("a/note.txt")).error().code == ErrorCode::Conflict);
+    CHECK(data.makeFolder(rel("a/note.txt/c")).error().code == ErrorCode::Conflict);
+
+    auto file = data.info(rel("a/note.txt")).value();
+    REQUIRE(file);
+    CHECK_FALSE(file->isFolder);
+    CHECK_EQ(file->size, 5u);
+    CHECK(file->modifiedNs > 0);
+    auto folder = data.info(rel("a")).value();
+    REQUIRE(folder);
+    CHECK(folder->isFolder);
+    CHECK(data.info(RelPath()).value()->isFolder);
+    CHECK_FALSE(data.info(rel("missing")).value());
+    CHECK_FALSE(data.info(rel("missing/deeper")).value());
+
+    CHECK(data.removeFolder(rel("a")).error().code == ErrorCode::Conflict);   // not empty
+    CHECK(data.removeFolder(rel("a/note.txt")).error().code == ErrorCode::NotFound);
+    REQUIRE(data.removeFolder(rel("a/b")));
+    CHECK(data.removeFolder(rel("a/b")).error().code == ErrorCode::NotFound);
+    CHECK_FALSE(data.removeFolder(RelPath()));
+}
+
+TEST_CASE("DataDir: info and folder operations don't follow links") {
+    App app;
+    DataDir data = app.folder.dataDir().value();
+    app.dir.makeDir("outside");
+    app.dir.write("outside/secret.txt", "host secret");
+    app.dir.symlink(app.dir.at("outside"), "app/data/out");
+    app.dir.symlink(app.dir.at("outside/secret.txt"), "app/data/secret.txt");
+    CHECK_FALSE(data.info(rel("out")).value());
+    CHECK_FALSE(data.info(rel("secret.txt")).value());
+    CHECK_FALSE(data.info(rel("out/secret.txt")).value());
+    CHECK_FALSE(data.makeFolder(rel("out/sub")));
+    CHECK_FALSE(data.removeFolder(rel("out")));
+    struct stat st;
+    CHECK(lstat(app.dir.at("app/data/out").c_str(), &st) == 0);   // the link is still there
+    CHECK(stat(app.dir.at("outside/sub").c_str(), &st) != 0);    // and nothing was made through it
+}
+
 TEST_CASE("FileLock: exclusive between holders") {
     App app;
     DataDir data = app.folder.dataDir().value();

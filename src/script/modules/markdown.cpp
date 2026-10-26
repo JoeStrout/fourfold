@@ -1,5 +1,6 @@
 // markdown(text, profile="comment"): renders Markdown and returns the HTML
-// (overview §4, Rendering Markdown from code). The default profile is the
+// (overview §4, Rendering Markdown from code). `text` may also be a list of
+// lines, as file.readLines returns them. The default profile is the
 // restricted one, since text that reaches this at runtime is usually a
 // visitor's; "full" is an explicit, grep-able opt-in.
 
@@ -26,9 +27,22 @@ void addMarkdown() {
     f.AddParam("text");
     f.AddParam("profile", Value(MiniScript::String("comment")));
     f.set_Code([](Context ctx, IntrinsicResult) {
-        Value text = ctx.GetArg(0);
-        if (text.IsNull()) text = Value(MiniScript::String(""));
-        if (!text.IsString()) return intrinsicError("markdown needs a string of Markdown");
+        Value textValue = ctx.GetArg(0);
+        std::string text;
+        if (textValue.IsString()) {
+            text = toStdString(textValue);
+        } else if (textValue.IsList()) {
+            int count = textValue.ListCount();
+            for (int i = 0; i < count; i++) {
+                Value line = textValue.ListGet(i);
+                if (!line.IsString()) return intrinsicError("markdown: line " + std::to_string(i) + " isn't a string");
+                text += toStdString(line);
+                text += '\n';
+                if (text.size() > kMaxMarkdownBytes) break;   // renderMarkdown reports it
+            }
+        } else if (!textValue.IsNull()) {
+            return intrinsicError("markdown needs a string of Markdown (or a list of lines)");
+        }
         Value profileValue = ctx.GetArg(1);
         std::optional<MarkdownProfile> profile =
             profileValue.IsString() ? markdownProfileNamed(toStdString(profileValue)) : std::nullopt;
@@ -36,7 +50,7 @@ void addMarkdown() {
         MarkdownOptions options;
         options.profile = *profile;
         options.maxBytes = kMaxMarkdownBytes;
-        MarkdownResult r = renderMarkdown(toStdString(text), options);
+        MarkdownResult r = renderMarkdown(text, options);
         if (!r.ok()) return intrinsicError("markdown: " + *r.error);
         return IntrinsicResult(makeHtmlHandle(std::move(r.html)));
     });

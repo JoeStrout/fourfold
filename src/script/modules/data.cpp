@@ -18,6 +18,7 @@
 
 #include "../bridge.h"
 #include "../host_impl.h"
+#include "data_work.h"
 #include "modules.h"
 
 namespace fourfold {
@@ -29,25 +30,9 @@ using MiniScript::Value;
 
 namespace {
 
-// Partial results: where a multi-step call is.
-constexpr double kWorking = 1;    // waiting for the worker pool (or a lock, then the pool)
-constexpr double kCalling = 2;    // data.update: f is running
-constexpr double kWriting = 3;    // data.update: writing f's result
-
-// The run and its DataFiles, or null with `error` set.
-Run* dataRun(Context& ctx, const char* function, DataFiles*& data, IntrinsicResult& error) {
-    Run* run = Run::of(ctx);
-    if (!run || run->kind != Run::Kind::Request) {
-        error = intrinsicError(std::string("data.") + function + " can't be used at a page's top level");
-        return nullptr;
-    }
-    data = run->context.data;
-    if (!data) {
-        error = intrinsicError(std::string("data.") + function + " isn't available here");
-        return nullptr;
-    }
-    return run;
-}
+// Partial results of data.update, after kWorking (data_work.h).
+constexpr double kCalling = 2;    // f is running
+constexpr double kWriting = 3;    // writing f's result
 
 std::optional<RelPath> nameArg(Context& ctx, const char* function, IntrinsicResult& error) {
     Value v = ctx.GetArg(0);
@@ -73,51 +58,6 @@ std::optional<Datum> datumArg(Context& ctx, int index, const char* function, Int
     return d;
 }
 
-AsyncResult fail(const Error& e) {
-    AsyncResult r;
-    r.error = e;
-    return r;
-}
-
-// Parks the run and does `work` on the worker pool.
-IntrinsicResult startWork(Context& ctx, Run& run, std::function<AsyncResult()> work) {
-    ScriptHost::Impl* host = run.host;
-    uint64_t id = run.id;
-    host->park(run);
-    host->workers->submit([host, id, work = std::move(work)] { host->complete(id, work()); });
-    ctx.vm.yielding = true;
-    return IntrinsicResult(Value(kWorking), false);
-}
-
-// Parks the run, takes `name`'s lock, then does `work` on the worker pool
-// and releases the lock. The lock is released even if the run has ended
-// meanwhile.
-IntrinsicResult startLockedWork(Context& ctx, Run& run, DataFiles* data, const RelPath& name,
-                                std::function<AsyncResult()> work) {
-    ScriptHost::Impl* host = run.host;
-    uint64_t id = run.id;
-    host->park(run);
-    data->locks().acquire(DataFiles::lockKey(name),
-                          [host, id, data, work = std::move(work)](Status locked, LockService::Ticket ticket) {
-                              host->workers->submit([host, id, data, locked, ticket, work] {
-                                  AsyncResult r = locked ? work() : fail(locked.error());
-                                  data->locks().release(ticket);
-                                  host->complete(id, std::move(r));
-                              });
-                          });
-    ctx.vm.yielding = true;
-    return IntrinsicResult(Value(kWorking), false);
-}
-
-// The finished work's result, as the intrinsic's return value.
-IntrinsicResult finishWork(Run& run, const char* function) {
-    std::optional<AsyncResult> result = std::move(run.async);
-    run.async.reset();
-    if (!result) return intrinsicError(std::string("data.") + function + ": no result (an engine bug)");
-    if (result->error) return intrinsicError(std::string("data.") + function + ": " + result->error->message);
-    return IntrinsicResult(toValue(result->value));
-}
-
 Intrinsic makeGet() {
     Intrinsic f = Intrinsic::Create("");
     f.AddParam("name");
@@ -125,14 +65,14 @@ Intrinsic makeGet() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "get", data, error);
+        Run* run = dataRun(ctx, "data.get", data, error);
         if (!run) return error;
         if (!partial.done) {
             if (run->async && !run->async->error && !run->async->found) {
                 run->async.reset();
                 return IntrinsicResult(ctx.GetArg(1));   // nothing stored: the default
             }
-            return finishWork(*run, "get");
+            return finishWork(*run, "data.get");
         }
         auto name = nameArg(ctx, "get", error);
         if (!name) return error;
@@ -155,16 +95,16 @@ Intrinsic makeSet() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "set", data, error);
+        Run* run = dataRun(ctx, "data.set", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "set");
+        if (!partial.done) return finishWork(*run, "data.set");
         auto name = nameArg(ctx, "set", error);
         if (!name) return error;
         auto value = datumArg(ctx, 1, "set", error);
         if (!value) return error;
         // Under the name's lock, so a set can't land in the middle of
         // someone's update.
-        return startLockedWork(ctx, *run, data, *name, [data, n = *name, v = *value] {
+        return startLockedWork(ctx, *run, data, DataFiles::valueLockKey(*name), [data, n = *name, v = *value] {
             Status s = data->set(n, v);
             return s ? AsyncResult{} : fail(s.error());
         });
@@ -179,9 +119,9 @@ Intrinsic makeAppend() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "append", data, error);
+        Run* run = dataRun(ctx, "data.append", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "append");
+        if (!partial.done) return finishWork(*run, "data.append");
         auto name = nameArg(ctx, "append", error);
         if (!name) return error;
         auto value = datumArg(ctx, 1, "append", error);
@@ -201,12 +141,12 @@ Intrinsic makeDelete() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "delete", data, error);
+        Run* run = dataRun(ctx, "data.delete", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "delete");
+        if (!partial.done) return finishWork(*run, "data.delete");
         auto name = nameArg(ctx, "delete", error);
         if (!name) return error;
-        return startLockedWork(ctx, *run, data, *name, [data, n = *name] {
+        return startLockedWork(ctx, *run, data, DataFiles::valueLockKey(*name), [data, n = *name] {
             auto removed = data->remove(n);
             if (!removed) return fail(removed.error());
             AsyncResult r;
@@ -223,9 +163,9 @@ Intrinsic makeExists() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "exists", data, error);
+        Run* run = dataRun(ctx, "data.exists", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "exists");
+        if (!partial.done) return finishWork(*run, "data.exists");
         auto name = nameArg(ctx, "exists", error);
         if (!name) return error;
         return startWork(ctx, *run, [data, n = *name] {
@@ -245,9 +185,9 @@ Intrinsic makeNames() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "names", data, error);
+        Run* run = dataRun(ctx, "data.names", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "names");
+        if (!partial.done) return finishWork(*run, "data.names");
         Value v = ctx.GetArg(0);
         if (!v.IsString()) return intrinsicError("data.names needs a folder name string (\"\" for all of data/)");
         auto folder = DataFiles::checkFolder(toStdString(v));
@@ -272,16 +212,17 @@ Intrinsic makeIncrement() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "increment", data, error);
+        Run* run = dataRun(ctx, "data.increment", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "increment");
+        if (!partial.done) return finishWork(*run, "data.increment");
         auto name = nameArg(ctx, "increment", error);
         if (!name) return error;
         Value by = ctx.GetArg(1);
         if (!by.IsNumber() || !std::isfinite(by.DoubleValue())) {
             return intrinsicError("data.increment's `by` must be a number");
         }
-        return startLockedWork(ctx, *run, data, *name, [data, n = *name, amount = by.DoubleValue()] {
+        std::string key = DataFiles::valueLockKey(*name);
+        return startLockedWork(ctx, *run, data, key, [data, n = *name, amount = by.DoubleValue()] {
             auto now = data->increment(n, amount);
             if (!now) return fail(now.error());
             AsyncResult r;
@@ -300,16 +241,17 @@ Intrinsic makeCompareAndSet() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "compareAndSet", data, error);
+        Run* run = dataRun(ctx, "data.compareAndSet", data, error);
         if (!run) return error;
-        if (!partial.done) return finishWork(*run, "compareAndSet");
+        if (!partial.done) return finishWork(*run, "data.compareAndSet");
         auto name = nameArg(ctx, "compareAndSet", error);
         if (!name) return error;
         auto expected = datumArg(ctx, 1, "compareAndSet", error);
         if (!expected) return error;
         auto value = datumArg(ctx, 2, "compareAndSet", error);
         if (!value) return error;
-        return startLockedWork(ctx, *run, data, *name, [data, n = *name, e = *expected, v = *value] {
+        std::string key = DataFiles::valueLockKey(*name);
+        return startLockedWork(ctx, *run, data, key, [data, n = *name, e = *expected, v = *value] {
             auto swapped = data->compareAndSet(n, e, v);
             if (!swapped) return fail(swapped.error());
             AsyncResult r;
@@ -333,7 +275,7 @@ Intrinsic makeUpdate() {
     f.set_Code([](Context ctx, IntrinsicResult partial) {
         IntrinsicResult error = IntrinsicResult::Null;
         DataFiles* data = nullptr;
-        Run* run = dataRun(ctx, "update", data, error);
+        Run* run = dataRun(ctx, "data.update", data, error);
         if (!run) return error;
         double step = partial.done ? 0 : partial.result.DoubleValue();
 
@@ -354,7 +296,7 @@ Intrinsic makeUpdate() {
             // Recorded now, so that if the run ends while waiting, finish()
             // gives the ticket up (or releases the lock).
             run->dataLocks[name->str()] = data->locks().acquire(
-                DataFiles::lockKey(*name), [host, id, data, n = *name](Status locked, LockService::Ticket) {
+                DataFiles::valueLockKey(*name), [host, id, data, n = *name](Status locked, LockService::Ticket) {
                     host->workers->submit([host, id, data, n, locked] {
                         if (!locked) return host->complete(id, fail(locked.error()));
                         auto v = data->get(n);
@@ -425,7 +367,7 @@ Intrinsic makeUpdate() {
             return IntrinsicResult(Value(kWriting), false);
         }
 
-        return finishWork(*run, "update");   // kWriting: the write is done
+        return finishWork(*run, "data.update");   // kWriting: the write is done
     });
     return f;
 }
