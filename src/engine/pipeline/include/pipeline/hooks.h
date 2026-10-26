@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <string>
 
 #include "compiledapp/compiled_app.h"
 #include "http/message.h"
@@ -23,10 +24,11 @@ public:
     // thread.
     virtual std::optional<HttpResponse> reserved(const HttpRequest& request, const AdmittedRequest& admitted) = 0;
 
-    // Every text/html response, as it leaves the engine: `generation` is the
-    // app generation that produced it (0 if none). May be called on any
-    // thread.
-    virtual void decorate(HttpResponse& response, uint64_t generation) = 0;
+    // Every full HTML page, as it leaves the engine (not fragments): its
+    // `generation` is the app generation that produced it (0 if none), and
+    // `nonce` the response's CSP nonce, for any script added. May be called
+    // on any thread.
+    virtual void decorate(HttpResponse& response, uint64_t generation, const std::string& nonce) = 0;
 
     // The 500 page for a script error, with the details, when
     // EngineOptions::showErrorDetails is set. May be called on any thread.

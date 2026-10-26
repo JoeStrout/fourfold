@@ -15,6 +15,7 @@ const char* routeKindName(RouteKind kind) {
         case RouteKind::Page: return "page";
         case RouteKind::Static: return "static";
         case RouteKind::Handler: return "handler";
+        case RouteKind::Markdown: return "markdown";
     }
     return "unknown";
 }
@@ -55,6 +56,11 @@ const CompiledTemplate* TemplateSet::find(const RelPath& source) const {
     return it == templates_.end() ? nullptr : &it->second;
 }
 
+const CompiledTemplate* TemplateSet::fragment(const std::string& name) const {
+    auto it = fragments_.find(name);
+    return it == fragments_.end() ? nullptr : &it->second;
+}
+
 std::string describe(const CompiledApp& app) {
     std::string s = "routes:\n";
     for (const auto& [path, entry] : app.routes) {
@@ -71,11 +77,27 @@ std::string describe(const CompiledApp& app) {
                 }
             }
         }
+        if (entry.kind == RouteKind::Markdown) {
+            auto md = app.markdownPages.find(entry.source);
+            if (md != app.markdownPages.end() && !md->second.title.empty()) s += "  title: " + md->second.title;
+        }
         for (const std::optional<HandlerRef>* h : {&entry.render, &entry.get, &entry.post}) {
             if (*h) s += "  " + (*h)->label() + " in " + (*h)->source.str();
         }
         s += "\n";
     }
+    if (!app.templates.fragments().empty()) {
+        s += "fragments:\n";
+        for (const auto& [name, t] : app.templates.fragments()) {
+            s += "  " + name + "  " + t.source().str();
+            if (t.hasFields()) {
+                s += "  fields:";
+                for (const std::string& f : t.fieldNames()) s += " " + f;
+            }
+            s += "\n";
+        }
+    }
+    if (app.markdownLayout) s += "markdown layout: " + app.markdownLayout->source().str() + "\n";
     s += "not found page: " + (app.notFoundPage ? app.notFoundPage->str() : std::string("(none)")) + "\n";
     s += "error page: " + (app.errorPage ? app.errorPage->str() : std::string("(none)")) + "\n";
     s += "diagnostics:\n";

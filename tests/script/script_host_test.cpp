@@ -8,6 +8,7 @@
 
 #include "doctest.h"
 #include "partition/app_folder.h"
+#include "template/template.h"
 #include "temp_dir.h"
 
 using namespace fourfold;
@@ -45,12 +46,45 @@ struct Scripts {
 
     void write(const std::string& path, const std::string& text) { dir.write("code/" + path, text); }
 
-    // Compiles every .ms file written so far.
+    // Compiles every .ms file written so far, and parses the templates
+    // (pages/*.html and frags/*.html) into the app, as the compiler would.
     void compile() {
         std::vector<CodeFile> pages, libs;
         readFiles(pages, libs);
         compiled = host->compileScripts(pages, libs);
         app->scripts = compiled.bundle;
+        parseTemplates();
+    }
+
+    void parseTemplates() {
+        auto folder = AppFolder::open(dir.path(), AppFolder::Missing::Create);
+        REQUIRE(folder.ok());
+        auto code = folder.value().codeTree();
+        REQUIRE(code.ok());
+        auto listing = code.value().list();
+        REQUIRE(listing.ok());
+        FragmentMap frags;
+        std::vector<std::pair<RelPath, CompiledTemplate>> pageTemplates;
+        for (const CodeEntry& e : listing.value().files) {
+            if (e.path.extension() != ".html") continue;
+            bool isFrag = e.path.str().compare(0, 6, "frags/") == 0;
+            ParsedTemplate p = parseTemplate(code.value().read(e.path).value(),
+                                             isFrag ? TemplateKind::Fragment : TemplateKind::Page);
+            REQUIRE_MESSAGE(p.ok(), (e.path.str() + ": " + (p.ok() ? "" : p.errors[0].message)));
+            if (isFrag) {
+                std::string name = e.path.str().substr(6);
+                frags[name.substr(0, name.size() - 5)] = std::move(p.compiled);
+            } else {
+                pageTemplates.emplace_back(e.path, std::move(p.compiled));
+            }
+        }
+        REQUIRE(resolveIncludes(frags).empty());
+        app->templates = TemplateSet();
+        for (auto& [path, t] : pageTemplates) {
+            REQUIRE(resolveIncludes(t, frags).empty());
+            app->templates.add(path, std::move(t));
+        }
+        app->templates.setFragments(std::move(frags));
     }
 
     // Every .ms file written so far: pages, and libs in code/lib/.
@@ -91,23 +125,28 @@ struct Scripts {
 
     // Starts a run; the future yields its outcome.
     std::future<HandlerOutcome> start(const std::string& source, const std::string& label,
-                                      RequestFacts request = {}) {
+                                      RequestFacts request = {}, RenderOptions renderOptions = {}) {
         auto promise = std::make_shared<std::promise<HandlerOutcome>>();
         auto future = promise->get_future();
-        host->run(app, handler(source, label), std::move(request),
-                  [promise](HandlerOutcome o) { promise->set_value(std::move(o)); });
+        host->run(
+            app, handler(source, label), std::move(request),
+            [promise](HandlerOutcome o) { promise->set_value(std::move(o)); }, std::move(renderOptions));
         return future;
     }
 
-    HandlerOutcome call(const std::string& source, const std::string& label, RequestFacts request = {}) {
-        auto future = start(source, label, std::move(request));
+    HandlerOutcome call(const std::string& source, const std::string& label, RequestFacts request = {},
+                        RenderOptions renderOptions = {}) {
+        auto future = start(source, label, std::move(request), std::move(renderOptions));
         REQUIRE(future.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
         return future.get();
     }
 
-    // Compiles a page with this source, and runs its render.
-    HandlerOutcome render(const std::string& source, RequestFacts request = {}) {
+    // Compiles a page with this source (and this template), and runs its
+    // render.
+    HandlerOutcome render(const std::string& source, RequestFacts request = {},
+                          const std::string& html = "<!DOCTYPE html><p></p>") {
         write("pages/t.ms", source);
+        write("pages/t.html", html);
         compile();
         REQUIRE_MESSAGE(compiled.bundle, diagnostics());
         return call("pages/t.ms", "render", std::move(request));
@@ -117,6 +156,7 @@ struct Scripts {
 const char* kindName(HandlerOutcome::Kind k) {
     switch (k) {
         case HandlerOutcome::Kind::Render: return "Render";
+        case HandlerOutcome::Kind::Fragment: return "Fragment";
         case HandlerOutcome::Kind::Text: return "Text";
         case HandlerOutcome::Kind::Redirect: return "Redirect";
         case HandlerOutcome::Kind::Json: return "Json";
@@ -228,21 +268,22 @@ TEST_CASE("ScriptHost: render fills fields from a map") {
     Scripts s;
     HandlerOutcome o = s.render(
         "render = function(req)\n"
-        "  return {\"name\": \"Ada\", \"n\": 3, \"half\": 0.5, \"big\": 1e21, \"none\": null}\n"
-        "end function\n");
+        "  return {\"name\": \"<Ada>\", \"n\": 3, \"half\": 0.5, \"none\": null}\n"
+        "end function\n",
+        {}, "<!DOCTYPE html><p>{{name}}|{{n}}|{{half}}|{{none}}</p>");
     REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
-    CHECK_EQ(o.fields.at("name").value(), "Ada");
-    CHECK_EQ(o.fields.at("n").value(), "3");
-    CHECK_EQ(o.fields.at("half").value(), "0.5");
-    CHECK_FALSE(o.fields.at("none").has_value());
-    CHECK_FALSE(o.fields.at("big").value().empty());
+    CHECK_EQ(o.body, "<!DOCTYPE html><p>&lt;Ada&gt;|3|0.5|</p>");
+    CHECK(o.warnings.empty());
 }
 
 TEST_CASE("ScriptHost: render fields must be strings, numbers, or null") {
     Scripts s;
-    HandlerOutcome o = s.render("render = function(req)\n  return {\"xs\": [1, 2]}\nend function\n");
+    HandlerOutcome o = s.render("render = function(req)\n  return {\"xs\": [1, 2]}\nend function\n", {},
+                                "<!DOCTYPE html>\n<p>{{xs}}</p>");
     REQUIRE(o.kind == HandlerOutcome::Kind::Error);
-    CHECK(contains(o.error.message, "field 'xs' is a list"));
+    CHECK(contains(o.error.message, "{{xs}} is a list"));
+    CHECK_EQ(o.error.file, "code/pages/t.html");
+    CHECK_EQ(o.error.line, 2);
 }
 
 TEST_CASE("ScriptHost: each kind of return value") {
@@ -606,12 +647,13 @@ TEST_CASE("ScriptHost: a compiled app keeps its bytecode alive until released") 
     Scripts s;
     HandlerOutcome o = s.render(
         "big = \"" + std::string(200, 'x') + "\"\n"
-        "render = function(req)\n  return {\"len\": big.len}\nend function\n");
+        "render = function(req)\n  return {\"len\": big.len}\nend function\n",
+        {}, "<!DOCTYPE html>{{len}}");
     REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
     s.host->stats();   // a full collection
     o = s.call("pages/t.ms", "render");
     REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
-    CHECK_EQ(o.fields.at("len").value(), "200");
+    CHECK_EQ(o.body, "<!DOCTYPE html>200");
 
     int functionsWithApp = s.host->stats().liveFunctions;
     s.app.reset();
@@ -666,4 +708,194 @@ TEST_CASE("ScriptHost: bundles are counted until released") {
     s.app.reset();
     s.compiled = {};
     CHECK_EQ(s.host->stats().liveBundles, before);
+}
+
+// --- HTML from code: frag, markdown, unsafeHTML (M4) ---
+
+namespace {
+
+// Runs get.x in pages/h.ms, with these fragments in code/frags/.
+HandlerOutcome callWithFrags(Scripts& s, const std::string& body,
+                             const std::vector<std::pair<std::string, std::string>>& frags,
+                             RequestFacts request = {}, RenderOptions options = {}) {
+    for (const auto& [name, text] : frags) s.write("frags/" + name + ".html", text);
+    s.write("pages/h.ms", "get.x = function(req)\n" + body + "\nend function\n");
+    s.compile();
+    REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
+    return s.call("pages/h.ms", "get.x", std::move(request), std::move(options));
+}
+
+}  // namespace
+
+TEST_CASE("ScriptHost: frag renders a fragment") {
+    Scripts s;
+    std::vector<std::pair<std::string, std::string>> frags = {{"entry", "<li>{{who}}</li>"},
+                                                              {"empty", "<hr>"}};
+    HandlerOutcome o = callWithFrags(s, "return frag(\"entry\", {\"who\": \"<b>Ann</b>\"})", frags);
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Fragment, describe(o));
+    CHECK_EQ(o.body, "<li>&lt;b&gt;Ann&lt;/b&gt;</li>");
+    CHECK_FALSE(o.hasScript);
+
+    o = s.call("pages/h.ms", "get.x");   // same again
+    CHECK_EQ(o.body, "<li>&lt;b&gt;Ann&lt;/b&gt;</li>");
+
+    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"entry\", [{\"who\": 1}, {\"who\": \"b\"}, null])\n"
+                          "end function\n");
+    s.compile();
+    o = s.call("pages/h.ms", "get.x");
+    CHECK_EQ(o.body, "<li>1</li><li>b</li><li></li>");
+
+    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"empty\")\nend function\n");
+    s.compile();
+    CHECK_EQ(s.call("pages/h.ms", "get.x").body, "<hr>");
+}
+
+TEST_CASE("ScriptHost: frag's errors") {
+    Scripts s;
+    std::vector<std::pair<std::string, std::string>> frags = {{"entry", "<li>{{who}}</li>"}};
+    struct Case {
+        const char* code;
+        const char* message;
+    };
+    const Case cases[] = {
+        {"return frag(\"nope\")", "there's no code/frags/nope.html"},
+        {"return frag(42)", "frag needs a fragment's name"},
+        {"return frag(\"entry\", \"text\")", "the value must be a map of fields"},
+        {"return frag(\"entry\", [{\"who\": 1}, \"x\"])", "item 1 isn't a map"},
+        {"return frag(\"entry\", {\"who\": [1]})", "{{who}} is a list"},
+    };
+    for (const Case& c : cases) {
+        INFO(c.code);
+        HandlerOutcome o = callWithFrags(s, std::string("  ") + c.code, frags);
+        REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Error, describe(o));
+        CHECK_MESSAGE(contains(o.error.message, c.message), o.error.message);
+        CHECK_EQ(o.error.file, "code/pages/h.ms");
+    }
+}
+
+TEST_CASE("ScriptHost: Markdown fragments take no value") {
+    Scripts s;
+    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"intro\", {\"a\": 1})\nend function\n");
+    s.compile();
+    FragmentMap frags;
+    frags["intro"] = CompiledTemplate::fromMarkdown(RelPath::parse("frags/intro.md").value(), unsafeHtml("<p>hi</p>"));
+    s.app->templates.setFragments(std::move(frags));
+    HandlerOutcome o = s.call("pages/h.ms", "get.x");
+    REQUIRE(o.kind == HandlerOutcome::Kind::Error);
+    CHECK(contains(o.error.message, "is Markdown, which has no fields"));
+    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"intro\")\nend function\n");
+    s.compile();
+    frags["intro"] = CompiledTemplate::fromMarkdown(RelPath::parse("frags/intro.md").value(), unsafeHtml("<p>hi</p>"));
+    s.app->templates.setFragments(std::move(frags));
+    CHECK_EQ(s.call("pages/h.ms", "get.x").body, "<p>hi</p>");
+}
+
+TEST_CASE("ScriptHost: rendered HTML goes into a page's fields") {
+    Scripts s;
+    s.write("frags/entry.html", "<li>{{who}}</li>");
+    RenderOptions options;
+    options.nonce = "N0nce";
+    s.write("pages/t.ms", "render = function(req)\n"
+                          "  return {\"list\": frag(\"entry\", [{\"who\": \"a\"}]), \"md\": markdown(\"*hi*\"), "
+                          "\"raw\": unsafeHTML(\"<i>raw</i>\"), \"cfg\": {\"a\": [1, \"</script>\"]}}\n"
+                          "end function\n");
+    s.write("pages/t.html", "<!DOCTYPE html><html><head></head><body><ul>{{list}}</ul>{{md}}{{raw}}"
+                            "<script>go({{cfg}})</script></body></html>");
+    s.compile();
+    options.markdownCss = "/m.css";
+    HandlerOutcome o = s.call("pages/t.ms", "render", {}, options);
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
+    CHECK_EQ(o.body,
+             "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/m.css\">\n</head><body><ul><li>a</li></ul>"
+             "<div class=\"markdown comment\">\n<p><em>hi</em></p>\n</div>\n<i>raw</i>"
+             "<script nonce=\"N0nce\">go({\"a\":[1,\"\\u003c\\u002fscript\\u003e\"]})</script></body></html>");
+}
+
+TEST_CASE("ScriptHost: only handles are HTML; nothing a script builds can pass for one") {
+    Scripts s;
+    const char* forgeries[] = {
+        "{\"html\": \"<b>x</b>\"}",
+        "{\"__isa\": {\"html\": \"<b>x</b>\"}}",
+        "\"<b>x</b>\"",
+    };
+    for (const char* forged : forgeries) {
+        INFO(forged);
+        HandlerOutcome o = s.render(std::string("render = function(req)\n  return {\"x\": ") + forged +
+                                        "}\nend function\n",
+                                    {}, "<!DOCTYPE html>{{x}}");
+        if (o.kind == HandlerOutcome::Kind::Render) {
+            CHECK(o.body.find("<b>") == std::string::npos);
+        } else {
+            CHECK(contains(o.error.message, "is a map"));
+        }
+    }
+    // A plain string returned is text/plain, never HTML.
+    s.write("pages/h.ms", "get.x = function(req)\n  return \"<b>x</b>\"\nend function\n");
+    s.compile();
+    CHECK_EQ(s.call("pages/h.ms", "get.x").kind, HandlerOutcome::Kind::Text);
+    // Html can't be turned into JSON, nor stored.
+    s.write("pages/h.ms", "get.x = function(req)\n  return json({\"h\": markdown(\"x\")})\nend function\n");
+    s.compile();
+    HandlerOutcome o = s.call("pages/h.ms", "get.x");
+    REQUIRE(o.kind == HandlerOutcome::Kind::Error);
+    CHECK(contains(o.error.message, "handle"));
+}
+
+TEST_CASE("ScriptHost: markdown()") {
+    Scripts s;
+    auto md = [&](const std::string& call) {
+        s.write("pages/h.ms", "get.x = function(req)\n  return " + call + "\nend function\n");
+        s.compile();
+        return s.call("pages/h.ms", "get.x");
+    };
+    HandlerOutcome o = md("markdown(\"# Title\")");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Fragment, describe(o));
+    CHECK_EQ(o.body, "<div class=\"markdown comment\">\n<p>Title</p>\n</div>\n");
+    CHECK_EQ(md("markdown(\"# Title\", \"full\")").body, "<div class=\"markdown\">\n<h1 id=\"title\">Title</h1>\n</div>\n");
+    CHECK_EQ(md("markdown(null)").body, "<div class=\"markdown comment\">\n</div>\n");
+    CHECK(contains(md("markdown(\"x\", \"raw\")").error.message, "profile must be"));
+    CHECK(contains(md("markdown(42)").error.message, "needs a string"));
+    CHECK(contains(md("markdown(\"x\" * 300000)").error.message, "over the limit"));
+}
+
+TEST_CASE("ScriptHost: unsafeHTML() and fragments with scripts") {
+    Scripts s;
+    std::vector<std::pair<std::string, std::string>> frags = {{"js", "<script>x()</script>"}};
+    HandlerOutcome o = callWithFrags(s, "  return unsafeHTML(\"<b>trusted</b>\")", frags);
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Fragment, describe(o));
+    CHECK_EQ(o.body, "<b>trusted</b>");
+    CHECK_FALSE(o.hasScript);
+    CHECK(callWithFrags(s, "  return unsafeHTML(\"<SCRIPT>x()</script>\")", frags).hasScript);
+    CHECK(callWithFrags(s, "  return frag(\"js\")", frags).hasScript);
+    o = callWithFrags(s, "  return status(422, frag(\"js\"))", frags);
+    CHECK_EQ(o.kind, HandlerOutcome::Kind::Status);
+    CHECK(o.hasScript);
+    CHECK_EQ(o.contentType, "text/html; charset=utf-8");
+    CHECK(contains(callWithFrags(s, "  return unsafeHTML(1)", frags).error.message, "needs a string"));
+}
+
+TEST_CASE("ScriptHost: req.htmx") {
+    Scripts s;
+    RequestFacts htmx;
+    htmx.headers = {{"hx-request", "true"}};
+    std::vector<std::pair<std::string, std::string>> none;
+    CHECK_EQ(callWithFrags(s, "  return str(req.htmx)", none, htmx).body, "1");
+    CHECK_EQ(callWithFrags(s, "  return str(req.htmx)", none).body, "0");
+}
+
+TEST_CASE("ScriptHost: missing and unused fields are warned about") {
+    Scripts s;
+    s.write("frags/entry.html", "<li>{{who}} {{when}}</li>");
+    s.write("pages/t.ms", "render = function(req)\n"
+                          "  return {\"list\": frag(\"entry\", {\"who\": 1}), \"typo\": 2}\n"
+                          "end function\n");
+    s.write("pages/t.html", "<!DOCTYPE html>{{list}} {{title}}");
+    s.compile();
+    HandlerOutcome o = s.call("pages/t.ms", "render");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
+    std::string all;
+    for (const RenderWarning& w : o.warnings) all += w.file + ":" + std::to_string(w.line) + ": " + w.message + "\n";
+    CHECK_MESSAGE(contains(all, "frags/entry.html:1: {{when}} wasn't given a value"), all);
+    CHECK_MESSAGE(contains(all, "pages/t.html:1: {{title}} wasn't given a value"), all);
+    CHECK_MESSAGE(contains(all, "\"typo\" was given a value"), all);
 }

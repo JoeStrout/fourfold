@@ -2,8 +2,9 @@
 // (Arch §6). It's the only thing the engine knows about the app's code.
 // Plain data and lookups, no logic; the compiler builds it.
 //
-// M2 holds routes, static files, page templates, and the compiled scripts.
-// Queries, access rules and the rest arrive with their milestones.
+// It holds routes, static files, templates (pages and fragments), Markdown
+// pages, and the compiled scripts. Queries, access rules and the rest arrive
+// with their milestones.
 #pragma once
 
 #include <cstdint>
@@ -39,6 +40,7 @@ enum class RouteKind {
     Page,      // a page: an .html template, its .ms file's render, or both
     Static,    // a static file, served with its content type from StaticIndex
     Handler,   // get.x and/or post.x in a page's .ms file
+    Markdown,  // a .md page, rendered at compile time and served in its layout
 };
 
 const char* routeKindName(RouteKind kind);
@@ -105,15 +107,28 @@ private:
     std::map<RelPath, StaticFile> files_;
 };
 
-// The parsed .html templates in code/pages/, by source path.
+// The parsed templates: pages in code/pages/ by source path, and fragments
+// in code/frags/ by name ("entry" for frags/entry.html or entry.md), with
+// their includes resolved.
 class TemplateSet {
 public:
     void add(RelPath source, CompiledTemplate compiled);
     const CompiledTemplate* find(const RelPath& source) const;
     size_t size() const { return templates_.size(); }
 
+    void setFragments(FragmentMap fragments) { fragments_ = std::move(fragments); }
+    const CompiledTemplate* fragment(const std::string& name) const;
+    const FragmentMap& fragments() const { return fragments_; }
+
 private:
     std::map<RelPath, CompiledTemplate> templates_;
+    FragmentMap fragments_;
+};
+
+// A .md page in code/pages/, rendered once, at compile time.
+struct MarkdownPage {
+    Html content;
+    std::string title;   // from its first # heading; empty if none
 };
 
 struct CompiledApp {
@@ -121,6 +136,13 @@ struct CompiledApp {
     RouteTable routes;
     StaticIndex statics;
     TemplateSet templates;
+    std::map<RelPath, MarkdownPage> markdownPages;
+    // frags/layout/markdown.html, which wraps every Markdown page, if the
+    // app has one (with {{content}} and {{title}}); else a built-in page.
+    std::optional<CompiledTemplate> markdownLayout;
+    // pages/markdown.css exists, so pages with Markdown link it instead of
+    // the built-in stylesheet.
+    bool hasMarkdownCss = false;
     std::optional<RelPath> notFoundPage;    // pages/404.html, if present
     std::optional<RelPath> errorPage;       // pages/500.html, if present
     // Null if the app has no .ms files. Shared by every request on this

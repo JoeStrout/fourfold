@@ -195,11 +195,12 @@ TEST_CASE("DevServer: edits show up live, and errors show while the old version 
     CHECK(app.server->compiled());
 
     std::string page = get(port, "/");
-    CHECK(contains(page, "<p>Hello, world!</p><script src=\"/__dev/client.js\" data-generation=\"1\" defer></script>"));
+    CHECK(contains(page, "<p>Hello, world!</p><script src=\"/__dev/client.js\" nonce=\""));
+    CHECK(contains(page, "\" data-generation=\"1\" defer></script>"));
     CHECK(contains(get(port, "/__dev/client.js"), "EventSource"));
 
     EventStreamClient events(port);
-    REQUIRE(events.waitFor("event: hello\ndata: {\"diagnostics\":[],\"generation\":1}", std::chrono::seconds(2)));
+    REQUIRE(events.waitFor("event: hello\ndata: {\"diagnostics\":[],\"generation\":1,\"warnings\":[]}", std::chrono::seconds(2)));
     CHECK(contains(events.received, "Content-Type: text/event-stream\r\n"));
 
     // An edit to the code: a reload event within about two seconds.
@@ -262,7 +263,7 @@ TEST_CASE("DevServer: script errors get the dev error page") {
 
 TEST_CASE("DevServer: an app that doesn't compile starts anyway, and serves once fixed") {
     LiveApp app;
-    app.write("pages/index.html", "<p>{{who}}</p>");
+    app.write("pages/index.html", "<!DOCTYPE html><p>{{who}}</p>");
     app.write("pages/index.ms", "render = function(req)\n  return (\nend function\n");
     app.start();
     if (app.skipped) return;
@@ -281,4 +282,60 @@ TEST_CASE("DevServer: an app that doesn't compile starts anyway, and serves once
     app.write("pages/index.ms", kHelloMs);
     REQUIRE(events.waitFor("event: reload\ndata: {\"generation\":1}", std::chrono::seconds(3), mark));
     CHECK(contains(get(port, "/"), "<p>world</p>"));
+}
+
+TEST_CASE("DevServer: the guestbook example, with HTMX") {
+    std::ostringstream out, err;
+    auto server = DevServer::start(FOURFOLD_TESTS_DIR "/../examples/guestbook", 0, out, err);
+    if (!server && contains(err.str(), "Operation not permitted")) {
+        MESSAGE("skipped: binding a local port isn't permitted here");
+        return;
+    }
+    REQUIRE_MESSAGE(server, err.str());
+    REQUIRE_MESSAGE(server->compiled(), err.str());
+    std::thread serving([&] { server->loop().run(); });
+    uint16_t port = server->port();
+
+    std::string page = get(port, "/");
+    CHECK(contains(page, "HTTP/1.1 200 OK\r\n"));
+    // The CSP's nonce is on every <script> in the page.
+    size_t at = page.find("'nonce-");
+    REQUIRE(at != std::string::npos);
+    std::string nonce = page.substr(at + 7, page.find('\'', at + 7) - at - 7);
+    size_t scripts = 0, nonced = 0;
+    for (size_t s = page.find("<script"); s != std::string::npos; s = page.find("<script", s + 1)) {
+        scripts++;
+        size_t end = page.find('>', s);
+        if (page.substr(s, end - s).find("nonce=\"" + nonce + "\"") != std::string::npos) nonced++;
+    }
+    CHECK(scripts >= 4);
+    CHECK_EQ(nonced, scripts);
+    // Hostile sample entries stay text.
+    CHECK(contains(page, "<b>&lt;script&gt;alert(&#39;hi&#39;)&lt;/script&gt;</b>"));
+    CHECK_FALSE(contains(page, "javascript:"));
+    CHECK_FALSE(contains(page, "<img"));
+    CHECK(contains(page, "<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">"));
+    CHECK(contains(page, "{\"entries\":4,\"names\":4}"));
+
+    // Signing with HTMX gets just the new entry, escaped.
+    std::string body = "who=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E&msg=**hi**";
+    std::string signed_ = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nHX-Request: true\r\n"
+                                      "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+                                          std::to_string(body.size()) + "\r\n\r\n" + body);
+    CHECK(contains(signed_, "HTTP/1.1 200 OK\r\n"));
+    CHECK(contains(signed_, "<li><b>&lt;img src=x onerror=alert(1)&gt;</b>: <div class=\"markdown comment\">\n"
+                            "<p><strong>hi</strong></p>\n</div>\n</li>"));
+    CHECK_FALSE(contains(signed_, "/__dev/client.js"));   // a fragment, not a page
+    // Without HTMX, a redirect back.
+    std::string plain = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+                                    "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\nwho=a&msg=b");
+    CHECK(contains(plain, "HTTP/1.1 303 See Other\r\n"));
+    CHECK(contains(plain, "Location: /\r\n"));
+
+    CHECK(contains(get(port, "/about"), "<h1 id=\"about-this-guestbook\">"));
+    std::string htmx = get(port, "/__fourfold/htmx.js");
+    CHECK(contains(htmx, "htmx.config.allowEval = false;"));
+
+    server->loop().stop();
+    serving.join();
 }

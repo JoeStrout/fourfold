@@ -202,14 +202,14 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 
 **`template`.** Two halves sharing one data structure:
 
-- `parseTemplate(CodeFile, kind) → CompiledTemplate | diagnostics`: tokenizes HTML, classifies each field's context (text, quoted attribute, URL start, URL query, script, forbidden), validates page vs. fragment shape, records every `<script>` and `<form method="post">` (for nonce and CSRF injection), and resolves `{{> includes}}`. All the logic in §4's escaping tables lives here.
-- `render(CompiledTemplate, FieldSource, RenderOptions) → Html`: walks the template, asks the `FieldSource` for each field's value, and escapes by context. `RenderOptions` carries the CSP nonce and CSRF token to inject.
+- `parseTemplate(CodeFile, kind) → CompiledTemplate | diagnostics`: tokenizes HTML, following the spec's tokenizer states, and classifies each field's context: text, RCDATA (`<title>`, `<textarea>`), quoted attribute, boolean attribute, URL start, URL part, or script; anywhere else is a compile error. It validates page vs. fragment shape, and records every `<script>` and `<form method="post">` (for nonce and CSRF injection) and the end of `<head>` (for `markdown.css`). `resolveIncludes` then splices `{{> includes}}` in, with cycle detection. All the logic in §4's escaping tables lives here; [m4-results.md](m4-results.md) lists every rule.
+- `render(CompiledTemplate, FieldSource, RenderOptions) → RenderResult`: walks the template, asks the `FieldSource` for each field's value, and escapes by context. `RenderOptions` carries the CSP nonce to inject (and, from M5, the CSRF token). The result is `Html`, or an error located at the field, plus missing- and unused-field warnings.
 
-`FieldSource` is an interface returning a small variant (`null`, `bool`, number, string, `Html`, or `Datum` for JSON-in-script). The script bindings implement it over a `Value` map; pages with no code use an empty one; tests use a literal one. **`template` therefore doesn't depend on MS2**, and the hardest-to-get-right security code can be tested in isolation with tables of inputs and expected outputs.
+`FieldSource` is an interface returning a small variant (missing, `null`, number, string, `Html`, `Datum` for JSON-in-script, or an error). The script bindings implement it over a `Value` map (`ValueFields`); pages with no code use an empty one; tests use a literal one (`MapFields`). **`template` therefore doesn't depend on MS2**, and the hardest-to-get-right security code can be tested in isolation with tables of inputs and expected outputs.
 
 `Html` is the C++ type for rendered, trusted HTML. Only `render`, `renderMarkdown`, and the `unsafeHTML` intrinsic produce it. In scripts it's wrapped as a handle (§4, Return values).
 
-**`markdown`.** `renderMarkdown(text, profile) → Html`, wrapping md4c with the profile rules, the URL rule (shared with `template`), link rewriting (given a route-lookup callback), and the size cap. Pure, and MS2-free.
+**`markdown`.** `renderMarkdown(text, options) → MarkdownResult`, over md4c's parser (with raw HTML off) and a renderer of our own, which applies the profile rules, the URL rule (shared with `template`), heading ids, link rewriting (through a callback the compiler supplies), and the size cap. Pure, and MS2-free.
 
 **`compiledapp`.** The data model of a compiled app, with no logic beyond lookups. Described in §6, since it's the most important seam.
 
@@ -221,7 +221,7 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 - compiles `.ms` files into bytecode (via `script`'s `ScriptCompiler`, which takes `CodeFile`s);
 - evaluates declaration files (`access.ms`, `limits.ms`, `outbound.ms`, `schedule.ms`, routes) and per-file declarations (`access =`, `form.x`) in a restricted VM, getting back `Datum`s (via `script`'s `DataEvaluator`);
 - builds the route table and computes each route's effective access, limits, and form spec;
-- runs the cross-checks: route collisions, unmatched access rules, forms against templates, links between `.md` files, jobs named by the schedule, migration numbering and checksums.
+- runs the cross-checks: route collisions, unmatched access rules, forms against templates, local links in templates and between `.md` files, jobs named by the schedule, migration numbering and checksums.
 
 The compiler is, apart from its use of `script`, **a pure function from files to a compiled app**. It touches no stores and no network. That makes it the natural place for golden tests ("this app folder compiles to this route-table dump, with these diagnostics"), and the access report is just a printout of its output.
 
@@ -433,12 +433,12 @@ fourfold/
     devtools/
     hosts/         cli/, http-server/, cgi/, front/
   tests/           mirrors src/; plus apps/ (sample app folders for golden compiler tests)
-  third_party/     md4c, sqlite, …   (MS2 itself from ~/svnrepo/miniscript2)
+  third_party/     llhttp, md4c, htmx, doctest; later sqlite, …   (MS2 itself from ~/svnrepo/miniscript2)
 ```
 
 Each component directory has its public headers in `include/<component>/` and its internal files beside them. A component's tests use only its public headers, plus fakes of the interfaces below it. Each component is its own static library, and only components that declare a dependency on it can see its `include/` folder, so the build itself rejects a dependency that points upward or sideways. The build system and its conventions are described in [building.md](../building.md).
 
-Third-party pieces: llhttp for parsing HTTP/1.1 (chosen in M1). Likely, still to be decided: SQLite; md4c; nghttp2 for HTTP/2; OpenSSL or BoringSSL for TLS; libsodium for crypto; an ACME client or a small one of our own. The event loop is our own (`platform`'s `EventLoop`, over kqueue or epoll): the script thread needs little from it beyond readiness, timers, and a cross-thread wakeup.
+Third-party pieces: llhttp for parsing HTTP/1.1 (chosen in M1); md4c's parser for Markdown, and htmx, served by the engine (M4). Likely, still to be decided: SQLite; nghttp2 for HTTP/2; OpenSSL or BoringSSL for TLS; libsodium for crypto; an ACME client or a small one of our own. The event loop is our own (`platform`'s `EventLoop`, over kqueue or epoll): the script thread needs little from it beyond readiness, timers, and a cross-thread wakeup.
 
 ---
 

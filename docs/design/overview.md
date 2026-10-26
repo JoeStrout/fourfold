@@ -387,7 +387,7 @@ To keep that load low, a page and its code are paired by naming convention: `pag
 - **File-based routing for pages:** `pages/about.html` (+ optional `about.ms`) is served at `/about`. So is `pages/about.md` (see [Markdown](#markdown)).
 - **Static files live in `pages/` too:** anything in `pages/` that isn't `.html`, `.md`, or `.ms` is served as a static file at its path, e.g. `pages/members/photos/beach.jpg` at `/members/photos/beach.jpg`. Images stay next to the pages that use them, and folder access rules cover both.
 - **Handlers by convention:** `POST /guestbook/sign` calls `post.sign` in `pages/guestbook.ms`. See [Handler model](#handler-model).
-- **One canonical URL per page, so relative links work.** A folder's index page is canonical *with* a trailing slash (`pages/docs/index.html` at `/docs/`); every other page and file is canonical without one (`/docs/intro`). The other form redirects to the canonical one, so a relative link like `foo.png` always resolves against the page's own folder, whichever form the visitor typed. There are no directory listings.
+- **One canonical URL per page, so relative links work.** A folder's index page is canonical *with* a trailing slash (`pages/docs/index.html` at `/docs/`); every other page and file is canonical without one (`/docs/intro`). The other form redirects to the canonical one, so a relative link like `foo.png` always resolves against the page's own folder, whichever form the visitor typed. A request for a page by its file name (`/docs/intro.html`, `/docs/index.html`) also redirects to its URL, so links into a site converted to Fourfold keep working. There are no directory listings.
 - **An explicit routes table as fallback** for URLs that don't fit the convention: URL patterns like `/user/{id}`, handlers shared by several pages, API-style endpoints.
 
 All of these map URLs to handler functions and templates in the code partition.
@@ -716,7 +716,7 @@ Text that reaches `markdown()` at runtime is usually visitor input, so **the def
 | Links | yes, with `rel="nofollow ugc"` | yes |
 | Headings | rendered as ordinary paragraphs | yes |
 | Images | rendered as a plain link to the image URL | yes |
-| Footnotes | no | yes |
+| Footnotes | no | yes (not yet: md4c has no footnotes; deferred in M4) |
 | Heading and footnote `id`s | **none** | yes |
 
 - **Why no images in comments:** a visitor's image is a tracking pixel or a hotlink to someone else's server.
@@ -1221,7 +1221,7 @@ base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 - **Inline `style` attributes are allowed** (`'unsafe-inline'` for styles only), since designers use them constantly and the risk is much smaller than with scripts. A config option removes it for a stricter policy.
 - **The developer can add sources** in config, e.g. a CDN for scripts or a font host. There's no option for `'unsafe-inline'` or `'unsafe-eval'` in `script-src`.
 - **Violations are reported:** in dev mode, a CSP violation shows in the error overlay with the offending element; in production, it's logged to the engine log (rate-limited).
-- (**Open:** fragments returned to HTMX are rendered in a separate response, so a `<script>` inside one won't have the page's nonce. Tentatively, a fragment containing `<script>` is an error when returned as a fragment response, though it's fine in a static include or a page field.)
+- **Fragments with scripts** (decided in M4): fragments returned to HTMX are rendered in a separate response, so a `<script>` inside one won't have the page's nonce. A fragment containing `<script>` is therefore an error when returned as a fragment response (or as `status(...)`'s body), though it's fine in a static include or a page field. HTMX is also configured not to run scripts in swapped content.
 
 #### Dev mode
 

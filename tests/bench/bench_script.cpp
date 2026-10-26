@@ -14,6 +14,7 @@
 
 #include "partition/app_folder.h"
 #include "script/script_host.h"
+#include "template/template.h"
 #include "temp_dir.h"
 
 using namespace fourfold;
@@ -37,6 +38,11 @@ struct Bench {
                   "  for i in range(1, 20)\n    items.push(helper(i))\n  end for\n"
                   "  return {\"greeting\": util.greet(req.query.name), \"total\": items.sum}\n"
                   "end function\n");
+        // Their pages, filled on the script thread as in a real request.
+        dir.write("code/pages/trivial.html", "<!DOCTYPE html><p>Hello, {{name}}</p>");
+        dir.write("code/pages/typical.html",
+                  "<!DOCTYPE html><html><head><title>{{greeting}}</title><script src=\"/a.js\"></script></head>"
+                  "<body><h1>{{greeting}}</h1><p>Total: {{total}}</p></body></html>");
         // Memory hogs: as much as each can allocate within the instruction budget.
         dir.write("code/pages/hogList.ms",
                   "render = function(req)\n  x = []\n  while true\n    x.push(x.len)\n  end while\nend function\n");
@@ -64,6 +70,15 @@ struct Bench {
             std::exit(1);
         }
         app->scripts = compiled.bundle;
+        for (const char* p : {"pages/trivial.html", "pages/typical.html"}) {
+            RelPath path = RelPath::parse(p).value();
+            ParsedTemplate t = parseTemplate(code.read(path).value(), TemplateKind::Page);
+            if (!t.ok()) {
+                std::fprintf(stderr, "%s: %s\n", p, t.errors[0].message.c_str());
+                std::exit(1);
+            }
+            app->templates.add(path, std::move(t.compiled));
+        }
     }
 
     HandlerRef render(const char* page) {

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Guestbook</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="/__fourfold/htmx.js"></script>
+</head>
+<body>
+  {{> header}}
+  <main>
+    <h1>Guestbook</h1>
+    <p>{{count}} entries so far. Messages are Markdown (the safe, comment kind).</p>
+
+    <ul id="entries">{{entries}}</ul>
+
+    <!-- Works with HTMX (the new entry is appended in place) and without it
+         (the form posts, and the handler redirects back here). -->
+    <form method="post" action="/sign"
+          hx-post="/sign" hx-target="#entries" hx-swap="beforeend">
+      <input name="who" placeholder="Your name" required>
+      <textarea name="msg" placeholder="Say something (Markdown works)" required></textarea>
+      <label><input type="checkbox" name="shout" checked="{{shoutByDefault}}"> Shout</label>
+      <button>Sign</button>
+    </form>
+    <p class="note">This example doesn't store entries yet (that needs <code>data</code>, in M5),
+      so a new one shows until you reload.</p>
+  </main>
+
+  <script type="application/json" id="guestbook-stats">{{stats}}</script>
+  <script src="guestbook.js"></script>
+</body>
+</html>

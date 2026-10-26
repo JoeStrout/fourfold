@@ -68,7 +68,7 @@ void appendNumber(std::string& out, double n) {
     out += buf;
 }
 
-void appendString(std::string& out, const std::string& s) {
+void appendString(std::string& out, const std::string& s, bool forScript) {
     static const char* const kHex = "0123456789abcdef";
     out += '"';
     for (size_t i = 0; i < s.size(); i++) {
@@ -79,6 +79,12 @@ void appendString(std::string& out, const std::string& s) {
             case '\n': out += "\\n"; break;
             case '\r': out += "\\r"; break;
             case '\t': out += "\\t"; break;
+            case '/': case '`': case '\'':
+                if (!forScript) {
+                    out += static_cast<char>(c);
+                    break;
+                }
+                [[fallthrough]];
             case '<': case '>': case '&':
                 out += "\\u00";
                 out += kHex[c >> 4];
@@ -103,18 +109,18 @@ void appendString(std::string& out, const std::string& s) {
     out += '"';
 }
 
-void appendJson(std::string& out, const Datum& d) {
+void appendJson(std::string& out, const Datum& d, bool forScript) {
     switch (d.kind()) {
         case Datum::Kind::Null: out += "null"; break;
         case Datum::Kind::Number: appendNumber(out, d.asNumber()); break;
-        case Datum::Kind::String: appendString(out, d.asString()); break;
+        case Datum::Kind::String: appendString(out, d.asString(), forScript); break;
         case Datum::Kind::List: {
             out += '[';
             bool first = true;
             for (const Datum& item : d.asList()) {
                 if (!first) out += ',';
                 first = false;
-                appendJson(out, item);
+                appendJson(out, item, forScript);
             }
             out += ']';
             break;
@@ -125,9 +131,9 @@ void appendJson(std::string& out, const Datum& d) {
             for (const auto& [key, item] : d.asMap()) {
                 if (!first) out += ',';
                 first = false;
-                appendString(out, key);
+                appendString(out, key, forScript);
                 out += ':';
-                appendJson(out, item);
+                appendJson(out, item, forScript);
             }
             out += '}';
             break;
@@ -139,7 +145,13 @@ void appendJson(std::string& out, const Datum& d) {
 
 std::string toJson(const Datum& value) {
     std::string out;
-    appendJson(out, value);
+    appendJson(out, value, false);
+    return out;
+}
+
+std::string toJsonForScript(const Datum& value) {
+    std::string out;
+    appendJson(out, value, true);
     return out;
 }
 

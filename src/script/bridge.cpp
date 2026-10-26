@@ -1,9 +1,11 @@
 #include "bridge.h"
 
+#include <algorithm>
 #include <cmath>
 #include <unordered_set>
 
 #include "host_impl.h"
+#include "template/template.h"
 #include "value_map.h"
 
 namespace fourfold {
@@ -26,6 +28,18 @@ std::unordered_set<const OutcomeHandle*>& liveHandles() {
 void finalizeOutcomeHandle(void* p) {
     auto* h = static_cast<OutcomeHandle*>(p);
     liveHandles().erase(h);
+    delete h;
+}
+
+// The same, for Html handles.
+std::unordered_set<const Html*>& liveHtml() {
+    static std::unordered_set<const Html*> live;
+    return live;
+}
+
+void finalizeHtmlHandle(void* p) {
+    auto* h = static_cast<Html*>(p);
+    liveHtml().erase(h);
     delete h;
 }
 
@@ -125,6 +139,68 @@ const OutcomeHandle* outcomeHandleOf(Value v) {
     return liveHandles().count(h) ? h : nullptr;
 }
 
+Value makeHtmlHandle(Html html) {
+    auto* h = new Html(std::move(html));
+    liveHtml().insert(h);
+    return Value::NewHandle(h, finalizeHtmlHandle);
+}
+
+const Html* htmlHandleOf(Value v) {
+    if (!v.IsHandle()) return nullptr;
+    auto* h = static_cast<const Html*>(v.HandlePtr());
+    return liveHtml().count(h) ? h : nullptr;
+}
+
+namespace {
+
+// A value as a field value (not yet in a <script>).
+FieldValue fieldFrom(Value v, bool forScript) {
+    if (v.IsNull()) return FieldValue::null();
+    if (const Html* h = htmlHandleOf(v)) return FieldValue::markup(*h);
+    if (forScript) {
+        std::string why;
+        std::optional<Datum> d = toDatum(v, why);
+        if (!d) return FieldValue::error("can't go in a <script>: it " + why);
+        return FieldValue::datum(std::move(*d));
+    }
+    if (v.IsString()) return FieldValue::string(toStdString(v));
+    if (v.IsNumber()) return FieldValue::number(toStdString(v));   // MiniScript's own format
+    if (v.IsMap()) return FieldValue::composite("a map");
+    if (v.IsList()) return FieldValue::composite("a list");
+    if (v.IsFuncRef()) return FieldValue::error("is a function (did you mean to call it?)");
+    if (v.IsError()) return FieldValue::error("is an error value");
+    return FieldValue::error("is a handle that isn't rendered HTML");
+}
+
+}  // namespace
+
+FieldValue ValueFields::lookup(const std::vector<std::string>& path, bool forScript) const {
+    if (path.empty() || !map_.IsMap()) return FieldValue::missing();
+    Value v;
+    if (!map_.TryGet(toValue(path[0]), &v)) return FieldValue::missing();
+    for (size_t i = 1; i < path.size(); i++) {
+        if (v.IsNull()) return FieldValue::null();
+        if (!v.IsMap()) {
+            return FieldValue::error("can't be looked up: " + path[i - 1] + " isn't a map, so it has no ." + path[i]);
+        }
+        Value next;
+        if (!v.TryGet(toValue(path[i]), &next)) return FieldValue::null();
+        v = next;
+    }
+    return fieldFrom(v, forScript);
+}
+
+std::vector<std::string> ValueFields::names() const {
+    std::vector<std::string> result;
+    if (!map_.IsMap()) return result;
+    MiniScript::MapIterator it = map_.Iterator();
+    Value key, item;
+    while (MiniScript::map_iterator_next(&it, &key, &item)) {
+        if (key.IsString()) result.push_back(toStdString(key));
+    }
+    return result;
+}
+
 Value makeRequestValue(const RequestFacts& facts) {
     Value req = Value::make_map(8);
     req.MapSet("method", toValue(facts.method));
@@ -132,6 +208,10 @@ Value makeRequestValue(const RequestFacts& facts) {
     req.MapSet("query", pairsToMap(facts.query));
     req.MapSet("headers", pairsToMap(facts.headers));
     req.MapSet("form", pairsToMap(facts.form));
+    // HTMX sends "HX-Request: true" with every request it makes.
+    bool htmx = false;
+    for (const auto& [name, value] : facts.headers) htmx = htmx || (name == "hx-request" && value == "true");
+    req.MapSet("htmx", htmx ? Value::one : Value::zero);
     req.Freeze();   // deep: handlers can read req, never change it
     return req;
 }
@@ -170,7 +250,44 @@ const char* typeName(Value v) {
 
 }  // namespace
 
-HandlerOutcome outcomeFromResult(Run& run) {
+void addWarnings(Run& run, const std::vector<RenderWarning>& more) {
+    for (const RenderWarning& w : more) {
+        if (std::find(run.warnings.begin(), run.warnings.end(), w) == run.warnings.end()) run.warnings.push_back(w);
+    }
+}
+
+namespace {
+
+// The page template a render fills: pages/x.html for pages/x.ms.
+RelPath pairedTemplate(const RelPath& source) {
+    std::string s = source.str();
+    s.resize(s.size() - source.extension().size());
+    return RelPath::parse(s + ".html").value();
+}
+
+HandlerOutcome renderPage(Run& run, Value fields) {
+    RelPath page = pairedTemplate(run.handler.source);
+    const CompiledTemplate* t = run.app ? run.app->templates.find(page) : nullptr;
+    if (!t) {
+        return errorOutcome(run, "render returned a map of fields, but there's no code/" + page.str() +
+                                     " template to fill; return a string or json(...) instead");
+    }
+    RenderResult r = render(*t, ValueFields(fields), run.render);
+    addWarnings(run, r.warnings);
+    HandlerOutcome o;
+    if (!r.ok()) {
+        o.kind = HandlerOutcome::Kind::Error;
+        o.error.message = r.error->message;
+        o.error.file = "code/" + r.error->file;
+        o.error.line = r.error->line;
+        return o;
+    }
+    o.kind = HandlerOutcome::Kind::Render;
+    o.body = r.html.str();
+    return o;
+}
+
+HandlerOutcome outcomeFrom(Run& run) {
     Value result = run.interp.GetGlobalValue("_ff_result");
     HandlerOutcome o;
     std::string who = run.handler.label();
@@ -189,6 +306,12 @@ HandlerOutcome outcomeFromResult(Run& run) {
         o.body = toStdString(result);
         return o;
     }
+    if (const Html* html = htmlHandleOf(result)) {
+        o.kind = HandlerOutcome::Kind::Fragment;
+        o.body = html->str();
+        o.hasScript = html->hasScript();
+        return o;
+    }
     if (const OutcomeHandle* h = outcomeHandleOf(result)) {
         switch (h->kind) {
             case OutcomeHandle::Kind::Redirect:
@@ -204,37 +327,29 @@ HandlerOutcome outcomeFromResult(Run& run) {
                 o.status = h->status;
                 o.body = h->body;
                 o.contentType = h->contentType;
+                o.hasScript = h->hasScript;
                 break;
         }
         return o;
     }
     if (result.IsMap()) {
         if (run.handler.kind != HandlerRef::Kind::Render) {
-            return errorOutcome(run, who + " returned a map; only render can (use json(...) to send JSON)");
+            return errorOutcome(run, who + " returned a map; only render can (use json(...) to send JSON, or "
+                                           "frag(...) to send HTML)");
         }
-        o.kind = HandlerOutcome::Kind::Render;
-        MiniScript::MapIterator it = result.Iterator();
-        Value key, value;
-        while (MiniScript::map_iterator_next(&it, &key, &value)) {
-            if (!key.IsString()) {
-                return errorOutcome(run, "render returned a map with a key that isn't a string (" +
-                                             toStdString(key) + ")");
-            }
-            std::string name = toStdString(key);
-            if (value.IsNull()) {
-                o.fields[name] = std::nullopt;
-            } else if (value.IsString() || value.IsNumber()) {
-                o.fields[name] = toStdString(value);   // numbers in MiniScript's own format
-            } else {
-                return errorOutcome(run, "render's field '" + name + "' is " + typeName(value) +
-                                             "; fields take strings, numbers, or null");
-            }
-        }
-        return o;
+        return renderPage(run, result);
     }
     return errorOutcome(run, who + " returned " + typeName(result) +
-                                 "; return a string, redirect(...), json(...), status(...), or null" +
+                                 "; return a string, frag(...), redirect(...), json(...), status(...), or null" +
                                  (run.handler.kind == HandlerRef::Kind::Render ? ", or a map of fields" : ""));
+}
+
+}  // namespace
+
+HandlerOutcome outcomeFromResult(Run& run) {
+    HandlerOutcome o = outcomeFrom(run);
+    o.warnings = std::move(run.warnings);
+    return o;
 }
 
 }  // namespace fourfold

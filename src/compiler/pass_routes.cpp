@@ -7,6 +7,7 @@
 //   pages/guestbook.ms        →  /guestbook/sign  for post.sign; /guestbook/more for get.more
 //   pages/docs/index.ms       →  /docs/more       for get.more
 //   pages/api.ms              →  /api             if it has a render but there's no api.html
+//   pages/guide.md            →  /guide           rendered Markdown (see the markdown pass)
 //   pages/404.html            →  the not-found page (not a route)
 //   pages/500.html            →  the error page (not a route)
 
@@ -156,7 +157,13 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                 diagnostics.warning(fileName, "defines no render, get or post handlers, so nothing is served");
             }
         } else if (extension == ".md") {
-            diagnostics.warning(fileName, "Markdown pages aren't supported yet; ignored");
+            if (isSpecialPage(segments, stem)) {
+                diagnostics.warning(fileName, "the " + std::string(stem) + " page must be " + std::string(stem) +
+                                                  ".html; this one is ignored");
+                continue;
+            }
+            std::string url = urlFor(segments, isIndex ? std::string_view() : stem);
+            addRoute(app, diagnostics, url, {RouteKind::Markdown, file.path, isIndex && url != "/"});
         } else if (const char* type = contentTypeForExtension(extension)) {
             addRoute(app, diagnostics, urlFor(segments, name), {RouteKind::Static, file.path});
             app.statics.add(file.path, {type, file.size, file.modifiedNs});

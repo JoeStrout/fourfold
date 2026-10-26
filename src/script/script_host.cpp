@@ -41,7 +41,7 @@ std::string describeMs(std::chrono::milliseconds ms) {
 // --- On the script thread ---
 
 void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request,
-                                ScriptHost::Done done) {
+                                RenderOptions render, ScriptHost::Done done) {
     const ScriptBundle* bundle = app ? app->scripts.get() : nullptr;
     const PageProgram* page = bundle ? bundle->page(handler.source) : nullptr;
     const HandlerStub* stub = bundle ? bundle->stub(handler) : nullptr;
@@ -62,6 +62,7 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
     run->stub = stub;
     run->handler = std::move(handler);
     run->request = std::move(request);
+    run->render = std::move(render);
     run->done = std::move(done);
     prepareInterpreter(*run, page->functions);
     schedule(std::move(run));
@@ -237,20 +238,23 @@ CompiledScripts ScriptHost::compileScripts(const std::vector<CodeFile>& pages, c
     }
 }
 
-void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done) {
+void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done,
+                     RenderOptions render) {
     // std::function needs a copyable callable, so the arguments ride in a
     // shared struct.
     struct Args {
         std::shared_ptr<const CompiledApp> app;
         HandlerRef handler;
         RequestFacts request;
+        RenderOptions render;
         Done done;
     };
-    auto args = std::make_shared<Args>(Args{std::move(app), std::move(handler), std::move(request), std::move(done)});
+    auto args = std::make_shared<Args>(
+        Args{std::move(app), std::move(handler), std::move(request), std::move(render), std::move(done)});
     Impl* impl = impl_.get();
     impl->loop->post([impl, args] {
         impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->request),
-                       std::move(args->done));
+                       std::move(args->render), std::move(args->done));
     });
 }
 

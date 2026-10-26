@@ -109,6 +109,8 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** a large table-driven test suite for the escaping rules (each context with hostile inputs, including the known `html/template` bypass cases); a fuzz test of the tokenizer and Markdown renderer for crashes and super-linear time; the guestbook from §7 rendering and swapping fragments with HTMX (with fixed sample entries, since storing them needs `data`, which comes in M5), and a real-world-sized template set from an existing site ported to check the rules aren't too strict.
 
+**Decisions made here** (details and numbers in [m4-results.md](m4-results.md)): R6 is mostly retired. The contextual parser follows the HTML spec's tokenizer and refuses wherever the spec gets subtle (foreign content, script escape states, CSS), which kept it small and linear. In `<script>`, it follows both readings of an ambiguous `/` rather than guessing. The rules weren't too strict for a real site: miniscript.org's 68 HTML files compiled after the expected conversions (pieces of pages moved to `frags/`, inline event handlers replaced by listeners), though with few fields to place, so that part of R6 is only lightly tested. Markdown is md4c's parser (raw HTML off) with a renderer of our own; footnotes are deferred, since md4c has none. Each response gets a fresh CSP nonce, on every `<script>` the engine renders. htmx is served by the engine at `/__fourfold/htmx.js` with eval and script tags off, and pages load it with an explicit tag. A fragment response containing `<script>` is an error. Pages filled by `render` are rendered on the script thread, at no measurable cost. Fuzzing found and fixed one crash in the Markdown renderer.
+
 ---
 
 ## M5 — State: data and sessions

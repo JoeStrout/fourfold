@@ -1,0 +1,14 @@
+routes:
+  /  markdown  pages/index.md  title: Markdown Site
+  /about  markdown  pages/about.md  title: About
+  /docs/  markdown  pages/docs/index.md  title: Docs
+  /docs/setup  markdown  pages/docs/setup.md  title: Setup
+  /logo.svg  static  pages/logo.svg  image/svg+xml
+fragments:
+  nav  frags/nav.html
+  note  frags/note.md
+markdown layout: frags/layout/markdown.html
+not found page: (none)
+error page: (none)
+diagnostics:
+  code/pages/index.md: warning: links to nothing.md: there's no such page

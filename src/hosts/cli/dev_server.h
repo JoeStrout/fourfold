@@ -7,6 +7,7 @@
 #include <iosfwd>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
 
 #include "devtools/dev_tools.h"
@@ -53,6 +54,7 @@ private:
     // Observer: the terminal's view of compiles and script errors.
     void compileFinished(const CompileReport& report) override;
     void scriptError(const ScriptError& e) override;
+    void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
 
     std::ostream& out_;
     std::ostream& err_;
@@ -60,6 +62,10 @@ private:
     std::string root_;
     bool started_ = false;   // the first compile has been reported
     bool firstCompileOk_ = false;
+    // Render warnings already printed, for the generation they came from:
+    // each is printed once, not on every request.
+    uint64_t warnedGeneration_ = 0;
+    std::set<std::string> warned_;   // guarded by outMutex_
 
     // In order of construction. Destroyed in a different order (see the
     // destructor): whatever posts to or calls into something must stop first.

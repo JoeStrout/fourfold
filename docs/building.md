@@ -22,6 +22,8 @@ To run a sample app:
 ```sh
 ./build/dev/bin/fourfold dev examples/static-site     # then open http://localhost:8090/
 ./build/dev/bin/fourfold dev examples/scripts         # pages with MiniScript (M2)
+./build/dev/bin/fourfold dev examples/guestbook       # templates, fragments, Markdown and HTMX (M4)
+./build/dev/bin/fourfold dev examples/markdown-site   # a site made only of .md files (M4)
 ```
 
 `fourfold dev` watches `code/`: save a file, and open pages reload (or, for a stylesheet, swap it in place). Compile errors show as an overlay on open pages, while the last version that compiled keeps serving. Touching `code/.deploy` recompiles at once.
@@ -32,6 +34,12 @@ Benchmarks are built with the tests but not run by ctest; use a release build fo
 cmake --preset release && cmake --build --preset release
 ./build/release/bin/bench_script     # the cost of a fresh VM per request (see docs/design/m2-results.md)
 ./build/release/bin/bench_compile    # what recompiling costs requests meanwhile (see docs/design/m3-results.md)
+```
+
+The fuzz tests (`tests/fuzz/`) run with the others, from a fixed seed: mutated templates and Markdown, checked for crashes and for values escaping their context, and adversarial inputs checked for linear time. Set `FOURFOLD_FUZZ_TIMES=1` to print the timings. Run them under the `asan` preset to catch memory errors. Where the compiler supports libFuzzer (Homebrew's LLVM does; Apple's clang doesn't), `fuzz_template` and `fuzz_markdown` are built too, for open-ended runs:
+
+```sh
+./build/dev/bin/fuzz_markdown -max_total_time=300
 ```
 
 Presets (in `CMakePresets.json`):
@@ -87,6 +95,8 @@ Public headers are included by component name: `#include "base/result.h"`. Priva
 **Executables.** `fourfold_executable(name DIR hosts/… DEPS …)` builds `main.cpp` into the program, and everything else in the folder into a library the tests link. So keep `main.cpp` to argument passing.
 
 **Tests.** A `.cpp` file in `tests/<dir>/` is added to the test executable for `src/<dir>/` automatically (re-run the build; globs are re-checked). Tests use [doctest](https://github.com/doctest/doctest) (`#include "doctest.h"`; `TEST_CASE`, `SUBCASE`, `CHECK`, `REQUIRE`, …). A component's tests use only its public headers, plus fakes of the interfaces below it. Fixture app folders go in `tests/apps/`; tests find them via the `FOURFOLD_TEST_APPS_DIR` macro.
+
+**Embedded files.** Files the engine serves itself (htmx, the default Markdown stylesheet) are built into the program with `fourfold_embed(component symbol file)`, which turns the file into a byte array at build time (`cmake/Embed.cmake`). So an app can't replace or break them, and there's nothing to install beside the binary.
 
 **Errors.** Expected failures are returned as `Result<T>` or `Status` (`base/result.h`), not thrown.
 

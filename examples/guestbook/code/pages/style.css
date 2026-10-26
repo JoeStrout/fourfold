@@ -1,0 +1,10 @@
+body { font-family: system-ui, sans-serif; max-width: 40em; margin: 2em auto; padding: 0 1em; line-height: 1.5; }
+header nav { margin-bottom: 1.5em; color: #888; }
+#entries { padding-left: 1.2em; }
+#entries li { margin: 0.6em 0; }
+#entries .markdown { display: inline; }
+#entries .markdown > p { display: inline; margin: 0; }
+form { display: grid; gap: 0.5em; margin: 1.5em 0; }
+input, textarea, button { font: inherit; padding: 0.3em 0.5em; }
+textarea { min-height: 4em; }
+.note { color: #777; font-size: 0.9em; }

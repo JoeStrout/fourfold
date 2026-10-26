@@ -78,7 +78,8 @@ struct ScriptError {
 // plain data before it leaves the script thread.
 struct HandlerOutcome {
     enum class Kind {
-        Render,      // render returned a map: fill the page's template
+        Render,      // render returned a map: `body` is its page, filled in
+        Fragment,    // frag(...), markdown(...) or unsafeHTML(...): `body` is the HTML
         Text,        // a string: text/plain
         Redirect,    // redirect(url): 303
         Json,        // json(value)
@@ -88,9 +89,13 @@ struct HandlerOutcome {
     };
 
     Kind kind = Kind::NoContent;
-    TemplateFields fields;     // Render
-    std::string body;          // Text, Json, Status
+    std::string body;          // Render, Fragment, Text, Json, Status
     std::string contentType;   // Status, when it has a body
+    // Fragment, or Status with an HTML body: it contains a <script>, which
+    // can't be sent on its own (it wouldn't have the page's CSP nonce).
+    bool hasScript = false;
+    // Missing and unused fields, from rendering the page or any fragment.
+    std::vector<RenderWarning> warnings;
     std::string location;      // Redirect
     int status = 0;            // Status
     ScriptError error;         // Error
@@ -142,8 +147,11 @@ public:
 
     // Runs `handler` from `app` for one request, in a fresh VM. `done` is
     // called exactly once, on the script thread, unless the host is destroyed
-    // first. `app` stays pinned (with its bytecode) until then.
-    void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done);
+    // first. `app` stays pinned (with its bytecode) until then. Templates the
+    // run renders (the page, and every frag()) use `render`: the response's
+    // CSP nonce, and the Markdown stylesheet.
+    void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done,
+             RenderOptions render = {});
 
     // For tests and measurements; each call runs on the script thread and waits.
     struct Stats {

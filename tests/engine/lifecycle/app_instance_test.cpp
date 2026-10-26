@@ -75,7 +75,7 @@ struct Fixture {
     std::unique_ptr<AppInstance> instance;
 
     Fixture() {
-        dir.write("code/pages/index.html", "<p>{{v}}</p>");
+        dir.write("code/pages/index.html", "<!DOCTYPE html><p>{{v}}</p>");
         dir.write("code/pages/index.ms", "render = function(req)\n  return {\"v\": 1}\nend function\n");
         dir.write("code/pages/style.css", "body { color: red }");
         auto host = ScriptHost::create();
@@ -123,7 +123,7 @@ TEST_CASE("AppInstance: start compiles, and serves the result") {
     CHECK_FALSE(r.cssOnly);
     REQUIRE(f.instance->current());
     CHECK_EQ(f.engine->app(), f.instance->current());
-    CHECK_EQ(f.get("/").body, "<p>1</p>");
+    CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>1</p>");
 }
 
 TEST_CASE("AppInstance: a change is compiled and swapped in") {
@@ -137,10 +137,10 @@ TEST_CASE("AppInstance: a change is compiled and swapped in") {
     CHECK_EQ(r->generation, 2u);
     CHECK_EQ(paths(r->changed), std::vector<std::string>{"pages/index.ms"});
     CHECK_FALSE(r->cssOnly);
-    CHECK_EQ(f.get("/").body, "<p>22</p>");
+    CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>22</p>");
 
     SUBCASE("added and removed files count as changes") {
-        f.edit("pages/new.html", "<p>new</p>");
+        f.edit("pages/new.html", "<!DOCTYPE html><p>new</p>");
         REQUIRE(std::remove(f.dir.at("code/pages/style.css").c_str()) == 0);
         r = f.recorder.waitFor(3);
         REQUIRE(r);
@@ -158,7 +158,7 @@ TEST_CASE("AppInstance: waits for changes to stop before compiling") {
     f.instance->start();
     auto until = Clock::now() + milliseconds(400);
     for (int i = 0; Clock::now() < until; i++) {
-        f.edit("pages/index.html", "<p>{{v}} " + std::string(i, 'x') + "</p>");
+        f.edit("pages/index.html", "<!DOCTYPE html><p>{{v}} " + std::string(i, 'x') + "</p>");
         std::this_thread::sleep_for(milliseconds(30));
     }
     CHECK_EQ(f.recorder.count(), 1u);   // nothing while files kept changing
@@ -176,26 +176,26 @@ TEST_CASE("AppInstance: code/.deploy compiles at once") {
         options.trigger = LifecycleOptions::Trigger::DeployOnly;
         f.startInstance(options);
         f.instance->start();
-        f.edit("pages/index.html", "<p>v={{v}}</p>");
+        f.edit("pages/index.html", "<!DOCTYPE html><p>v={{v}}</p>");
         std::this_thread::sleep_for(milliseconds(300));
         CHECK_EQ(f.recorder.count(), 1u);
-        CHECK_EQ(f.get("/").body, "<p>1</p>");
+        CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>1</p>");
         f.edit(".deploy", "");
         auto r = f.recorder.waitFor(2);
         REQUIRE(r);
         CHECK(r->ok);
-        CHECK_EQ(f.get("/").body, "<p>v=1</p>");
+        CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>v=1</p>");
     }
     SUBCASE("in Quiet mode, without waiting for quiet") {
         LifecycleOptions options = fastOptions();
         options.quietPeriod = milliseconds(5000);
         f.startInstance(options);
         f.instance->start();
-        f.edit("pages/index.html", "<p>v={{v}}</p>");
+        f.edit("pages/index.html", "<!DOCTYPE html><p>v={{v}}</p>");
         f.edit(".deploy", "");
         auto r = f.recorder.waitFor(2, milliseconds(1000));
         REQUIRE(r);
-        CHECK_EQ(f.get("/").body, "<p>v=1</p>");
+        CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>v=1</p>");
     }
 }
 
@@ -211,7 +211,7 @@ TEST_CASE("AppInstance: a failed compile keeps the old version") {
     REQUIRE_FALSE(r->diagnostics.empty());
     CHECK_EQ(r->diagnostics[0].file, "code/pages/index.ms");
     CHECK(r->diagnostics[0].line > 0);
-    CHECK_EQ(f.get("/").body, "<p>1</p>");
+    CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>1</p>");
     CHECK_EQ(f.instance->current()->generation, 1u);
 
     // No retries while nothing changes.
@@ -224,7 +224,7 @@ TEST_CASE("AppInstance: a failed compile keeps the old version") {
     CHECK(r->ok);
     CHECK_EQ(r->generation, 2u);
     CHECK_FALSE(r->cssOnly);   // the page showed errors; it needs a reload
-    CHECK_EQ(f.get("/").body, "<p>3</p>");
+    CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>3</p>");
 }
 
 TEST_CASE("AppInstance: a first compile that fails serves 503 until fixed") {
@@ -241,7 +241,7 @@ TEST_CASE("AppInstance: a first compile that fails serves 503 until fixed") {
     REQUIRE(later);
     CHECK(later->ok);
     CHECK_EQ(later->generation, 1u);
-    CHECK_EQ(f.get("/").body, "<p>4</p>");
+    CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>4</p>");
 }
 
 TEST_CASE("AppInstance: stylesheet-only changes are marked cssOnly") {
@@ -257,7 +257,7 @@ TEST_CASE("AppInstance: stylesheet-only changes are marked cssOnly") {
     REQUIRE(r);
     CHECK_FALSE(r->cssOnly);
     f.edit("pages/style.css", "body { color: green }");
-    f.edit("pages/index.html", "<p>{{v}}!</p>");
+    f.edit("pages/index.html", "<!DOCTYPE html><p>{{v}}!</p>");
     r = f.recorder.waitFor(4);
     REQUIRE(r);
     CHECK_FALSE(r->cssOnly);
@@ -288,7 +288,7 @@ TEST_CASE("AppInstance: swapping repeatedly under load leaks no generations") {
                 std::promise<void> done;
                 f.engine->handle(r, [&](HttpResponse response) {
                     bool ok = response.status == 200 &&
-                              (response.body == "slow" || response.body.compare(0, 3, "<p>") == 0);
+                              (response.body == "slow" || response.body.compare(0, 18, "<!DOCTYPE html><p>") == 0);
                     if (!ok) bad++;
                     answered++;
                     done.set_value();
@@ -315,7 +315,7 @@ TEST_CASE("AppInstance: swapping repeatedly under load leaks no generations") {
     MESSAGE(answered.load(), " requests during 200 swaps; at most ", maxBundles, " generations live at once");
     CHECK(answered.load() > 200);
     CHECK(maxBundles <= 6);   // the current one, plus a few still finishing requests
-    CHECK_EQ(f.get("/").body, "<p>200</p>");
+    CHECK_EQ(f.get("/").body, "<!DOCTYPE html><p>200</p>");
 
     ScriptHost::Stats after = f.scripts->stats(true);
     CHECK_EQ(after.activeRuns, 0u);

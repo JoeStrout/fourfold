@@ -92,8 +92,9 @@ TEST_CASE("DevTools: decorates pages with the client script and their generation
     Fixture f;
     HttpResponse r;
     r.body = "<html><body>hi</body></html>";
-    f.dev->decorate(r, 12);
-    CHECK_EQ(r.body, "<html><body>hi<script src=\"/__dev/client.js\" data-generation=\"12\" defer></script></body></html>");
+    f.dev->decorate(r, 12, "abc");
+    CHECK_EQ(r.body, "<html><body>hi<script src=\"/__dev/client.js\" nonce=\"abc\" data-generation=\"12\" defer>"
+                     "</script></body></html>");
 }
 
 TEST_CASE("DevTools: serves the client script, and nothing else under /__dev/") {
@@ -113,7 +114,7 @@ TEST_CASE("DevTools: the reload stream") {
     CHECK_EQ(*r->headers.get("Content-Type"), "text/event-stream");
 
     auto writer = f.connect();
-    CHECK_EQ(writer->written, "event: hello\ndata: {\"diagnostics\":[],\"generation\":0}\n\n");
+    CHECK_EQ(writer->written, "event: hello\ndata: {\"diagnostics\":[],\"generation\":0,\"warnings\":[]}\n\n");
     CHECK_EQ(f.dev->streamCount(), 1u);
     writer->written.clear();
 
@@ -126,7 +127,7 @@ TEST_CASE("DevTools: the reload stream") {
         f.pump();
         CHECK_EQ(writer->written, "event: reload\ndata: {\"generation\":2}\n\n");
         auto later = f.connect();
-        CHECK_EQ(later->written, "event: hello\ndata: {\"diagnostics\":[],\"generation\":2}\n\n");
+        CHECK_EQ(later->written, "event: hello\ndata: {\"diagnostics\":[],\"generation\":2,\"warnings\":[]}\n\n");
     }
     SUBCASE("only stylesheets: css, with their URLs") {
         CompileReport report;
@@ -156,7 +157,32 @@ TEST_CASE("DevTools: the reload stream") {
                  "{\"file\":\"code\",\"line\":0,\"message\":\"no line\"}],\"generation\":1}\n\n");
         auto later = f.connect();
         CHECK(contains(later->written, "event: hello\ndata: {\"diagnostics\":[{\"code\""));
-        CHECK(contains(later->written, "\"generation\":1}"));
+        CHECK(contains(later->written, "\"generation\":1,\"warnings\":[]}"));
+    }
+    SUBCASE("render warnings: sent once each, and kept for new streams of that generation") {
+        CompileReport report;
+        report.ok = true;
+        report.generation = 4;
+        f.dev->compileFinished(report);
+        f.pump();
+        writer->written.clear();
+        std::vector<RenderWarning> warnings = {{"pages/a.html", 2, "{{x}} wasn't given a value, so it's empty"}};
+        f.dev->renderWarnings(4, warnings);
+        f.pump();
+        CHECK_EQ(writer->written,
+                 "event: warnings\ndata: {\"generation\":4,\"warnings\":[{\"file\":\"code/pages/a.html\","
+                 "\"line\":2,\"message\":\"{{x}} wasn't given a value, so it's empty\"}]}\n\n");
+        writer->written.clear();
+        f.dev->renderWarnings(4, warnings);   // seen already
+        f.dev->renderWarnings(3, {{"pages/b.html", 1, "old"}});   // from an older version
+        f.pump();
+        CHECK_EQ(writer->written, "");
+        auto later = f.connect();
+        CHECK(contains(later->written, "\"warnings\":[{\"file\":\"code/pages/a.html\""));
+        // A new generation starts afresh.
+        report.generation = 5;
+        f.dev->compileFinished(report);
+        CHECK(contains(f.connect()->written, "\"warnings\":[]"));
     }
     SUBCASE("closed streams are dropped") {
         writer->open = false;

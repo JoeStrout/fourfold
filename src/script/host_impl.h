@@ -38,6 +38,8 @@ struct Run {
     const HandlerStub* stub = nullptr;
     HandlerRef handler;
     RequestFacts request;
+    RenderOptions render;                     // for the page and every frag()
+    std::vector<RenderWarning> warnings;      // from frag(), so far
     ScriptHost::Done done;
     EventLoop::TimerId deadline = 0;
 
@@ -67,7 +69,7 @@ struct ScriptHost::Impl {
 
     // Starting and finishing request runs (scheduler.cpp).
     void startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request,
-                  ScriptHost::Done done);
+                  RenderOptions render, ScriptHost::Done done);
     // Schedules a prepared run (a request or a discovery run), with its
     // wall-clock deadline.
     void schedule(std::unique_ptr<Run> run);
@@ -108,5 +110,8 @@ HandlerOutcome outcomeFromResult(Run& run);
 
 // The frozen `req` map (bridge.cpp).
 MiniScript::Value makeRequestValue(const RequestFacts& facts);
+
+// Adds `more` to a run's warnings, leaving out repeats.
+void addWarnings(Run& run, const std::vector<RenderWarning>& more);
 
 }  // namespace fourfold

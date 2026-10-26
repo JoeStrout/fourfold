@@ -58,4 +58,10 @@ private:
 // back exactly ("3", "0.1", "1e+300").
 std::string toJson(const Datum& value);
 
+// The same, also escaping '/', '`' and '\'' (as \u00XX), for a value written
+// into a <script> by a template: even if the template parser misjudged where
+// it is, the value can't end a string, a template literal or a regular
+// expression.
+std::string toJsonForScript(const Datum& value);
+
 }  // namespace fourfold

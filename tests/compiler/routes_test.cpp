@@ -43,6 +43,10 @@ bool hasDiagnostic(const CompileOutput& out, const std::string& text) {
     return false;
 }
 
+bool contains(const std::string& s, const std::string& part) {
+    return s.find(part) != std::string::npos;
+}
+
 std::string readFile(const std::string& path) {
     std::ifstream in(path, std::ios::binary);
     std::stringstream ss;
@@ -54,11 +58,11 @@ std::string readFile(const std::string& path) {
 
 TEST_CASE("compile: pages map to clean URLs") {
     TempDir dir;
-    dir.write("code/pages/index.html", "home");
-    dir.write("code/pages/about.html", "about");
-    dir.write("code/pages/docs/index.html", "docs");
-    dir.write("code/pages/docs/intro.html", "intro");
-    dir.write("code/pages/Caps.HTML", "caps");
+    dir.write("code/pages/index.html", "<!DOCTYPE html>home");
+    dir.write("code/pages/about.html", "<!DOCTYPE html>about");
+    dir.write("code/pages/docs/index.html", "<!DOCTYPE html>docs");
+    dir.write("code/pages/docs/intro.html", "<!DOCTYPE html>intro");
+    dir.write("code/pages/Caps.HTML", "<!DOCTYPE html>caps");
     CompileOutput out = compileApp(dir.path());
     REQUIRE(out.ok());
     CHECK(out.diagnostics.empty());
@@ -103,8 +107,8 @@ TEST_CASE("compile: static files keep their names and get a content type") {
 
 TEST_CASE("compile: 404.html is the not-found page, not a route") {
     TempDir dir;
-    dir.write("code/pages/404.html", "missing");
-    dir.write("code/pages/docs/404.html", "a page that happens to be called 404");
+    dir.write("code/pages/404.html", "<!DOCTYPE html>missing");
+    dir.write("code/pages/docs/404.html", "<!DOCTYPE html>a page that happens to be called 404");
     CompileOutput out = compileApp(dir.path());
     REQUIRE(out.ok());
     REQUIRE(out.app->notFoundPage.has_value());
@@ -115,8 +119,8 @@ TEST_CASE("compile: 404.html is the not-found page, not a route") {
 
 TEST_CASE("compile: two files for one URL is an error") {
     TempDir dir;
-    dir.write("code/pages/docs.html", "one");
-    dir.write("code/pages/docs/index.html", "two");
+    dir.write("code/pages/docs.html", "<!DOCTYPE html>one");
+    dir.write("code/pages/docs/index.html", "<!DOCTYPE html>two");
     CompileOutput out = compileApp(dir.path());
     CHECK_FALSE(out.ok());
     CHECK(hasDiagnostic(out, "error: URL /docs is also served by code/pages/doc"));
@@ -135,18 +139,16 @@ TEST_CASE("compile: reserved URL prefixes are errors") {
 
 TEST_CASE("compile: warnings don't stop the build") {
     TempDir dir;
-    dir.write("code/pages/index.html", "home");
+    dir.write("code/pages/index.html", "<!DOCTYPE html>home");
     dir.write("code/pages/notes.xyz", "?");
     dir.write("code/pages/README", "?");
     dir.write("code/pages/index.ms", "x = 1");
-    dir.write("code/pages/about.md", "# About");
     dir.write("code/real.css", "x");
     dir.symlink("../real.css", "code/pages/linked.css");
     CompileOutput out = compileApp(dir.path());
     REQUIRE(out.ok());
     CHECK(hasDiagnostic(out, "code/pages/notes.xyz: warning: unknown file type .xyz; not served"));
     CHECK(hasDiagnostic(out, "code/pages/README: warning: file has no extension"));
-    CHECK(hasDiagnostic(out, "code/pages/about.md: warning: Markdown pages aren't supported yet"));
     CHECK(hasDiagnostic(out, "code/pages/linked.css: warning: symbolic link (not followed); ignored"));
     CHECK_EQ(out.app->diagnostics.size(), out.diagnostics.size());
     CHECK_EQ(out.app->routes.size(), 1u);
@@ -171,9 +173,9 @@ TEST_CASE("contentTypeForExtension") {
 
 TEST_CASE("compile: a page's .ms file supplies its render") {
     TempDir dir;
-    dir.write("code/pages/hello.html", "<p>{{name}}</p>");
+    dir.write("code/pages/hello.html", "<!DOCTYPE html><p>{{name}}</p>");
     dir.write("code/pages/hello.ms", "render = function(req)\n  return {\"name\": \"x\"}\nend function\n");
-    dir.write("code/pages/plain.html", "<p>{{unfilled}}</p>");
+    dir.write("code/pages/plain.html", "<!DOCTYPE html><p>{{unfilled}}</p>");
     CompileOutput out = compileApp(dir.path());
     REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
     const RouteEntry* hello = route(out, "/hello");
@@ -191,7 +193,7 @@ TEST_CASE("compile: a page's .ms file supplies its render") {
 
 TEST_CASE("compile: get and post handlers get URLs below their page") {
     TempDir dir;
-    dir.write("code/pages/guestbook.html", "<p>gb</p>");
+    dir.write("code/pages/guestbook.html", "<!DOCTYPE html><p>gb</p>");
     dir.write("code/pages/guestbook.ms",
               "get.entries = function(req)\n  return \"\"\nend function\n"
               "post.entries = function(req)\n  return \"\"\nend function\n"
@@ -232,7 +234,7 @@ TEST_CASE("compile: a .ms file with render and no .html is a page of its own") {
 TEST_CASE("compile: a handler and a page at the same URL collide") {
     TempDir dir;
     dir.write("code/pages/guestbook.ms", "get.more = function(req)\n  return \"\"\nend function\n");
-    dir.write("code/pages/guestbook/more.html", "<p>more</p>");
+    dir.write("code/pages/guestbook/more.html", "<!DOCTYPE html><p>more</p>");
     CompileOutput out = compileApp(dir.path());
     CHECK_FALSE(out.ok());
     CHECK(hasDiagnostic(out, "URL /guestbook/more is also served by"));
@@ -240,17 +242,17 @@ TEST_CASE("compile: a handler and a page at the same URL collide") {
 
 TEST_CASE("compile: template and script errors stop the build, with their lines") {
     TempDir dir;
-    dir.write("code/pages/a.html", "<p>\n<a href=\"{{url}}\">x</a></p>");
+    dir.write("code/pages/a.html", "<!DOCTYPE html><p>\n<a href={{url}}>x</a></p>");
     dir.write("code/pages/b.ms", "render = function(req)\n  return (1 +\nend function\n");
     CompileOutput out = compileApp(dir.path());
     CHECK_FALSE(out.ok());
-    CHECK(hasDiagnostic(out, "code/pages/a.html:2: error: a field isn't allowed inside a tag"));
+    CHECK(hasDiagnostic(out, "code/pages/a.html:2: error: a field isn't allowed in an unquoted attribute value"));
     CHECK(hasDiagnostic(out, "code/pages/b.ms:"));
 }
 
 TEST_CASE("compile: .ms files outside pages/ and lib/ are ignored, with a warning") {
     TempDir dir;
-    dir.write("code/pages/index.html", "home");
+    dir.write("code/pages/index.html", "<!DOCTYPE html>home");
     dir.write("code/stray.ms", "x = 1");
     dir.write("code/lib/sub/deep.ms", "x = 1");
     CompileOutput out = compileApp(dir.path());
@@ -273,8 +275,8 @@ TEST_CASE("compile: MiniScript files need a script compiler") {
 
 TEST_CASE("compile: the 404 and 500 pages aren't routes") {
     TempDir dir;
-    dir.write("code/pages/404.html", "missing");
-    dir.write("code/pages/500.html", "broken");
+    dir.write("code/pages/404.html", "<!DOCTYPE html>missing");
+    dir.write("code/pages/500.html", "<!DOCTYPE html>broken");
     dir.write("code/pages/404.ms", "render = function(req)\n  return {}\nend function\n");
     CompileOutput out = compileApp(dir.path());
     REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
@@ -309,4 +311,154 @@ TEST_CASE("compile: golden route table for tests/apps/static-site") {
 
 TEST_CASE("compile: golden route table for tests/apps/scripts") {
     checkGolden("scripts");
+}
+
+TEST_CASE("compile: golden route table for tests/apps/markdown-site") {
+    checkGolden("markdown-site");
+}
+
+// --- Fragments, includes, and Markdown (M4) ---
+
+TEST_CASE("compile: fragments and includes") {
+    TempDir dir;
+    dir.write("code/frags/header.html", "<header>{{title}} {{> parts/nav}}</header>");
+    dir.write("code/frags/parts/nav.html", "<nav>{{user.name}}</nav>");
+    dir.write("code/frags/intro.md", "# Hi\n\nThere.");
+    dir.write("code/pages/index.html", "<!DOCTYPE html><body>{{> header}}{{> intro}}{{main}}</body>");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    const CompiledTemplate* page = out.app->templates.find(RelPath::parse("pages/index.html").value());
+    REQUIRE(page);
+    CHECK_EQ(page->fieldNames(), std::vector<std::string>{"main", "title", "user"});
+    CHECK(page->hasMarkdown());
+    REQUIRE(out.app->templates.fragment("parts/nav"));
+    REQUIRE(out.app->templates.fragment("intro"));
+    CHECK(out.app->templates.fragment("intro")->isMarkdown());
+    CHECK_FALSE(out.app->templates.fragment("nope"));
+}
+
+TEST_CASE("compile: fragment and include errors") {
+    struct Case {
+        std::vector<std::pair<const char*, const char*>> files;
+        const char* diagnostic;
+    };
+    const Case cases[] = {
+        {{{"code/frags/a.html", "<html>"}}, "code/frags/a.html:1: error: a fragment can't have <html>"},
+        {{{"code/pages/p.html", "<!DOCTYPE html>\n{{> gone}}"}},
+         "code/pages/p.html:2: error: there's no code/frags/gone.html"},
+        {{{"code/frags/a.html", "{{> b}}"}, {"code/frags/b.html", "{{> a}}"}}, "error: include cycle: a → b → a"},
+        {{{"code/frags/x.html", "<b>"}, {"code/frags/x.md", "x"}}, "the fragment \"x\" is also code/frags/x.html"},
+        {{{"code/frags/notes.txt", "x"}}, "code/frags/notes.txt: warning: only .html and .md files are fragments"},
+        {{{"code/pages/p.html", "<p>no doctype</p>"}}, "code/pages/p.html:1: error: a page must be a complete document"},
+        {{{"code/frags/layout/markdown.html", "<!DOCTYPE html><p>{{title}}</p>"}},
+         "code/frags/layout/markdown.html: error: the Markdown layout needs a {{content}} field"},
+    };
+    for (const Case& c : cases) {
+        TempDir dir;
+        dir.write("code/pages/index.html", "<!DOCTYPE html>x");
+        for (const auto& [path, text] : c.files) dir.write(path, text);
+        CompileOutput out = compileApp(dir.path());
+        INFO(c.diagnostic);
+        CHECK_MESSAGE(hasDiagnostic(out, c.diagnostic), allDiagnostics(out));
+    }
+}
+
+TEST_CASE("compile: Markdown pages") {
+    TempDir dir;
+    dir.write("code/pages/index.md", "# Home\n\n[Guide](docs/guide.md#start) [gone](gone.md) ![i](i.png) ![j](j.png)");
+    dir.write("code/pages/docs/guide.md", "# The Guide\n\n[up](../index.md) [self](#x) [ext](https://e.com/a.md)");
+    dir.write("code/pages/docs/index.md", "x");
+    dir.write("code/pages/i.png", "png");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    const RouteEntry* home = route(out, "/");
+    REQUIRE(home);
+    CHECK_EQ(home->kind, RouteKind::Markdown);
+    const RouteEntry* docs = route(out, "/docs");
+    REQUIRE(docs);
+    CHECK(docs->trailingSlash);
+
+    const MarkdownPage& index = out.app->markdownPages.at(RelPath::parse("pages/index.md").value());
+    CHECK_EQ(index.title, "Home");
+    CHECK(contains(index.content.str(), "<a href=\"/docs/guide#start\">Guide</a>"));
+    CHECK(contains(index.content.str(), "<a href=\"gone.md\">gone</a>"));   // left as written
+    const MarkdownPage& guide = out.app->markdownPages.at(RelPath::parse("pages/docs/guide.md").value());
+    CHECK(contains(guide.content.str(), "<a href=\"/\">up</a>"));
+    CHECK(contains(guide.content.str(), "<a href=\"#x\">self</a>"));
+    CHECK(contains(guide.content.str(), "<a href=\"https://e.com/a.md\">ext</a>"));
+    CHECK(hasDiagnostic(out, "code/pages/index.md: warning: links to gone.md: there's no such page"));
+    CHECK(hasDiagnostic(out, "code/pages/index.md: warning: shows j.png: there's no such page or file"));
+    CHECK_FALSE(hasDiagnostic(out, "i.png"));
+    CHECK_FALSE(out.app->hasMarkdownCss);
+}
+
+TEST_CASE("compile: Markdown page collisions, and markdown.css") {
+    TempDir dir;
+    dir.write("code/pages/about.md", "x");
+    dir.write("code/pages/about.html", "<!DOCTYPE html>x");
+    CompileOutput out = compileApp(dir.path());
+    CHECK_FALSE(out.ok());
+    CHECK(hasDiagnostic(out, "URL /about is also served by"));
+
+    TempDir css;
+    css.write("code/pages/index.md", "x");
+    css.write("code/pages/markdown.css", ".markdown {}");
+    css.write("code/pages/404.md", "x");
+    CompileOutput withCss = compileApp(css.path());
+    REQUIRE(withCss.ok());
+    CHECK(withCss.app->hasMarkdownCss);
+    CHECK(hasDiagnostic(withCss, "code/pages/404.md: warning: the 404 page must be 404.html"));
+}
+
+TEST_CASE("compile: local links in templates must lead somewhere") {
+    TempDir dir;
+    dir.write("code/pages/index.html",
+              "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"style.css\">"
+              "<script src=\"/__fourfold/htmx.js\"></script></head><body>\n"
+              "<a href=\"docs/\">ok</a> <a href=\"docs\">ok</a> <a href=\"about\">ok</a> <a href=\"#top\">ok</a>\n"
+              "<a href=\"https://example.com/x.html\">ok</a> <a href=\"mailto:a@b.c\">ok</a> <a href=\"?q=1\">ok</a>\n"
+              "<a href=\"about.html\">old</a>\n"
+              "<a href=\"docs/index.html#x\">old index</a>\n"
+              "<img src=\"img/gone.png\">\n"
+              "<a href=\"{{dynamic}}/x\">fields aren't checked</a> <div hx-get=\"/guest/more\"></div>\n"
+              "<a href=\"x.dat\">there, but not served</a>\n"
+              "<a href=\"../up\">above</a>\n"
+              "{{> nav}}\n"
+              "</body></html>");
+    dir.write("code/pages/about.html", "<!DOCTYPE html><a href=\"about.html?a=1\">1</a><a href=\"about.html?a=2\">2</a>");
+    dir.write("code/pages/docs/index.html", "<!DOCTYPE html><a href=\"../about\">ok</a><a href=\"intro\">gone</a>");
+    dir.write("code/pages/style.css", "");
+    dir.write("code/pages/x.dat", "");
+    dir.write("code/pages/guest.ms", "get.more = function(req)\n  return \"\"\nend function\n");
+    // A fragment's relative links resolve against the page that includes it;
+    // on its own, only links from the root are checked.
+    dir.write("code/frags/nav.html", "<nav><a href=\"about\">ok here</a> <a href=\"/nowhere\">gone</a></nav>");
+    dir.write("code/frags/loose.html", "<a href=\"relative-unknown\">not checked</a> <a href=\"/also-gone\">gone</a>");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    std::string all = allDiagnostics(out);
+    INFO(all);
+    CHECK(hasDiagnostic(out, "code/pages/index.html:4: warning: href=\"about.html\": it works, by redirecting, "
+                             "but pages are served without .html: write \"about\" for \"about.html\""));
+    CHECK(hasDiagnostic(out, "code/pages/index.html:5: warning: href=\"docs/index.html#x\": it works, by "
+                             "redirecting, but pages are served without .html: write \"docs/\" for \"docs/index.html\""));
+    CHECK(hasDiagnostic(out, "code/pages/index.html:6: warning: src=\"img/gone.png\": there's no such page or file"));
+    CHECK(hasDiagnostic(out, "code/pages/index.html:8: warning: href=\"x.dat\": the file is there, but .dat files "
+                             "aren't served"));
+    CHECK(hasDiagnostic(out, "code/pages/index.html:9: warning: href=\"../up\": it climbs above the site's root"));
+    CHECK(hasDiagnostic(out, "code/pages/about.html:1: warning: href=\"about.html?a=1\": it works, by "
+                             "redirecting, but pages are served without .html: write \"about\" for \"about.html\" (and 1 more "
+                             "like it in this file)"));
+    CHECK(hasDiagnostic(out, "code/pages/docs/index.html:1: warning: href=\"intro\": there's no such page or file"));
+    CHECK(hasDiagnostic(out, "code/frags/nav.html:1: warning: href=\"/nowhere\""));
+    CHECK(hasDiagnostic(out, "code/frags/loose.html:1: warning: href=\"/also-gone\""));
+    CHECK_FALSE(contains(all, "ok"));
+    CHECK_FALSE(contains(all, "relative-unknown"));
+    CHECK_FALSE(contains(all, "dynamic"));
+    CHECK_FALSE(contains(all, "htmx.js"));
+    CHECK_FALSE(contains(all, "/guest/more"));
+    // Each broken link once, though nav.html is checked on its own and in the page.
+    size_t count = 0;
+    for (size_t at = all.find("/nowhere"); at != std::string::npos; at = all.find("/nowhere", at + 1)) count++;
+    CHECK_EQ(count, 1);
 }

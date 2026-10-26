@@ -125,3 +125,21 @@ function(fourfold_add_test name test_dir under_test)
     add_test(NAME ${name} COMMAND ${target})
     set_tests_properties(${name} PROPERTIES LABELS unit)
 endfunction()
+
+# fourfold_embed(<component> <symbol> <file>)
+#
+# Builds the bytes of <file> into the component's library, as
+#   namespace fourfold { extern const unsigned char <symbol>[]; extern const size_t <symbol>Size; }
+# (with a NUL after the last byte, so text can be used as a C string). For
+# files the engine serves itself, like the htmx library.
+function(fourfold_embed component symbol file)
+    set(out ${CMAKE_CURRENT_BINARY_DIR}/embed/${symbol}.cpp)
+    add_custom_command(
+        OUTPUT ${out}
+        COMMAND ${CMAKE_COMMAND} -DIN=${file} -DOUT=${out} -DSYMBOL=${symbol}
+                -P ${CMAKE_SOURCE_DIR}/cmake/Embed.cmake
+        DEPENDS ${file} ${CMAKE_SOURCE_DIR}/cmake/Embed.cmake
+        COMMENT "Embedding ${file}"
+        VERBATIM)
+    target_sources(ff_${component} PRIVATE ${out})
+endfunction()

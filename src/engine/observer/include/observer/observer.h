@@ -40,6 +40,10 @@ public:
     virtual void compileFinished(const CompileReport&) {}
     // A script failed while handling a request.
     virtual void scriptError(const ScriptError&) {}
+    // Rendering a request's templates found fields with no value, or values
+    // with no field (overview §4, "Missing and extra fields"). `generation`
+    // is the app generation that rendered them.
+    virtual void renderWarnings(uint64_t /*generation*/, const std::vector<RenderWarning>&) {}
 };
 
 // Passes each event on to several observers, in order.
@@ -51,6 +55,7 @@ public:
     void compileStarted() override;
     void compileFinished(const CompileReport& report) override;
     void scriptError(const ScriptError& error) override;
+    void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
 
 private:
     std::vector<Observer*> observers_;   // fixed once events start

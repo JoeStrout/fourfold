@@ -33,7 +33,8 @@ std::string codeFileName(const RelPath& path);
 // The path's extension, lowercased (".html").
 std::string lowerExtension(const RelPath& path);
 
-// Parses every .html file in code/pages/ into app.templates.
+// Parses the templates in code/frags/ and code/pages/ into app.templates
+// (and the Markdown layout), resolving includes.
 void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp& app, Diagnostics& diagnostics);
 
 // Compiles the .ms files in code/pages/ and code/lib/ into app.scripts, and
@@ -45,5 +46,14 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
 // pages.
 void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app,
                 Diagnostics& diagnostics);
+
+// Renders the .md pages in code/pages/ into app.markdownPages, rewriting
+// links between them and warning about links to routes that don't exist.
+// After the routes pass, which it checks links against.
+void markdownPass(const CodeListing& listing, const CodeTree& code, CompiledApp& app, Diagnostics& diagnostics);
+
+// Warns about each local URL written in a template (href, src, hx-get, ...)
+// that no route serves. After the routes pass.
+void linksPass(const CodeListing& listing, const CompiledApp& app, Diagnostics& diagnostics);
 
 }  // namespace fourfold

@@ -1,7 +1,7 @@
 # Third-party libraries, vendored as source, one folder each, with the
 # upstream license file and a README naming the version.
 #
-# Planned (Arch §9): an HTTP/1.1 parser and event loop (M1), md4c (M4),
+# Planned (Arch §9): an HTTP/1.1 parser and event loop (M1), md4c and htmx (M4),
 # SQLite (M5), crypto (M5/M6), TLS and HTTP/2 (M11).
 
 # doctest: unit tests only. SYSTEM, so its header doesn't trigger warnings.
@@ -15,3 +15,11 @@ add_library(llhttp STATIC
     llhttp/src/llhttp.c)
 target_include_directories(llhttp SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/llhttp/include)
 set_target_properties(llhttp PROPERTIES C_STANDARD 99)
+
+# md4c: Markdown parser (C). Used by the markdown component. The entity table
+# is for decoding entities in link destinations before they're checked.
+add_library(md4c STATIC
+    md4c/src/md4c.c
+    md4c/src/entity.c)
+target_include_directories(md4c SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/md4c/src)
+set_target_properties(md4c PROPERTIES C_STANDARD 99)

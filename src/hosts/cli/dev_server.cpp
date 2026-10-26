@@ -128,6 +128,19 @@ void DevServer::scriptError(const ScriptError& e) {
     sayError(where + ": error: " + e.message);
 }
 
+void DevServer::renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) {
+    std::lock_guard<std::mutex> lock(outMutex_);
+    if (generation != warnedGeneration_) {
+        warnedGeneration_ = generation;
+        warned_.clear();
+    }
+    for (const RenderWarning& w : warnings) {
+        std::string line = "code/" + w.file + (w.line > 0 ? ":" + std::to_string(w.line) : "") +
+                           ": warning: " + w.message;
+        if (warned_.insert(line).second) err_ << line << std::endl;
+    }
+}
+
 void DevServer::say(const std::string& line) {
     std::lock_guard<std::mutex> lock(outMutex_);
     out_ << line << std::endl;

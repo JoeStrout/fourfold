@@ -27,7 +27,11 @@ CodeTree codeTree(const TempDir& dir) {
 void addTemplate(CompiledApp& app, const CodeTree& code, const char* path) {
     auto file = code.read(rel(path));
     REQUIRE(file.ok());
-    ParsedTemplate parsed = parseTemplate(file.value());
+    // Whole documents are pages; the rest are parsed as fragments, which is
+    // all these tests need (the compiler checks pages' shape).
+    const std::string& text = file.value().contents();
+    bool page = text.compare(0, 5, "<html") == 0 || text.compare(0, 9, "<!DOCTYPE") == 0;
+    ParsedTemplate parsed = parseTemplate(file.value(), page ? TemplateKind::Page : TemplateKind::Fragment);
     REQUIRE(parsed.ok());
     app.templates.add(rel(path), std::move(parsed.compiled));
 }
@@ -115,6 +119,28 @@ TEST_CASE("Engine: serves pages and static files") {
     CHECK_EQ(app.get("//docs/").status, 200);   // repeated slashes collapse
 }
 
+TEST_CASE("Engine: a page asked for by its file name redirects to its URL") {
+    App app;
+    struct Case {
+        const char* target;
+        const char* location;
+    };
+    for (const Case& c : {Case{"/about.html", "/about"}, Case{"/about.HTML?x=1", "/about?x=1"},
+                          Case{"/index.html", "/"}, Case{"/docs/index.html", "/docs/"},
+                          Case{"/evil.com/index.html", "/evil.com/"}}) {
+        CAPTURE(c.target);
+        HttpResponse r = app.get(c.target);
+        CHECK_EQ(r.status, 302);
+        CHECK_EQ(header(r, "Location"), c.location);
+    }
+    // Only for pages that exist, only for GET, and not for other routes.
+    CHECK_EQ(app.get("/nope.html").status, 404);
+    CHECK_EQ(app.get("/about.html/").status, 404);
+    CHECK_EQ(app.get("/about.html", "POST").status, 404);
+    CHECK_EQ(app.get("/style.css.html").status, 404);
+    CHECK_EQ(app.get("/docs/.html").status, 404);
+}
+
 TEST_CASE("Engine: each route has one canonical URL; the other form redirects") {
     App app;
     struct Case {
@@ -148,7 +174,7 @@ TEST_CASE("Engine: not found uses pages/404.html, with status 404") {
     CHECK_EQ(app.get("/404").status, 404);
     CHECK_EQ(app.get("/About").status, 404);       // case matters
     CHECK_EQ(app.get("/index").status, 404);
-    CHECK_EQ(app.get("/about.html").status, 404);
+    CHECK_EQ(app.get("/about.htm").status, 404);   // (/about.html redirects; see below)
     CHECK_EQ(app.get("/gone.css").status, 404);    // in the compiled app, but deleted since
 
     App bare(false);
@@ -201,7 +227,7 @@ TEST_CASE("Engine: every response gets the security headers") {
         CAPTURE(target);
         HttpResponse r = app.get(target);
         CHECK(header(r, "Content-Security-Policy").find("frame-ancestors 'none'") != std::string::npos);
-        CHECK(header(r, "Content-Security-Policy").find("script-src 'self';") != std::string::npos);
+        CHECK(header(r, "Content-Security-Policy").find("script-src 'self' 'nonce-") != std::string::npos);
         CHECK_EQ(header(r, "X-Frame-Options"), "DENY");
         CHECK_EQ(header(r, "X-Content-Type-Options"), "nosniff");
         CHECK_EQ(header(r, "Referrer-Policy"), "strict-origin-when-cross-origin");
@@ -226,7 +252,7 @@ struct FakeHooks : EngineHooks {
         if (admitted.path.path != "/__dev/ping") return std::nullopt;
         return HttpResponse::text(200, "pong");
     }
-    void decorate(HttpResponse& response, uint64_t generation) override {
+    void decorate(HttpResponse& response, uint64_t generation, const std::string&) override {
         std::lock_guard<std::mutex> lock(mutex);
         decorated.push_back(generation);
         response.body += "<!--dev-->";
@@ -433,7 +459,7 @@ TEST_CASE("Engine: render returning fields for a page with no template is an err
     ScriptApp app(true);
     HttpResponse r = app.get("/api");
     CHECK_EQ(r.status, 500);
-    CHECK(r.body.find("no .html template") != std::string::npos);
+    CHECK(r.body.find("there's no code/pages/api.html template") != std::string::npos);
 }
 
 TEST_CASE("Engine: setApp swaps the app for later requests") {
@@ -506,4 +532,220 @@ TEST_CASE("parseUrlEncoded") {
     CHECK_EQ(parseUrlEncoded("bad=%zz%4"), Pairs{{"bad", "%zz%4"}});
     CHECK_EQ(parseUrlEncoded("x=%FF%41"), Pairs{{"x", "\xEF\xBF\xBD" "A"}});   // invalid UTF-8 → U+FFFD
     CHECK_EQ(parseUrlEncoded("eq=a=b"), Pairs{{"eq", "a=b"}});
+}
+
+// --- M4: nonces, the engine's own files, fragments, HTMX, Markdown ---
+
+namespace {
+
+// The nonce in a response's CSP.
+std::string cspNonce(const HttpResponse& r) {
+    std::string csp = header(r, "Content-Security-Policy");
+    size_t at = csp.find("'nonce-");
+    if (at == std::string::npos) return "";
+    size_t end = csp.find('\'', at + 7);
+    return csp.substr(at + 7, end - at - 7);
+}
+
+// An app with fragments, a page with scripts, a Markdown page, and handlers
+// that return fragments and redirects.
+struct HtmlApp {
+    TempDir dir;
+    std::unique_ptr<ScriptHost> scripts;
+    std::unique_ptr<Engine> engine;
+    FakeHooks hooks;
+    std::shared_ptr<CompiledApp> app;
+
+    explicit HtmlApp(bool withLayout = false) {
+        dir.write("code/pages/book.html",
+                  "<!DOCTYPE html><html><head><script src=\"/__fourfold/htmx.js\"></script></head>"
+                  "<body><ul>{{entries}}</ul><script>start({{config}})</script></body></html>");
+        dir.write("code/pages/book.ms",
+                  "render = function(req)\n"
+                  "  return {\"entries\": frag(\"entry\", [{\"who\": \"<a>\"}, {\"who\": \"b\"}]), "
+                  "\"config\": {\"n\": 1}}\n"
+                  "end function\n"
+                  "post.sign = function(req)\n"
+                  "  if req.htmx then return frag(\"entry\", {\"who\": req.form.who})\n"
+                  "  return redirect(\"/book\")\n"
+                  "end function\n"
+                  "get.scripted = function(req)\n  return frag(\"scripted\")\nend function\n"
+                  "get.status = function(req)\n  return status(422, frag(\"entry\", {\"who\": \"x\"}))\nend function\n"
+                  "get.md = function(req)\n  return markdown(\"# Hi <b>\")\nend function\n");
+        dir.write("code/frags/entry.html", "<li>{{who}}</li>");
+        dir.write("code/frags/scripted.html", "<script>evil()</script>");
+        dir.write("code/frags/layout/markdown.html",
+                  "<!DOCTYPE html><html><head><title>{{title}}</title></head><body>{{content}}</body></html>");
+
+        auto host = ScriptHost::create();
+        REQUIRE(host.ok());
+        scripts = std::move(host).value();
+        CodeTree code = codeTree(dir);
+        CompiledScripts compiled = scripts->compileScripts({code.read(rel("pages/book.ms")).value()}, {});
+        REQUIRE(compiled.bundle);
+
+        app = std::make_shared<CompiledApp>();
+        app->generation = 3;
+        app->scripts = compiled.bundle;
+        RelPath ms = rel("pages/book.ms");
+        RouteEntry book{RouteKind::Page, rel("pages/book.html")};
+        book.render = HandlerRef{HandlerRef::Kind::Render, ms, "render"};
+        app->routes.add("/book", book);
+        auto handler = [&](const char* url, HandlerRef::Kind kind, const char* name) {
+            RouteEntry e{RouteKind::Handler, ms};
+            (kind == HandlerRef::Kind::Get ? e.get : e.post) = HandlerRef{kind, ms, name};
+            app->routes.add(url, e);
+        };
+        handler("/book/sign", HandlerRef::Kind::Post, "sign");
+        handler("/book/scripted", HandlerRef::Kind::Get, "scripted");
+        handler("/book/status", HandlerRef::Kind::Get, "status");
+        handler("/book/md", HandlerRef::Kind::Get, "md");
+        addTemplate(*app, code, "pages/book.html");
+        FragmentMap frags;
+        for (const char* name : {"entry", "scripted"}) {
+            std::string path = std::string("frags/") + name + ".html";
+            frags[name] = parseTemplate(code.read(rel(path.c_str())).value(), TemplateKind::Fragment).compiled;
+        }
+        app->templates.setFragments(std::move(frags));
+
+        // A Markdown page, rendered by hand as the compiler would.
+        app->routes.add("/guide", {RouteKind::Markdown, rel("pages/guide.md")});
+        app->markdownPages[rel("pages/guide.md")] =
+            MarkdownPage{HtmlAccess::make("<div class=\"markdown\"><h1 id=\"guide\">Guide</h1></div>", false, true),
+                         "Guide & more"};
+        if (withLayout) {
+            app->markdownLayout =
+                parseTemplate(code.read(rel("frags/layout/markdown.html")).value(), TemplateKind::Page).compiled;
+        }
+
+        EngineOptions options{localhostNames()};
+        options.hooks = &hooks;
+        engine = std::make_unique<Engine>(app, std::move(code), scripts.get(), options);
+    }
+
+    HttpResponse get(const std::string& target) { return send(*engine, makeRequest(target)); }
+
+    HttpResponse post(const std::string& target, const std::string& body, bool htmx) {
+        HttpRequest r = makeRequest(target, "POST");
+        r.headers.add("Content-Type", "application/x-www-form-urlencoded");
+        if (htmx) r.headers.add("HX-Request", "true");
+        r.body = body;
+        return send(*engine, r);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Engine: each response has a fresh nonce, on every script it renders") {
+    HtmlApp app;
+    HttpResponse a = app.get("/book");
+    HttpResponse b = app.get("/book");
+    REQUIRE_EQ(a.status, 200);
+    std::string nonce = cspNonce(a);
+    CHECK_EQ(nonce.size(), 24);   // 16 bytes, base64
+    CHECK_NE(nonce, cspNonce(b));
+    // Every <script> in the page carries it: the page's two, and the dev tools'.
+    size_t scripts = 0, nonced = 0;
+    for (size_t at = a.body.find("<script"); at != std::string::npos; at = a.body.find("<script", at + 1)) {
+        scripts++;
+        if (a.body.compare(at, 15 + nonce.size(), "<script nonce=\"" + nonce) == 0) nonced++;
+    }
+    CHECK_EQ(scripts, 2);
+    CHECK_EQ(nonced, 2);
+    CHECK(a.body.find("<li>&lt;a&gt;</li><li>b</li>") != std::string::npos);
+    CHECK(a.body.find("start({\"n\":1})") != std::string::npos);
+    std::lock_guard<std::mutex> lock(app.hooks.mutex);
+    CHECK_EQ(app.hooks.decorated, std::vector<uint64_t>{3, 3});
+}
+
+TEST_CASE("Engine: /__fourfold/ serves the engine's own files") {
+    HtmlApp app;
+    HttpResponse htmx = app.get("/__fourfold/htmx.js");
+    CHECK_EQ(htmx.status, 200);
+    CHECK_EQ(header(htmx, "Content-Type"), "text/javascript; charset=utf-8");
+    CHECK(htmx.body.find("var htmx=function()") == 0);
+    CHECK(htmx.body.find("htmx.config.allowEval = false;") != std::string::npos);
+    CHECK(htmx.body.find("htmx.config.allowScriptTags = false;") != std::string::npos);
+    CHECK_EQ(header(htmx, "Cache-Control"), "public, max-age=86400");
+    HttpResponse css = app.get("/__fourfold/markdown.css");
+    CHECK_EQ(css.status, 200);
+    CHECK(css.body.find(".markdown") != std::string::npos);
+    CHECK_EQ(app.get("/__fourfold/nothing").status, 404);
+    CHECK_EQ(app.get("/__fourfold").status, 404);
+    CHECK_EQ(send(*app.engine, makeRequest("/__fourfold/htmx.js", "POST")).status, 404);
+}
+
+TEST_CASE("Engine: fragments, with and without HTMX") {
+    HtmlApp app;
+    HttpResponse frag = app.post("/book/sign", "who=%3Cscript%3E", true);
+    CHECK_EQ(frag.status, 200);
+    CHECK_EQ(header(frag, "Content-Type"), "text/html; charset=utf-8");
+    CHECK_EQ(frag.body, "<li>&lt;script&gt;</li>");   // not decorated: it goes into a page
+
+    HttpResponse plain = app.post("/book/sign", "who=x", false);
+    CHECK_EQ(plain.status, 303);
+    CHECK_EQ(header(plain, "Location"), "/book");
+
+    HttpResponse status = app.get("/book/status");
+    CHECK_EQ(status.status, 422);
+    CHECK_EQ(status.body, "<li>x</li>");
+    CHECK_EQ(header(status, "Content-Type"), "text/html; charset=utf-8");
+
+    HttpResponse md = app.get("/book/md");
+    CHECK_EQ(md.body, "<div class=\"markdown comment\">\n<p>Hi &lt;b&gt;</p>\n</div>\n");
+}
+
+TEST_CASE("Engine: an HTMX redirect") {
+    TempDir dir;
+    dir.write("code/pages/x.ms", "get.go = function(req)\n  return redirect(\"/there\")\nend function\n");
+    auto host = ScriptHost::create();
+    REQUIRE(host.ok());
+    CodeTree code = codeTree(dir);
+    CompiledScripts compiled = host.value()->compileScripts({code.read(rel("pages/x.ms")).value()}, {});
+    REQUIRE(compiled.bundle);
+    auto app = std::make_shared<CompiledApp>();
+    app->scripts = compiled.bundle;
+    RouteEntry e{RouteKind::Handler, rel("pages/x.ms")};
+    e.get = HandlerRef{HandlerRef::Kind::Get, rel("pages/x.ms"), "go"};
+    app->routes.add("/x/go", e);
+    Engine engine(app, std::move(code), host.value().get(), EngineOptions{localhostNames()});
+    HttpRequest r = makeRequest("/x/go");
+    r.headers.add("HX-Request", "true");
+    HttpResponse h = send(engine, r);
+    CHECK_EQ(h.status, 200);
+    CHECK_EQ(header(h, "HX-Redirect"), "/there");
+    CHECK_FALSE(h.headers.has("Location"));
+    CHECK_EQ(send(engine, makeRequest("/x/go")).status, 303);
+}
+
+TEST_CASE("Engine: a fragment response with a <script> is an error") {
+    HtmlApp app;
+    HttpResponse r = app.get("/book/scripted");
+    CHECK_EQ(r.status, 500);
+    CHECK(r.body.find("evil()") == std::string::npos);
+}
+
+TEST_CASE("Engine: Markdown pages, in the built-in page or the app's layout") {
+    {
+        HtmlApp builtin;   // one at a time: only one ScriptHost may exist
+        HttpResponse a = builtin.get("/guide");
+        CHECK_EQ(a.status, 200);
+        CHECK(a.body.find("<title>Guide &amp; more</title>") != std::string::npos);
+        CHECK(a.body.find("<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">") != std::string::npos);
+        CHECK(a.body.find("<h1 id=\"guide\">Guide</h1>") != std::string::npos);
+    }
+
+    HtmlApp layout(true);
+    HttpResponse b = layout.get("/guide");
+    CHECK_EQ(b.status, 200);
+    CHECK(b.body.find("<title>Guide &amp; more</title>") != std::string::npos);
+    CHECK(b.body.find("<body><div class=\"markdown\"><h1") != std::string::npos);
+    CHECK(b.body.find("href=\"/__fourfold/markdown.css\"></head>") == std::string::npos);
+    CHECK(b.body.find("<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">\n</head>") != std::string::npos);
+
+    // An app with its own pages/markdown.css links that one instead.
+    auto own = std::make_shared<CompiledApp>(*layout.app);
+    own->hasMarkdownCss = true;
+    layout.engine->setApp(own);
+    CHECK(layout.get("/guide").body.find("href=\"/markdown.css\"") != std::string::npos);
 }

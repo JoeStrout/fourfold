@@ -11,6 +11,7 @@
 #include "base/version.h"
 #include "bridge.h"
 #include "host_impl.h"
+#include "modules/modules.h"
 
 namespace fourfold {
 
@@ -162,8 +163,12 @@ void addStatus() {
                    inner && inner->kind == OutcomeHandle::Kind::Json) {
             h.body = inner->body;
             h.contentType = "application/json";
+        } else if (const Html* html = htmlHandleOf(body)) {
+            h.body = html->str();
+            h.contentType = "text/html; charset=utf-8";
+            h.hasScript = html->hasScript();
         } else if (!body.IsNull()) {
-            return errorResult("status's body must be a string, json(...), or null");
+            return errorResult("status's body must be a string, json(...), frag(...), or null");
         }
         return IntrinsicResult(makeOutcomeHandle(std::move(h)));
     });
@@ -325,6 +330,9 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addJson();
     addStatus();
     addImport();
+    addFrag();
+    addMarkdown();
+    addUnsafeHtml();
     addTestSlowWork();
     addTestWithValue();
     g_callbackStub = compileCallbackStub();

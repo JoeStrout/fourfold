@@ -60,6 +60,44 @@ const char* const kDevClientScript = R"js((function () {
     (document.body || document.documentElement).appendChild(overlay);
   }
 
+  // Template warnings: a small panel in the corner, until dismissed (or
+  // more arrive).
+  var warningPanel = null, dismissed = 0;
+
+  function showWarnings(list) {
+    if (warningPanel) warningPanel.remove();
+    warningPanel = null;
+    if (!list || !list.length || list.length <= dismissed) return;
+    warningPanel = el("div", {
+      position: "fixed", right: "1rem", bottom: "1rem", zIndex: "2147483646", maxWidth: "32rem",
+      maxHeight: "40vh", overflow: "auto", background: "#2b2611", color: "#f5e6a8",
+      border: "1px solid #6b5a1a", borderRadius: "6px", padding: "0.6rem 0.9rem",
+      font: "13px/1.4 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+      boxShadow: "0 4px 16px rgba(0,0,0,0.3)"
+    });
+    var close = el("button", {
+      float: "right", background: "none", border: "0", color: "inherit", cursor: "pointer",
+      font: "inherit", fontSize: "1.1rem", lineHeight: "1", padding: "0 0 0 0.5rem"
+    }, "×");
+    close.title = "Dismiss";
+    close.addEventListener("click", function () {
+      dismissed = list.length;
+      warningPanel.remove();
+      warningPanel = null;
+    });
+    warningPanel.appendChild(close);
+    warningPanel.appendChild(el("div", { fontWeight: "600", marginBottom: "0.3rem" },
+      list.length === 1 ? "1 template warning" : list.length + " template warnings"));
+    list.forEach(function (w) {
+      var row = el("div", { margin: "0.2rem 0" });
+      row.appendChild(el("span", { fontFamily: "ui-monospace, Menlo, monospace", color: "#c9b56a" },
+        w.file + (w.line > 0 ? ":" + w.line : "") + " "));
+      row.appendChild(document.createTextNode(w.message));
+      warningPanel.appendChild(row);
+    });
+    (document.body || document.documentElement).appendChild(warningPanel);
+  }
+
   function swapStylesheets(urls, next) {
     var links = document.querySelectorAll("link[rel~='stylesheet']");
     for (var i = 0; i < links.length; i++) {
@@ -80,6 +118,11 @@ const char* const kDevClientScript = R"js((function () {
     var d = data(e);
     if (d.generation !== generation) { location.reload(); return; }   // changed while we weren't listening
     showErrors(d.diagnostics);
+    showWarnings(d.warnings);
+  });
+  source.addEventListener("warnings", function (e) {
+    var d = data(e);
+    if (d.generation === generation) showWarnings(d.warnings);
   });
   source.addEventListener("reload", function () { location.reload(); });
   source.addEventListener("css", function (e) {

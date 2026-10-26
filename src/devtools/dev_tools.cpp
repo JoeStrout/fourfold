@@ -12,6 +12,7 @@ namespace {
 
 constexpr auto kHeartbeat = std::chrono::seconds(20);
 constexpr int kExcerptContext = 3;   // lines before and after
+constexpr size_t kMaxWarnings = 50;   // render warnings kept per generation
 
 Datum str(std::string s) { return Datum::string(std::move(s)); }
 Datum num(double n) { return Datum::number(n); }
@@ -109,15 +110,29 @@ struct DevTools::Hub : std::enable_shared_from_this<Hub> {
     std::vector<std::shared_ptr<StreamWriter>> streams;
     bool heartbeatRunning = false;
 
-    // The latest compile, for each new stream's "hello". Any thread.
+    // The latest compile, for each new stream's "hello", and the render
+    // warnings seen since. Any thread.
     std::mutex mutex;
     Datum hello = Datum::map({{"generation", num(0)}, {"diagnostics", Datum::list({})}});
+    uint64_t warningsGeneration = 0;
+    std::vector<RenderWarning> warnings;
+
+    Datum warningList() const {
+        Datum::ListItems list;
+        for (const RenderWarning& w : warnings) {
+            list.push_back(Datum::map(
+                {{"file", str("code/" + w.file)}, {"line", num(w.line)}, {"message", str(w.message)}}));
+        }
+        return Datum::list(std::move(list));
+    }
 
     void add(std::shared_ptr<StreamWriter> writer) {
         Datum greeting;
         {
             std::lock_guard<std::mutex> lock(mutex);
-            greeting = hello;
+            Datum::MapItems items = hello.asMap();
+            items["warnings"] = warningList();
+            greeting = Datum::map(std::move(items));
         }
         if (!writer->write(serverSentEvent("hello", greeting))) return;
         streams.push_back(std::move(writer));
@@ -191,6 +206,10 @@ void DevTools::compileFinished(const CompileReport& report) {
     {
         std::lock_guard<std::mutex> lock(hub_->mutex);
         hub_->hello = Datum::map({{"generation", num(report.generation)}, {"diagnostics", errors}});
+        if (report.generation != hub_->warningsGeneration) {
+            hub_->warningsGeneration = report.generation;
+            hub_->warnings.clear();
+        }
     }
     std::shared_ptr<Hub> hub = hub_;
     hub->loop.post([hub, event] { hub->broadcast(event); });
@@ -216,9 +235,35 @@ std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const
     return std::nullopt;
 }
 
-void DevTools::decorate(HttpResponse& response, uint64_t generation) {
-    insertBeforeBodyEnd(response.body, "<script src=\"/__dev/client.js\" data-generation=\"" +
-                                           std::to_string(generation) + "\" defer></script>");
+void DevTools::renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) {
+    std::string event;
+    {
+        std::lock_guard<std::mutex> lock(hub_->mutex);
+        if (generation != hub_->warningsGeneration) {
+            if (generation < hub_->warningsGeneration) return;   // from a request on an old version
+            hub_->warningsGeneration = generation;
+            hub_->warnings.clear();
+        }
+        bool added = false;
+        for (const RenderWarning& w : warnings) {
+            if (hub_->warnings.size() >= kMaxWarnings) break;
+            if (std::find(hub_->warnings.begin(), hub_->warnings.end(), w) != hub_->warnings.end()) continue;
+            hub_->warnings.push_back(w);
+            added = true;
+        }
+        if (!added) return;
+        event = serverSentEvent("warnings", Datum::map({{"generation", num(generation)},
+                                                        {"warnings", hub_->warningList()}}));
+    }
+    std::shared_ptr<Hub> hub = hub_;
+    hub->loop.post([hub, event] { hub->broadcast(event); });
+}
+
+void DevTools::decorate(HttpResponse& response, uint64_t generation, const std::string& nonce) {
+    std::string tag = "<script src=\"/__dev/client.js\"";
+    if (!nonce.empty()) tag += " nonce=\"" + escapeHtml(nonce) + "\"";
+    tag += " data-generation=\"" + std::to_string(generation) + "\" defer></script>";
+    insertBeforeBodyEnd(response.body, tag);
 }
 
 HttpResponse DevTools::scriptErrorPage(const ScriptError& error) {

@@ -9,6 +9,8 @@
 //   serving the last good version. Fixing the error reloads them.
 // - A script error while handling a request gets a 500 page in the same
 //   style, instead of plain text.
+// - Template warnings (a field with no value, a value with no field) show
+//   in a small panel on open pages, once per app generation.
 //
 // It's an Observer (compile events come in) and the engine's EngineHooks
 // (requests for /__dev/ and HTML responses go through it). The core never
@@ -42,10 +44,11 @@ public:
 
     // Observer
     void compileFinished(const CompileReport& report) override;
+    void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
 
     // EngineHooks
     std::optional<HttpResponse> reserved(const HttpRequest& request, const AdmittedRequest& admitted) override;
-    void decorate(HttpResponse& response, uint64_t generation) override;
+    void decorate(HttpResponse& response, uint64_t generation, const std::string& nonce) override;
     HttpResponse scriptErrorPage(const ScriptError& error) override;
 
     // Open /__dev/reload streams. On the loop's thread.
