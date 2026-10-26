@@ -178,21 +178,28 @@ void Engine::handle(const HttpRequest& request, Done done) const {
             done(std::move(response));
             return;
         }
-        // A page with no code but a {{flash}} field: show the waiting flash
-        // message, if any, and clear it. Without the session's lock: the
-        // clear happens only if no one changed the session meanwhile.
+        // A page with no code but a {{flash}} field: show `session.flash`, if
+        // any, and remove it. Without the session's lock: the removal happens
+        // only if no one changed the session meanwhile.
         std::string hash = *sessionHash;
         const CodeTree* code = &code_;   // not read for a page (see dispatch)
         scripts_->workers().submit([p, decision, code, hash, done]() {
             SessionStore& store = *p.options->sessions;
             std::optional<SessionRecord> record;
             if (auto loaded = store.load(hash); loaded) record = loaded.value();
+            Datum::MapItems app;
+            if (record) {
+                if (auto parsed = parseJson(record->app); parsed && parsed.value().kind() == Datum::Kind::Map) {
+                    app = parsed.value().asMap();
+                }
+            }
+            auto flash = app.find("flash");
             MapFields fields;
-            EnginePart engine = record ? EnginePart::parse(record->engine) : EnginePart{};
-            fields.set("flash", engine.flash ? FieldValue::string(*engine.flash) : FieldValue::null());
+            fields.set("flash", flash != app.end() ? FieldValue::datum(flash->second) : FieldValue::null());
             HttpResponse response = dispatch(decision, *p.app, *code, p.render, &fields);
-            if (engine.flash && response.status == 200) {
-                (void)store.replaceEngine(hash, record->engine, EnginePart{}.json());
+            if (flash != app.end() && response.status == 200) {
+                app.erase(flash);
+                (void)store.replaceApp(hash, record->app, toJson(Datum::map(std::move(app))));
             }
             finish(response, p);
             done(std::move(response));

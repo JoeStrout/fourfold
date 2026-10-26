@@ -50,7 +50,7 @@ void writeApp(const TempDir& dir) {
               "post.add = function(req)\n"
               "    if not session.hasIndex(\"items\") then session.items = []\n"
               "    session.items.push req.form.item\n"
-              "    flash \"Added \" + req.form.item\n"
+              "    session.flash = \"Added \" + req.form.item\n"
               "    return redirect(\"/cart\")\n"
               "end function\n"
               "get.big = function(req)\n"
@@ -68,8 +68,25 @@ void writeApp(const TempDir& dir) {
     dir.write("app/code/pages/plain.html", "<!DOCTYPE html><html><body><p class=flash>{{flash}}</p></body></html>");
     dir.write("app/code/pages/flasher.ms",
               "get.go = function(req)\n"
-              "    flash \"Hello from flasher\"\n"
+              "    session.flash = \"Hello from flasher\"\n"
               "    return redirect(\"/plain\")\n"
+              "end function\n"
+              "get.rich = function(req)\n"
+              "    session.flash = {\"text\": \"Saved.\", \"kind\": \"ok\"}\n"
+              "    return redirect(\"/notice\")\n"
+              "end function\n"
+              "get.peek = function(req)\n"
+              "    if session.hasIndex(\"flash\") then return \"waiting: \" + session.flash\n"
+              "    return \"none\"\n"
+              "end function\n");
+    // A message can be a map, taken apart by the template; and render can
+    // fill {{flash}} itself, which still uses up the waiting message.
+    dir.write("app/code/pages/notice.html",
+              "<!DOCTYPE html><html><body><p class=\"flash {{flash.kind}}\">{{flash.text}}</p></body></html>");
+    dir.write("app/code/pages/own.html", "<!DOCTYPE html><html><body><p class=flash>{{flash}}</p></body></html>");
+    dir.write("app/code/pages/own.ms",
+              "render = function(req)\n"
+              "    return {\"flash\": \"computed\"}\n"
               "end function\n");
 
     dir.write("app/code/pages/book.ms",
@@ -209,6 +226,23 @@ TEST_CASE("State: sessions begin on first write, persist, and carry flash messag
     b.get("/flasher/go");
     CHECK(contains(b.get("/plain"), "<p class=flash>Hello from flasher</p>"));
     CHECK(contains(b.get("/plain"), "<p class=flash></p>"));
+
+    // Code can read a waiting message; reading doesn't use it up.
+    b.get("/flasher/go");
+    CHECK_EQ(bodyOf(b.get("/flasher/peek")), "waiting: Hello from flasher");
+    CHECK_EQ(bodyOf(b.get("/flasher/peek")), "waiting: Hello from flasher");
+    CHECK(contains(b.get("/plain"), "<p class=flash>Hello from flasher</p>"));
+    CHECK_EQ(bodyOf(b.get("/flasher/peek")), "none");
+
+    // A map message, shown through dotted fields (on a page with no code).
+    b.get("/flasher/rich");
+    CHECK(contains(b.get("/notice"), "<p class=\"flash ok\">Saved.</p>"));
+    CHECK(contains(b.get("/notice"), "<p class=\"flash \"></p>"));
+
+    // render's own flash field wins, and the waiting message is gone.
+    b.get("/flasher/go");
+    CHECK(contains(b.get("/own"), "<p class=flash>computed</p>"));
+    CHECK_EQ(bodyOf(b.get("/flasher/peek")), "none");
 
     // Another browser has its own (none).
     Browser other(s.port());

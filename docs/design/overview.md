@@ -122,7 +122,7 @@ Rejected:
 
 #### What a session record holds
 
-- **The engine's part:** user ID (if signed in), created and last-used times, a waiting flash message. App code can't touch it. (The CSRF token isn't here: it comes from a cookie of its own; see §5, [CSRF protection](#csrf-protection).)
+- **The engine's part:** user ID (if signed in), created and last-used times. App code can't touch it. (The CSRF token isn't here: it comes from a cookie of its own; see §5, [CSRF protection](#csrf-protection).)
 - **The app's part:** the `session` map.
 
 `req.user` is built from the user ID by **looking it up in the auth store on every request**. Roles are never cached in the session, so revoking a role or deleting a user takes effect immediately.
@@ -162,14 +162,16 @@ Long signed-in sessions suit magic-link sign-in, where signing in again means a 
 
 #### Flash messages
 
-Redirect-after-POST almost always wants a one-time message, so v1 includes a small helper:
+Redirect-after-POST almost always wants a one-time message. It goes in one reserved key of the session:
 
 ```
-flash "Thanks for signing!"
+session.flash = "Thanks for signing!"
 return redirect("/guestbook")
 ```
 
-The engine stores the message in the session; the next page render receives it as the `{{flash}}` field, and then it's cleared.
+The next page shown with a `{{flash}}` field (or `{{flash.x}}`) displays `session.flash`, and showing it removes it from the session. Otherwise it's an ordinary session value: code can read, change or remove it, and it can be a map (`{"text": "Saved.", "kind": "ok"}`, shown with `{{flash.text}}` and `{{flash.kind}}`). If `render` returns its own `flash` field, that's shown instead, and `session.flash` is still removed.
+
+*(Decided after M5: M5 built a `flash "…"` function that kept the message in the engine's part, where code couldn't see it. A plain session key is one less concept, and lets code read and shape the message.)*
 
 #### Dev mode
 
@@ -644,7 +646,7 @@ end function
 - **`formState(name)`** returns the map a form fragment needs: the submitted values (by field name) and an `errors` map (with `errors.form` for errors that aren't about one field). Normally it's empty. Right after a failed submission, it holds what the visitor typed and what went wrong. A field named `errors` is therefore a compile error.
 - **`reshow(fragName, extraErrors)`** sends the form back with its errors, whichever way it was submitted:
   - **With HTMX:** it renders the fragment and tells HTMX (with `HX-Retarget` and `HX-Reswap` headers) to replace the form itself, rather than appending to `#entries`. That's why the form's root element needs an `id`. The status is 422; the engine's HTMX configuration swaps 422 responses.
-  - **Without JavaScript:** it stores the values and errors as a one-time flash (§2) and redirects to the handler's own page (`/guestbook`, known from routing; never the `Referer`, so it can't become an open redirect). That page's `render` calls `formState("sign")`, which picks them up. Redirect-after-POST stays intact.
+  - **Without JavaScript:** it stores the values and errors for one use in the engine's part of the session (like a flash message, §2, but out of the app's reach) and redirects to the handler's own page (`/guestbook`, known from routing; never the `Referer`, so it can't become an open redirect). That page's `render` calls `formState("sign")`, which picks them up. Redirect-after-POST stays intact.
 - `extraErrors` covers checks only the handler can do ("that name is taken"); they're merged with the declared rules' errors.
 - Values are shown back through ordinary fields, so they're escaped like any other value.
 

@@ -2,7 +2,6 @@
 // once by initMiniScriptRuntime.
 //
 // - frag, markdown, unsafeHTML: make HTML; each returns an Html handle.
-// - flash: a one-time message for the next page (session runs only).
 // - data: the app's data files (data.get, data.set, ...).
 // - dropbox: the app's append-only output (dropbox.write).
 #pragma once
@@ -18,7 +17,6 @@ namespace fourfold {
 void addFrag();
 void addMarkdown();
 void addUnsafeHtml();
-void addFlash();
 void addData();
 void addDropbox();
 

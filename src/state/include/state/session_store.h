@@ -6,7 +6,7 @@
 // a disk image) gives no IDs that could take over a live session.
 //
 // Each record has two parts, both as canonical JSON bytes: the engine's
-// (flash, and later the CSRF state of signed-in users) and the app's (the
+// (empty for now; from M6, the signed-in user) and the app's (the
 // `session` map). The store doesn't look inside either.
 //
 // Every method blocks on SQLite, so it's for worker threads; the store
@@ -83,10 +83,10 @@ public:
     // has gone (expired, or signed out meanwhile).
     Status save(const std::string& idHash, const std::string& engine, const std::string& app);
 
-    // Replaces the engine's part only if it's still `expected` (e.g. to clear
-    // a flash message that a page without code showed, without taking the
-    // session's lock). Returns whether it did.
-    Result<bool> replaceEngine(const std::string& idHash, const std::string& expected, const std::string& engine);
+    // Replaces the app's part only if it's still `expected` (e.g. to remove
+    // `session.flash` after a page without code showed it, without taking
+    // the session's lock). Returns whether it did.
+    Result<bool> replaceApp(const std::string& idHash, const std::string& expected, const std::string& app);
 
     // Marks the session used now, if it's been `touchInterval` since the last
     // time. `lastUsedAt` is the record's, as loaded.

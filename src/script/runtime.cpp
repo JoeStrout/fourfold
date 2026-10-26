@@ -343,7 +343,6 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addFrag();
     addMarkdown();
     addUnsafeHtml();
-    addFlash();
     addData();
     addDropbox();
     addTestSlowWork();

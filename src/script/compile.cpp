@@ -78,7 +78,7 @@ std::string callFor(const std::string& target, Value function) {
 }
 
 // What a file's code refers to, found by scanning its tokens: whether it
-// names the `session` or `flash` globals, and which libs it imports.
+// names the `session` global, and which libs it imports.
 struct References {
     bool session = false;
     std::set<std::string> imports;
@@ -132,7 +132,7 @@ References scanReferences(const std::string& source) {
             }
             std::string word = source.substr(start, i - start);
             bool member = prevSignificant == '.';   // x.session isn't the global
-            if (!member && (word == "session" || word == "flash")) refs.session = true;
+            if (!member && word == "session") refs.session = true;
             afterImport = !member && word == "import";
             prevSignificant = 'a';
             continue;
@@ -210,7 +210,7 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         libRefs[importName] = scanReferences(source);
     }
 
-    // Whether code with these references can reach `session` or `flash`,
+    // Whether code with these references can reach `session`,
     // directly or through the libs it imports (and theirs).
     bool usesSession(const References& refs) const {
         if (refs.session) return true;

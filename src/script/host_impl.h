@@ -53,12 +53,6 @@ struct Run {
     ScriptHost::Done done;
     EventLoop::TimerId deadline = 0;
 
-    // Session runs only: the flash message waiting when the run started,
-    // one set by `flash`, and whether the rendered page showed the first.
-    std::optional<std::string> flashWaiting;
-    std::optional<std::string> flashSet;
-    bool flashShown = false;
-
     // An async intrinsic's result, set just before the run resumes.
     std::optional<AsyncResult> async;
     // Data locks this run holds (data.update), by data name; released when

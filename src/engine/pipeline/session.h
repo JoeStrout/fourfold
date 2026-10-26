@@ -33,14 +33,6 @@ std::string setCookie(const std::string& base, const std::string& value, bool ht
 // addresses are handed out by the /64).
 std::string addressGroup(const std::string& peerAddress);
 
-// The engine's part of a session record, as stored: {"flash": "..."} or {}.
-struct EnginePart {
-    std::optional<std::string> flash;
-
-    static EnginePart parse(const std::string& json);
-    std::string json() const;
-};
-
 // One request's session: SessionAccess for the run, then commit() after it.
 // open() and commit() may be called on any thread. Made with make_shared:
 // work in progress keeps it alive.

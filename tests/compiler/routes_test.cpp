@@ -470,7 +470,8 @@ TEST_CASE("compile: routes whose code uses the session are marked") {
     dir.write("code/pages/b.ms",
               "// session in a comment, and \"session\" in a string, don't count; nor does x.session\n"
               "get.go = function(req)\n  x = {\"session\": 1}\n  return str(x.session)\nend function\n");
-    dir.write("code/pages/c.ms", "post.go = function(req)\n  flash \"hi\"\n  return null\nend function\n");
+    dir.write("code/pages/c.ms", "post.go = function(req)\n  session.flash = \"hi\"\n  return null\nend function\n");
+    dir.write("code/pages/h.ms", "flash = 1\nget.go = function(req)\n  return str(flash)\nend function\n");
     dir.write("code/pages/d.ms",
               "import \"cart\"\nget.go = function(req)\n  return cart.count\nend function\n");
     dir.write("code/pages/e.ms", "import \"plain\"\nget.go = function(req)\n  return \"\"\nend function\n");
@@ -484,6 +485,7 @@ TEST_CASE("compile: routes whose code uses the session are marked") {
     CHECK(route(out, "/a")->usesSession);
     CHECK_FALSE(route(out, "/b/go")->usesSession);
     CHECK(route(out, "/c/go")->usesSession);
+    CHECK_FALSE(route(out, "/h/go")->usesSession);   // `flash` is just a name now
     CHECK(route(out, "/d/go")->usesSession);   // through two imports
     CHECK_FALSE(route(out, "/e/go")->usesSession);
     CHECK(route(out, "/f")->usesSession);      // a {{flash}} field, no code

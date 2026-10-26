@@ -284,22 +284,23 @@ RelPath pairedTemplate(const RelPath& source) {
     return RelPath::parse(s + ".html").value();
 }
 
-// A render's fields, plus `flash` when the map doesn't have it.
+// A render's fields, plus `flash` from the session when the map doesn't
+// have it (overview §2, Flash messages).
 class WithFlash : public FieldSource {
 public:
-    WithFlash(Value map, std::optional<std::string> flash) : fields_(map), flash_(std::move(flash)) {}
+    WithFlash(Value map, Value session) : fields_(map), session_(session) {}
 
     FieldValue lookup(const std::vector<std::string>& path, bool forScript) const override {
         FieldValue v = fields_.lookup(path, forScript);
-        if (v.kind != FieldValue::Kind::Missing || path.size() != 1 || path[0] != "flash") return v;
-        if (!flash_) return FieldValue::null();
-        return forScript ? FieldValue::datum(Datum::string(*flash_)) : FieldValue::string(*flash_);
+        if (v.kind != FieldValue::Kind::Missing || path.empty() || path[0] != "flash") return v;
+        v = session_.lookup(path, forScript);
+        return v.kind == FieldValue::Kind::Missing ? FieldValue::null() : v;
     }
     std::vector<std::string> names() const override { return fields_.names(); }
 
 private:
     ValueFields fields_;
-    std::optional<std::string> flash_;
+    ValueFields session_;
 };
 
 HandlerOutcome renderPage(Run& run, Value fields) {
@@ -309,13 +310,15 @@ HandlerOutcome renderPage(Run& run, Value fields) {
         return errorOutcome(run, "render returned a map of fields, but there's no code/" + page.str() +
                                      " template to fill; return a string or json(...) instead");
     }
-    // A waiting flash message goes into a {{flash}} field the page has,
-    // unless render filled that itself (overview §2, Flash messages).
+    // A page with a {{flash}} field shows `session.flash`, unless render
+    // filled that field itself; either way, the message has had its showing,
+    // so it's removed from the session.
     std::vector<std::string> names = t->fieldNames();
     bool hasFlashField = std::find(names.begin(), names.end(), "flash") != names.end();
-    WithFlash source(fields, hasFlashField ? run.flashWaiting : std::nullopt);
+    Value session = run.context.session ? run.interp.GetGlobalValue("session") : Value::Null;
+    WithFlash source(fields, hasFlashField ? session : Value::Null);
     RenderResult r = render(*t, source, run.context.render);
-    if (hasFlashField && run.flashWaiting) run.flashShown = true;
+    if (hasFlashField && session.IsMap() && r.ok()) session.MapRemove(toValue(std::string("flash")));
     addWarnings(run, r.warnings);
     HandlerOutcome o;
     if (!r.ok()) {
@@ -417,8 +420,6 @@ std::optional<std::string> sessionResultFrom(Run& run, SessionResult& out) {
         return "`session` is " + std::to_string(out.app.size()) + " bytes, over its limit of " +
                std::to_string(limit) + "; the largest keys: " + largestKeys(*d);
     }
-    out.flashSet = run.flashSet;
-    out.flashShown = run.flashShown;
     return std::nullopt;
 }
 

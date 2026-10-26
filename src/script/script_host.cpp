@@ -84,7 +84,6 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
                 finish(*r, errorOutcome("the session couldn't be loaded: " + shared->error().message, r->fileName));
                 return;
             }
-            r->flashWaiting = shared->value().flash;
             r->interp.SetGlobalValue("session", toValue(shared->value().app));
             resume(id);
         });

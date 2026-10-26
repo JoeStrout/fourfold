@@ -74,20 +74,16 @@ struct RequestFacts {
 
 // The visitor's session as a run starts (overview §2, Session storage).
 struct SessionInput {
-    Datum app = Datum::map({});           // the `session` map
-    std::optional<std::string> flash;     // a flash message waiting to be shown
+    Datum app = Datum::map({});   // the `session` map
 };
 
 // What a run did to the session, for the engine to save after it.
 struct SessionResult {
     // The `session` map at the end, as canonical JSON, checked to be inert
     // and within the size cap.
+    // A page with a {{flash}} field was rendered, so `session.flash` (if
+    // any) has been shown, and is left out of `app`.
     std::string app;
-    // A flash message set by this run (`flash "..."`), for the next page.
-    std::optional<std::string> flashSet;
-    // The waiting flash message went into a {{flash}} field of the page
-    // rendered, so it's been shown.
-    bool flashShown = false;
 };
 
 // The engine's side of a run's session: loading it (after taking its lock).
@@ -119,7 +115,8 @@ struct RunContext {
     // The response's CSP nonce and the Markdown stylesheet, for the page and
     // every frag() the run renders.
     RenderOptions render{};
-    // Set for a route whose code uses `session` or `flash`. Must stay alive
+    // Set for a route that uses `session` (its code names it, or its page
+    // has a {{flash}} field). Must stay alive
     // until the run is done.
     std::shared_ptr<SessionAccess> session{};
     // The largest `session` map, serialized; over it, the run fails.
@@ -173,8 +170,8 @@ struct PageHandlers {
     bool render = false;
     std::vector<std::string> get;    // the keys of `get`, sorted
     std::vector<std::string> post;   // the keys of `post`, sorted
-    // The file, or a code/lib/ file it imports, mentions `session` or
-    // `flash`: its runs get the session (loaded and locked). Requests to
+    // The file, or a code/lib/ file it imports, mentions `session`: its
+    // runs get the session (loaded and locked). Requests to
     // pages that don't never wait for a session's lock.
     bool usesSession = false;
 };

@@ -66,22 +66,6 @@ std::string addressGroup(const std::string& peerAddress) {
     return peerAddress;
 }
 
-EnginePart EnginePart::parse(const std::string& json) {
-    EnginePart part;
-    auto d = parseJson(json);
-    if (!d || d.value().kind() != Datum::Kind::Map) return part;
-    const auto& map = d.value().asMap();
-    auto it = map.find("flash");
-    if (it != map.end() && it->second.kind() == Datum::Kind::String) part.flash = it->second.asString();
-    return part;
-}
-
-std::string EnginePart::json() const {
-    Datum::MapItems map;
-    if (flash) map["flash"] = Datum::string(*flash);
-    return toJson(Datum::map(std::move(map)));
-}
-
 EngineSession::EngineSession(SessionStore& store, LockService& locks, WorkerPool& workers,
                              std::optional<std::string> idHash, std::string addressGroup, bool https)
     : store_(store), locks_(locks), workers_(workers), idHash_(std::move(idHash)),
@@ -116,7 +100,6 @@ void EngineSession::open(std::function<void(Result<SessionInput>)> ready) {
             if (record.value()) {
                 auto app = parseJson(record.value()->app);
                 if (app && app.value().kind() == Datum::Kind::Map) input.app = std::move(app).value();
-                input.flash = EnginePart::parse(record.value()->engine).flash;
             }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -137,21 +120,19 @@ EngineSession::Committed EngineSession::commit(const std::optional<SessionResult
         record = record_;
     }
     if (result) {
-        std::optional<std::string> flashBefore = record ? EnginePart::parse(record->engine).flash : std::nullopt;
-        EnginePart engine;
-        engine.flash = result->flashSet ? result->flashSet : (result->flashShown ? std::nullopt : flashBefore);
-        std::string engineJson = engine.json();
+        // The engine's part holds nothing a run can change (yet: M6 keeps
+        // the signed-in user there), so it's saved as it was loaded.
         Status saved;
         if (record) {
-            if (result->app != record->app || engineJson != record->engine) {
-                saved = store_.save(record->idHash, engineJson, result->app);
+            if (result->app != record->app) {
+                saved = store_.save(record->idHash, record->engine, result->app);
             } else {
                 saved = store_.touch(record->idHash, record->lastUsedAt);
             }
-        } else if (result->app != "{}" || engine.flash) {
+        } else if (result->app != "{}") {
             // Anonymous sessions begin with the first write (overview §5).
             std::string id = SessionStore::newId();
-            saved = store_.create(id, addressGroup_, engineJson, result->app);
+            saved = store_.create(id, addressGroup_, "{}", result->app);
             if (saved) {
                 const SessionConfig& c = store_.config();
                 int64_t maxAge = std::chrono::duration_cast<std::chrono::seconds>(c.anonymousLimit).count();

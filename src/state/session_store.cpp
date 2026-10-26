@@ -124,12 +124,12 @@ Status SessionStore::save(const std::string& idHash, const std::string& engine, 
     return {};
 }
 
-Result<bool> SessionStore::replaceEngine(const std::string& idHash, const std::string& expected,
-                                         const std::string& engine) {
+Result<bool> SessionStore::replaceApp(const std::string& idHash, const std::string& expected,
+                                      const std::string& app) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto stmt = db_->statement("UPDATE sessions SET engine = ?3 WHERE id_hash = ?1 AND engine = ?2");
+    auto stmt = db_->statement("UPDATE sessions SET app = ?3 WHERE id_hash = ?1 AND app = ?2");
     if (!stmt) return stmt.error();
-    stmt.value()->bindBlob(1, idHash).bindBlob(2, expected).bindBlob(3, engine);
+    stmt.value()->bindBlob(1, idHash).bindBlob(2, expected).bindBlob(3, app);
     if (Status s = stmt.value()->run(); !s) return s.error();
     return db_->changes() > 0;
 }

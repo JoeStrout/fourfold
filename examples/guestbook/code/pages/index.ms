@@ -62,6 +62,6 @@ post.sign = function(req)
     // With HTMX, just the new <li>; without it, back to the page, with a
     // message to show there once.
     if req.htmx then return frag("entry", showEntry(entry))
-    flash "Thanks for signing, " + who + "!"
+    session.flash = "Thanks for signing, " + who + "!"
     return redirect("/")
 end function

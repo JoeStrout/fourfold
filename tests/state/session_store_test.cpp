@@ -58,10 +58,10 @@ TEST_CASE("SessionStore: create, load, save, remove") {
     CHECK_EQ(r->createdAt, f.clock.nowMillis());
 
     f.clock.advanceSeconds(10);
-    REQUIRE(f.store->save(hash, "{\"flash\":\"hi\"}", "{\"cart\":[1,2]}"));
+    REQUIRE(f.store->save(hash, "{\"user\":\"u1\"}", "{\"cart\":[1,2]}"));
     r = f.store->load(hash).value();
     CHECK_EQ(r->app, "{\"cart\":[1,2]}");
-    CHECK_EQ(r->engine, "{\"flash\":\"hi\"}");
+    CHECK_EQ(r->engine, "{\"user\":\"u1\"}");
     CHECK_EQ(r->lastUsedAt, f.clock.nowMillis());
 
     REQUIRE(f.store->remove(hash));
