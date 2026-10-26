@@ -71,6 +71,10 @@ struct RouteEntry {
     std::optional<HandlerRef> render = std::nullopt;   // Page: its .ms file's render, if any
     std::optional<HandlerRef> get = std::nullopt;      // Handler: get.x, if any
     std::optional<HandlerRef> post = std::nullopt;     // Handler: post.x, if any
+    // The route's code uses the session (its .ms file, or a lib it imports,
+    // names `session` or `flash`), or its page has a {{flash}} field: the
+    // session is loaded, and locked while its code runs.
+    bool usesSession = false;
 };
 
 // Canonical URL path (see canonicalUrlPath, which reports the trailing slash

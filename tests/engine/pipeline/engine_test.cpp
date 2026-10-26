@@ -45,12 +45,25 @@ HttpResponse send(const Engine& engine, const HttpRequest& request) {
     return future.get();
 }
 
+// The engine key these tests give their engines, so they can make CSRF
+// tokens the engine accepts.
+const std::string kTestKey(32, 'k');
+
+// Adds a CSRF cookie and its token, as a page from the engine would give a
+// browser.
+void addCsrf(HttpRequest& r) {
+    std::string cookie = PolicyGate::newCsrfCookie();
+    r.headers.add("Cookie", "ff_csrf=" + cookie);
+    r.headers.add("X-CSRF-Token", PolicyGate(kTestKey).tokenFor(cookie));
+}
+
 HttpRequest makeRequest(const std::string& target, const std::string& method = "GET",
                         const char* host = "localhost:8080") {
     HttpRequest r;
     r.method = method;
     r.target = target;
     if (host) r.headers.add("Host", host);
+    if (method == "POST") addCsrf(r);
     return r;
 }
 
@@ -343,6 +356,7 @@ struct ScriptApp : Observer {
         app->errorPage = rel("pages/500.html");
 
         EngineOptions options{localhostNames()};
+        options.engineKey = kTestKey;
         options.showErrorDetails = showErrorDetails;
         options.observer = this;
         if (withHooks) options.hooks = &hooks;
@@ -619,6 +633,7 @@ struct HtmlApp {
         }
 
         EngineOptions options{localhostNames()};
+        options.engineKey = kTestKey;
         options.hooks = &hooks;
         engine = std::make_unique<Engine>(app, std::move(code), scripts.get(), options);
     }
@@ -739,7 +754,8 @@ TEST_CASE("Engine: Markdown pages, in the built-in page or the app's layout") {
     HttpResponse b = layout.get("/guide");
     CHECK_EQ(b.status, 200);
     CHECK(b.body.find("<title>Guide &amp; more</title>") != std::string::npos);
-    CHECK(b.body.find("<body><div class=\"markdown\"><h1") != std::string::npos);
+    CHECK(b.body.find("<body hx-headers=\"") != std::string::npos);   // the CSRF token, for HTMX
+    CHECK(b.body.find("\"><div class=\"markdown\"><h1") != std::string::npos);
     CHECK(b.body.find("href=\"/__fourfold/markdown.css\"></head>") == std::string::npos);
     CHECK(b.body.find("<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">\n</head>") != std::string::npos);
 
@@ -748,4 +764,39 @@ TEST_CASE("Engine: Markdown pages, in the built-in page or the app's layout") {
     own->hasMarkdownCss = true;
     layout.engine->setApp(own);
     CHECK(layout.get("/guide").body.find("href=\"/markdown.css\"") != std::string::npos);
+}
+
+TEST_CASE("requestFacts: the engine's cookies and the CSRF token never reach req") {
+    HttpRequest r = makeRequest("/x?q=1", "GET");
+    r.method = "POST";
+    r.headers.add("Cookie", "a=1; ff_session=SECRET; __Host-ff_csrf=C; b=2");
+    r.headers.add("Cookie", "ff_csrf=D");
+    r.headers.add("X-CSRF-Token", "T1");
+    r.headers.add("Content-Type", "application/x-www-form-urlencoded");
+    r.body = "who=Ada&_csrf=T2&_csrf=T3";
+    EngineOptions options{localhostNames()};
+    AdmittedRequest admitted;
+    REQUIRE_FALSE(admit(r, options, admitted));
+    std::optional<std::string> token;
+    RequestFacts facts = requestFacts(r, admitted, &token);
+    CHECK_EQ(token.value_or(""), "T1");   // the header first
+    for (const auto& [name, value] : facts.headers) {
+        CHECK_NE(name, "x-csrf-token");
+        if (name == "cookie") CHECK_EQ(value, "a=1; b=2");
+    }
+    REQUIRE_EQ(facts.form.size(), 1u);
+    CHECK_EQ(facts.form[0].first, "who");
+
+    // Without the header, the form's field.
+    HttpRequest f = makeRequest("/x", "GET");
+    f.method = "POST";
+    f.headers.add("Cookie", "ff_session=SECRET");
+    f.headers.add("Content-Type", "application/x-www-form-urlencoded");
+    f.body = "_csrf=T2";
+    REQUIRE_FALSE(admit(f, options, admitted));
+    token.reset();
+    facts = requestFacts(f, admitted, &token);
+    CHECK_EQ(token.value_or(""), "T2");
+    for (const auto& [name, value] : facts.headers) CHECK_NE(name, "cookie");   // nothing left of it
+    CHECK(facts.form.empty());
 }

@@ -14,12 +14,14 @@ HttpResponse html(int status, std::string body) {
     return r;
 }
 
-// A page template with no code: its fields render empty, on purpose, so
-// there's nothing to warn about (overview §4).
-HttpResponse page(int status, const CompiledTemplate& compiled, const RenderOptions& render) {
+// A page template with no code: its fields render empty (or as `fields`
+// has them), on purpose, so there's nothing to warn about (overview §4).
+HttpResponse page(int status, const CompiledTemplate& compiled, const RenderOptions& render,
+                  const FieldSource* fields = nullptr) {
     RenderOptions quiet = render;
     quiet.warnings = false;
-    return html(status, fourfold::render(compiled, EmptyFields(), quiet).html.str());
+    EmptyFields none;
+    return html(status, fourfold::render(compiled, fields ? *fields : none, quiet).html.str());
 }
 
 HttpResponse notFound(const CompiledApp& app, const RenderOptions& render) {
@@ -61,7 +63,7 @@ RenderOptions renderOptionsFor(const CompiledApp& app, std::string nonce) {
 }
 
 HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, const CodeTree& code,
-                      const RenderOptions& render) {
+                      const RenderOptions& render, const FieldSource* fields) {
     switch (decision.kind) {
         case RouteDecision::Kind::NotFound:
             return notFound(app, render);
@@ -88,7 +90,7 @@ HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, con
     if (entry.kind == RouteKind::Page) {
         // Pages are served from their compiled templates, not reread.
         const CompiledTemplate* t = app.templates.find(entry.source);
-        return t ? page(200, *t, render) : notFound(app, render);
+        return t ? page(200, *t, render, fields) : notFound(app, render);
     }
     if (entry.kind == RouteKind::Markdown) {
         auto md = app.markdownPages.find(entry.source);

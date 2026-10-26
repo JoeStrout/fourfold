@@ -68,7 +68,8 @@ public:
             Attribute,
             Nonce,       // after "<script": nonce="…", if the render has one
             HeadEnd,     // where markdown.css is linked, if the page needs it
-            PostForm,    // just after a <form method="post"> start tag (CSRF, M5)
+            PostForm,    // just after a <form method="post"> start tag: the CSRF token field
+            BodyStart,   // before the end of the <body> start tag: hx-headers with the CSRF token
             Include,     // {{> text}}, until includes are resolved
         };
 
@@ -162,6 +163,10 @@ struct RenderOptions {
     // Report missing and unused fields. Off for pages with no code, whose
     // fields render empty on purpose (overview §4).
     bool warnings = true;
+    // The visitor's CSRF token, written into every <form method="post"> as
+    // a hidden _csrf field, and into <body> as HTMX's X-CSRF-Token header
+    // (overview §5, CSRF protection). Empty writes none.
+    std::string csrfToken;
 };
 
 struct RenderWarning {

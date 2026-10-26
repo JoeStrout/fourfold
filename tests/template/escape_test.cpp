@@ -294,3 +294,23 @@ TEST_CASE("escape: the helpers") {
     CHECK_EQ(*filterUrl("  https://x/"), "https://x/");
     CHECK_FALSE(filterUrl("https://x/\ny"));
 }
+
+TEST_CASE("escape: the CSRF token goes in every post form, and on <body> for HTMX") {
+    RenderOptions o;
+    o.csrfToken = "tok-_1";
+    CHECK_EQ(renderFragment("<form method=post action=/a><input name=x></form><form method=\"GET\"></form>"
+                            "<FORM METHOD=\"Post\"></FORM>",
+                            EmptyFields(), o),
+             "<form method=post action=/a><input type=\"hidden\" name=\"_csrf\" value=\"tok-_1\"><input name=x></form>"
+             "<form method=\"GET\"></form><FORM METHOD=\"Post\"><input type=\"hidden\" name=\"_csrf\" "
+             "value=\"tok-_1\"></FORM>");
+    ParsedTemplate page = parsePage("<!DOCTYPE html><html><body class=x><p>hi</p></body></html>");
+    REQUIRE(page.ok());
+    CHECK_EQ(render(page.compiled, EmptyFields(), o).html.str(),
+             "<!DOCTYPE html><html><body class=x hx-headers=\"{&quot;X-CSRF-Token&quot;: &quot;tok-_1&quot;}\">"
+             "<p>hi</p></body></html>");
+    // None without a token.
+    CHECK_EQ(renderFragment("<form method=post></form>"), "<form method=post></form>");
+    CHECK_EQ(render(page.compiled, EmptyFields(), {}).html.str(),
+             "<!DOCTYPE html><html><body class=x><p>hi</p></body></html>");
+}

@@ -628,7 +628,7 @@ struct TemplateParser {
     }
 
     // Checks that apply to attributes whether or not they have fields.
-    void checkAttribute(const Attribute& a) {
+    void checkAttribute(const Tag& tag, const Attribute& a) {
         const std::string& n = a.name;
         std::string bare = startsWith(n, "data-") ? n.substr(5) : n;
         if (startsWith(n, "on")) {
@@ -644,6 +644,9 @@ struct TemplateParser {
                           "with plain JSON");
         } else if (n == "nonce") {
             error(a.line, "don't write nonce attributes: the engine adds a fresh nonce to every <script>");
+        } else if (bare == "hx-headers" && tag.name == "body") {
+            error(a.line, "the engine sets hx-headers on <body> (it carries the CSRF token); put other headers "
+                          "on an inner element");
         } else if (bare == "hx-vals" || bare == "hx-headers") {
             std::string v = lower(trimmed(a.literalValue()));
             if (startsWith(v, "js:") || startsWith(v, "javascript:")) {
@@ -683,7 +686,7 @@ struct TemplateParser {
             compiled().hasScript_ = true;
         }
         for (const Attribute& a : tag.attributes) {
-            checkAttribute(a);
+            checkAttribute(tag, a);
             noteLink(tag, a);
             if (!a.hasFields()) {
                 literal += a.leading + a.rawName + a.eq;
@@ -722,6 +725,11 @@ struct TemplateParser {
                 start = false;
             }
             literal += a.closing;
+        }
+        if (tag.name == "body" && foreignDepth == 0) {
+            Part p;
+            p.kind = Part::Kind::BodyStart;
+            push(std::move(p));
         }
         literal += tag.tail;
 

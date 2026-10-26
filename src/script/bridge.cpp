@@ -123,6 +123,25 @@ Value toValue(const std::string& s) {
     return Value(String(copy.data(), copy.size()));
 }
 
+Value toValue(const Datum& d) {
+    switch (d.kind()) {
+        case Datum::Kind::Null: return Value::Null;
+        case Datum::Kind::Number: return Value(d.asNumber());
+        case Datum::Kind::String: return toValue(d.asString());
+        case Datum::Kind::List: {
+            Value list = Value::make_list(static_cast<int>(d.asList().size()));
+            for (const Datum& item : d.asList()) list.Push(toValue(item));
+            return list;
+        }
+        case Datum::Kind::Map: {
+            Value map = Value::make_map(static_cast<int>(d.asMap().size()));
+            for (const auto& [key, item] : d.asMap()) map.MapSet(toValue(key), toValue(item));
+            return map;
+        }
+    }
+    return Value::Null;
+}
+
 std::optional<Datum> toDatum(Value v, std::string& error) {
     return toDatumAt(v, error, 0);
 }
@@ -265,6 +284,24 @@ RelPath pairedTemplate(const RelPath& source) {
     return RelPath::parse(s + ".html").value();
 }
 
+// A render's fields, plus `flash` when the map doesn't have it.
+class WithFlash : public FieldSource {
+public:
+    WithFlash(Value map, std::optional<std::string> flash) : fields_(map), flash_(std::move(flash)) {}
+
+    FieldValue lookup(const std::vector<std::string>& path, bool forScript) const override {
+        FieldValue v = fields_.lookup(path, forScript);
+        if (v.kind != FieldValue::Kind::Missing || path.size() != 1 || path[0] != "flash") return v;
+        if (!flash_) return FieldValue::null();
+        return forScript ? FieldValue::datum(Datum::string(*flash_)) : FieldValue::string(*flash_);
+    }
+    std::vector<std::string> names() const override { return fields_.names(); }
+
+private:
+    ValueFields fields_;
+    std::optional<std::string> flash_;
+};
+
 HandlerOutcome renderPage(Run& run, Value fields) {
     RelPath page = pairedTemplate(run.handler.source);
     const CompiledTemplate* t = run.app ? run.app->templates.find(page) : nullptr;
@@ -272,7 +309,13 @@ HandlerOutcome renderPage(Run& run, Value fields) {
         return errorOutcome(run, "render returned a map of fields, but there's no code/" + page.str() +
                                      " template to fill; return a string or json(...) instead");
     }
-    RenderResult r = render(*t, ValueFields(fields), run.render);
+    // A waiting flash message goes into a {{flash}} field the page has,
+    // unless render filled that itself (overview §2, Flash messages).
+    std::vector<std::string> names = t->fieldNames();
+    bool hasFlashField = std::find(names.begin(), names.end(), "flash") != names.end();
+    WithFlash source(fields, hasFlashField ? run.flashWaiting : std::nullopt);
+    RenderResult r = render(*t, source, run.context.render);
+    if (hasFlashField && run.flashWaiting) run.flashShown = true;
     addWarnings(run, r.warnings);
     HandlerOutcome o;
     if (!r.ok()) {
@@ -346,9 +389,53 @@ HandlerOutcome outcomeFrom(Run& run) {
 
 }  // namespace
 
+namespace {
+
+// The largest keys of a session map, for the "too big" message.
+std::string largestKeys(const Datum& map) {
+    std::vector<std::pair<size_t, std::string>> sizes;
+    for (const auto& [key, value] : map.asMap()) sizes.emplace_back(toJson(value).size(), key);
+    std::sort(sizes.rbegin(), sizes.rend());
+    std::string out;
+    for (size_t i = 0; i < sizes.size() && i < 3; i++) {
+        if (!out.empty()) out += ", ";
+        out += sizes[i].second + " (" + std::to_string(sizes[i].first) + " bytes)";
+    }
+    return out;
+}
+
+// What a finished session run leaves to save; an error if it can't be.
+std::optional<std::string> sessionResultFrom(Run& run, SessionResult& out) {
+    Value session = run.interp.GetGlobalValue("session");
+    if (!session.IsMap()) return std::string("`session` must stay a map; it was replaced with ") + typeName(session);
+    std::string why;
+    std::optional<Datum> d = toDatum(session, why);
+    if (!d) return "`session` can't be saved: it " + why + " (only numbers, strings, lists and maps can be)";
+    out.app = toJson(*d);
+    size_t limit = run.context.sessionMaxBytes;
+    if (out.app.size() > limit) {
+        return "`session` is " + std::to_string(out.app.size()) + " bytes, over its limit of " +
+               std::to_string(limit) + "; the largest keys: " + largestKeys(*d);
+    }
+    out.flashSet = run.flashSet;
+    out.flashShown = run.flashShown;
+    return std::nullopt;
+}
+
+}  // namespace
+
 HandlerOutcome outcomeFromResult(Run& run) {
     HandlerOutcome o = outcomeFrom(run);
     o.warnings = std::move(run.warnings);
+    if (run.context.session && o.kind != HandlerOutcome::Kind::Error) {
+        SessionResult session;
+        if (std::optional<std::string> error = sessionResultFrom(run, session)) {
+            HandlerOutcome failed = errorOutcome(run, *error);
+            failed.warnings = std::move(o.warnings);
+            return failed;
+        }
+        o.session = std::move(session);
+    }
     return o;
 }
 

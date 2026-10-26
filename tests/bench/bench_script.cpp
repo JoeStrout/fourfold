@@ -16,9 +16,10 @@
 #include "script/script_host.h"
 #include "template/template.h"
 #include "temp_dir.h"
+#include "test_gate.h"
 
 using namespace fourfold;
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 namespace {
 
@@ -97,16 +98,16 @@ struct Bench {
     // One run at a time: the latency of a run, start to finish.
     double sequentialMicros(const char* page, int runs) {
         HandlerRef h = render(page);
-        auto t0 = Clock::now();
+        auto t0 = SteadyClock::now();
         for (int i = 0; i < runs; i++) {
             std::promise<void> done;
-            host->run(app, h, request(), [&](HandlerOutcome o) {
+            host->run(app, h, TestGate::approve(), RunContext{request()}, [&](HandlerOutcome o) {
                 if (o.kind != HandlerOutcome::Kind::Render) std::fprintf(stderr, "unexpected: %s\n", o.error.message.c_str());
                 done.set_value();
             });
             done.get_future().wait();
         }
-        return std::chrono::duration<double, std::micro>(Clock::now() - t0).count() / runs;
+        return std::chrono::duration<double, std::micro>(SteadyClock::now() - t0).count() / runs;
     }
 
     // `inFlight` runs at a time: the script thread's throughput.
@@ -115,9 +116,9 @@ struct Bench {
         std::mutex m;
         std::condition_variable cv;
         int started = 0, finished = 0;
-        auto t0 = Clock::now();
+        auto t0 = SteadyClock::now();
         std::function<void()> startOne = [&] {
-            host->run(app, h, request(), [&](HandlerOutcome) {
+            host->run(app, h, TestGate::approve(), RunContext{request()}, [&](HandlerOutcome) {
                 std::lock_guard<std::mutex> lock(m);
                 finished++;
                 cv.notify_one();
@@ -135,7 +136,7 @@ struct Bench {
                 cv.wait(lock);
             }
         }
-        double seconds = std::chrono::duration<double>(Clock::now() - t0).count();
+        double seconds = std::chrono::duration<double>(SteadyClock::now() - t0).count();
         return runs / seconds;
     }
 };
@@ -161,7 +162,7 @@ void memoryHog(Bench& bench, const char* page, int count) {
     std::string firstError;
     std::mutex m;
     for (int i = 0; i < count; i++) {
-        bench.host->run(bench.app, bench.render(page), bench.request(), [&](HandlerOutcome o) {
+        bench.host->run(bench.app, bench.render(page), TestGate::approve(), RunContext{bench.request()}, [&](HandlerOutcome o) {
             {
                 std::lock_guard<std::mutex> lock(m);
                 if (firstError.empty()) firstError = o.error.message;

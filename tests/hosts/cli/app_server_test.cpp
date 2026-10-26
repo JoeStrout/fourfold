@@ -1,6 +1,6 @@
 // End to end: `fourfold dev`'s server, on a real socket, serving
 // tests/apps/scripts with its code running on the script thread.
-#include "dev_server.h"
+#include "app_server.h"
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstring>
+#include <filesystem>
 #include <sstream>
 #include <thread>
 
@@ -18,7 +19,7 @@
 #include "temp_dir.h"
 
 using namespace fourfold;
-using fourfold::cli::DevServer;
+using fourfold::cli::AppServer;
 
 namespace {
 
@@ -110,11 +111,41 @@ bool contains(const std::string& s, const std::string& part) {
     return s.find(part) != std::string::npos;
 }
 
+// A copy of an app's code/ in `dir`, so the server's state (data/,
+// private/state/) goes there, not into the source tree.
+std::string copyApp(const test::TempDir& dir, const std::string& from) {
+    std::filesystem::create_directories(dir.at("app"));
+    std::filesystem::copy(from + "/code", dir.at("app/code"), std::filesystem::copy_options::recursive);
+    return dir.at("app");
+}
+
+// The text in `s` between `before` and the next `after`; empty if absent.
+std::string between(const std::string& s, const std::string& before, const std::string& after) {
+    size_t at = s.find(before);
+    if (at == std::string::npos) return "";
+    at += before.size();
+    return s.substr(at, s.find(after, at) - at);
+}
+
+// The headers a browser would send with a form from the page at `path`:
+// the CSRF cookie the page set, and the token in it (from a form's _csrf
+// field, or <body>'s hx-headers).
+std::string csrfHeaders(uint16_t port, const std::string& path) {
+    std::string page = get(port, path);
+    std::string cookie = between(page, "Set-Cookie: ff_csrf=", ";");
+    std::string token = between(page, "name=\"_csrf\" value=\"", "\"");
+    if (token.empty()) token = between(page, "X-CSRF-Token&quot;: &quot;", "&quot;");
+    REQUIRE_FALSE(cookie.empty());
+    REQUIRE_FALSE(token.empty());
+    return "Cookie: ff_csrf=" + cookie + "\r\nX-CSRF-Token: " + token + "\r\n";
+}
+
 }  // namespace
 
-TEST_CASE("DevServer: serves an app with code, end to end") {
+TEST_CASE("AppServer: serves an app with code, end to end") {
     std::ostringstream out, err;
-    auto server = DevServer::start(FOURFOLD_TEST_APPS_DIR "/scripts", 0, out, err);
+    test::TempDir dir;
+    auto server = AppServer::startDev(copyApp(dir, FOURFOLD_TEST_APPS_DIR "/scripts"), 0, out, err);
     if (!server && contains(err.str(), "Operation not permitted")) {
         MESSAGE("skipped: binding a local port isn't permitted here");
         return;
@@ -134,9 +165,14 @@ TEST_CASE("DevServer: serves an app with code, end to end") {
     CHECK(contains(api, "Content-Type: application/json\r\n"));
     CHECK(contains(api, "{\"ok\":1}"));
 
+    std::string forged = fetch(port,
+                               "POST /guestbook/sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+                               "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 6\r\n\r\nwho=Al");
+    CHECK(contains(forged, "HTTP/1.1 403 Forbidden\r\n"));   // no CSRF token
     std::string sign = fetch(port,
-                             "POST /guestbook/sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
-                             "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 6\r\n\r\nwho=Al");
+                             "POST /guestbook/sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" +
+                                 csrfHeaders(port, "/guestbook") +
+                                 "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 6\r\n\r\nwho=Al");
     CHECK(contains(sign, "HTTP/1.1 303 See Other\r\n"));
     CHECK(contains(sign, "Location: /guestbook\r\n"));
 
@@ -155,12 +191,12 @@ namespace {
 struct LiveApp {
     fourfold::test::TempDir dir;
     std::ostringstream out, err;
-    std::unique_ptr<DevServer> server;
+    std::unique_ptr<AppServer> server;
     std::thread serving;
     bool skipped = false;
 
     void start() {
-        server = DevServer::start(dir.path(), 0, out, err);
+        server = AppServer::startDev(dir.path(), 0, out, err);
         if (!server && contains(err.str(), "Operation not permitted")) {
             skipped = true;
             return;
@@ -181,7 +217,7 @@ const char* const kHelloMs = "render = function(req)\n  return {\"who\": \"world
 
 }  // namespace
 
-TEST_CASE("DevServer: edits show up live, and errors show while the old version serves") {
+TEST_CASE("AppServer: edits show up live, and errors show while the old version serves") {
     LiveApp app;
     app.write("pages/index.html", "<html><body><p>Hello, {{who}}!</p></body></html>");
     app.write("pages/index.ms", kHelloMs);
@@ -248,7 +284,7 @@ TEST_CASE("DevServer: edits show up live, and errors show while the old version 
     CHECK(contains(app.err.str(), "still serving the last version"));
 }
 
-TEST_CASE("DevServer: script errors get the dev error page") {
+TEST_CASE("AppServer: script errors get the dev error page") {
     LiveApp app;
     app.write("pages/index.ms", "render = function(req)\n  x = 1\n  return nosuch\nend function\n");
     app.start();
@@ -261,7 +297,7 @@ TEST_CASE("DevServer: script errors get the dev error page") {
     CHECK(contains(page, "/__dev/client.js"));
 }
 
-TEST_CASE("DevServer: an app that doesn't compile starts anyway, and serves once fixed") {
+TEST_CASE("AppServer: an app that doesn't compile starts anyway, and serves once fixed") {
     LiveApp app;
     app.write("pages/index.html", "<!DOCTYPE html><p>{{who}}</p>");
     app.write("pages/index.ms", "render = function(req)\n  return (\nend function\n");
@@ -284,9 +320,10 @@ TEST_CASE("DevServer: an app that doesn't compile starts anyway, and serves once
     CHECK(contains(get(port, "/"), "<p>world</p>"));
 }
 
-TEST_CASE("DevServer: the guestbook example, with HTMX") {
+TEST_CASE("AppServer: the guestbook example, with HTMX") {
     std::ostringstream out, err;
-    auto server = DevServer::start(FOURFOLD_TESTS_DIR "/../examples/guestbook", 0, out, err);
+    test::TempDir dir;
+    auto server = AppServer::startDev(copyApp(dir, FOURFOLD_TESTS_DIR "/../examples/guestbook"), 0, out, err);
     if (!server && contains(err.str(), "Operation not permitted")) {
         MESSAGE("skipped: binding a local port isn't permitted here");
         return;
@@ -319,15 +356,16 @@ TEST_CASE("DevServer: the guestbook example, with HTMX") {
 
     // Signing with HTMX gets just the new entry, escaped.
     std::string body = "who=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E&msg=**hi**";
-    std::string signed_ = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nHX-Request: true\r\n"
-                                      "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+    std::string csrf = csrfHeaders(port, "/");
+    std::string signed_ = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nHX-Request: true\r\n" +
+                                      csrf + "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
                                           std::to_string(body.size()) + "\r\n\r\n" + body);
     CHECK(contains(signed_, "HTTP/1.1 200 OK\r\n"));
     CHECK(contains(signed_, "<li><b>&lt;img src=x onerror=alert(1)&gt;</b>: <div class=\"markdown comment\">\n"
                             "<p><strong>hi</strong></p>\n</div>\n</li>"));
     CHECK_FALSE(contains(signed_, "/__dev/client.js"));   // a fragment, not a page
     // Without HTMX, a redirect back.
-    std::string plain = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n"
+    std::string plain = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" + csrf +
                                     "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\nwho=a&msg=b");
     CHECK(contains(plain, "HTTP/1.1 303 See Other\r\n"));
     CHECK(contains(plain, "Location: /\r\n"));

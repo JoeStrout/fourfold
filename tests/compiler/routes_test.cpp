@@ -462,3 +462,31 @@ TEST_CASE("compile: local links in templates must lead somewhere") {
     for (size_t at = all.find("/nowhere"); at != std::string::npos; at = all.find("/nowhere", at + 1)) count++;
     CHECK_EQ(count, 1);
 }
+
+TEST_CASE("compile: routes whose code uses the session are marked") {
+    TempDir dir;
+    dir.write("code/pages/a.html", "<!DOCTYPE html><p>{{x}}</p>");
+    dir.write("code/pages/a.ms", "render = function(req)\n  return {\"x\": session.hasIndex(\"n\")}\nend function\n");
+    dir.write("code/pages/b.ms",
+              "// session in a comment, and \"session\" in a string, don't count; nor does x.session\n"
+              "get.go = function(req)\n  x = {\"session\": 1}\n  return str(x.session)\nend function\n");
+    dir.write("code/pages/c.ms", "post.go = function(req)\n  flash \"hi\"\n  return null\nend function\n");
+    dir.write("code/pages/d.ms",
+              "import \"cart\"\nget.go = function(req)\n  return cart.count\nend function\n");
+    dir.write("code/pages/e.ms", "import \"plain\"\nget.go = function(req)\n  return \"\"\nend function\n");
+    dir.write("code/pages/f.html", "<!DOCTYPE html><p>{{flash}}</p>");
+    dir.write("code/pages/g.html", "<!DOCTYPE html><p>{{other}}</p>");
+    dir.write("code/lib/cart.ms", "import \"deeper\"\ncount = function\n  return 1\nend function\n");
+    dir.write("code/lib/deeper.ms", "peek = function\n  return session\nend function\n");
+    dir.write("code/lib/plain.ms", "x = 1\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    CHECK(route(out, "/a")->usesSession);
+    CHECK_FALSE(route(out, "/b/go")->usesSession);
+    CHECK(route(out, "/c/go")->usesSession);
+    CHECK(route(out, "/d/go")->usesSession);   // through two imports
+    CHECK_FALSE(route(out, "/e/go")->usesSession);
+    CHECK(route(out, "/f")->usesSession);      // a {{flash}} field, no code
+    CHECK_FALSE(route(out, "/g")->usesSession);
+    CHECK(contains(describe(*out.app), "/a  page  pages/a.html  fields: x  render in pages/a.ms  session"));
+}

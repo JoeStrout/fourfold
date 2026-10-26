@@ -18,9 +18,10 @@
 #include "partition/app_folder.h"
 #include "script/script_host.h"
 #include "temp_dir.h"
+#include "test_gate.h"
 
 using namespace fourfold;
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 namespace {
 
@@ -67,7 +68,7 @@ std::string libSource(int n) {
 struct Latencies {
     std::vector<double> us;
 
-    void add(Clock::duration d) { us.push_back(std::chrono::duration<double, std::micro>(d).count()); }
+    void add(SteadyClock::duration d) { us.push_back(std::chrono::duration<double, std::micro>(d).count()); }
     double pct(double p) {
         if (us.empty()) return 0;
         std::sort(us.begin(), us.end());
@@ -114,7 +115,7 @@ int main(int argc, char** argv) {
 
     auto one = [&] {
         std::promise<void> done;
-        host->run(app, quick, RequestFacts{}, [&](HandlerOutcome) { done.set_value(); });
+        host->run(app, quick, TestGate::approve(), RunContext{}, [&](HandlerOutcome) { done.set_value(); });
         done.get_future().wait();
     };
 
@@ -122,29 +123,29 @@ int main(int argc, char** argv) {
 
     // Requests with nothing else going on.
     Latencies idle;
-    auto until = Clock::now() + std::chrono::seconds(1);
-    while (Clock::now() < until) {
-        auto t = Clock::now();
+    auto until = SteadyClock::now() + std::chrono::seconds(1);
+    while (SteadyClock::now() < until) {
+        auto t = SteadyClock::now();
         one();
-        idle.add(Clock::now() - t);
+        idle.add(SteadyClock::now() - t);
     }
 
     // The same, while the whole app recompiles.
     Latencies during;
-    auto t0 = Clock::now();
+    auto t0 = SteadyClock::now();
     auto compiling = std::async(std::launch::async, [&] { return compileApp(2); });
     while (compiling.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-        auto t = Clock::now();
+        auto t = SteadyClock::now();
         one();
-        during.add(Clock::now() - t);
+        during.add(SteadyClock::now() - t);
     }
-    double compileMs = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
+    double compileMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - t0).count();
     CompileOutput second = compiling.get();
 
     // And the compile alone, for comparison.
-    auto t1 = Clock::now();
+    auto t1 = SteadyClock::now();
     CompileOutput third = compileApp(3);
-    double aloneMs = std::chrono::duration<double, std::milli>(Clock::now() - t1).count();
+    double aloneMs = std::chrono::duration<double, std::milli>(SteadyClock::now() - t1).count();
 
     std::printf("Compile: %.0f ms with requests in between, %.0f ms alone (%s)\n", compileMs, aloneMs,
                 second.ok() && third.ok() ? "ok" : "FAILED");

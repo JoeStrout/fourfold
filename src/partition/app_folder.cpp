@@ -93,15 +93,50 @@ Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
         }
     }
 
-    Fd code(::open(reals[0].second.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
-    if (!code.valid()) return osError(reals[0].second);
-    return AppFolder(std::move(root).value(), std::move(code));
+    // reals is in kPartitions order: code, data, dropbox, private/config, private/state.
+    Folders folders;
+    Fd* fds[] = {&folders.code, &folders.data, &folders.dropbox, nullptr, &folders.state};
+    for (size_t i = 0; i < reals.size(); i++) {
+        if (!fds[i]) continue;
+        *fds[i] = Fd(::open(reals[i].second.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        if (!fds[i]->valid()) return osError(reals[i].second);
+    }
+    folders.stateReal = reals[4].second;
+    return AppFolder(std::move(root).value(), std::move(folders));
 }
 
+namespace {
+
+Result<Fd> duplicate(const Fd& fd, const char* what) {
+    Fd copy(fcntl(fd.get(), F_DUPFD_CLOEXEC, 0));
+    if (!copy.valid()) return osError(what);
+    return copy;
+}
+
+}  // namespace
+
 Result<CodeTree> AppFolder::codeTree(CodeTreeLimits limits) const {
-    Fd fd(fcntl(code_.get(), F_DUPFD_CLOEXEC, 0));
-    if (!fd.valid()) return osError("code");
-    return CodeTree(std::move(fd), limits);
+    auto fd = duplicate(folders_.code, "code");
+    if (!fd) return fd.error();
+    return CodeTree(std::move(fd).value(), limits);
+}
+
+Result<DataDir> AppFolder::dataDir() const {
+    auto fd = duplicate(folders_.data, "data");
+    if (!fd) return fd.error();
+    return DataDir(std::move(fd).value());
+}
+
+Result<Dropbox> AppFolder::dropbox() const {
+    auto fd = duplicate(folders_.dropbox, "dropbox");
+    if (!fd) return fd.error();
+    return Dropbox(std::move(fd).value());
+}
+
+Result<StateDir> AppFolder::stateDir() const {
+    auto fd = duplicate(folders_.state, "private/state");
+    if (!fd) return fd.error();
+    return StateDir(std::move(fd).value(), folders_.stateReal);
 }
 
 }  // namespace fourfold

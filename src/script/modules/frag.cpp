@@ -22,7 +22,7 @@ namespace {
 
 // Renders one item into `out`; returns false with `error` set if it failed.
 bool renderOne(Run& run, const CompiledTemplate& t, Value fields, Html& out, std::string& error) {
-    RenderResult r = render(t, ValueFields(fields), run.render);
+    RenderResult r = render(t, ValueFields(fields), run.context.render);
     addWarnings(run, r.warnings);
     if (!r.ok()) {
         error = "code/" + r.error->file + (r.error->line ? " line " + std::to_string(r.error->line) : "") + ": " +

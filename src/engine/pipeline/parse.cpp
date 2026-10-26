@@ -82,7 +82,34 @@ RequestFacts::Pairs parseUrlEncoded(std::string_view text) {
     return pairs;
 }
 
-RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted) {
+namespace {
+
+// A Cookie header without the engine's own cookies (ff_session, ff_csrf, and
+// their __Host- forms): app code has no use for them, and a handler that
+// logs its headers mustn't leak a session ID.
+std::string withoutEngineCookies(const std::string& header) {
+    std::string out;
+    size_t start = 0;
+    while (start <= header.size()) {
+        size_t semi = header.find(';', start);
+        if (semi == std::string::npos) semi = header.size();
+        std::string pair = header.substr(start, semi - start);
+        size_t first = pair.find_first_not_of(" \t");
+        std::string name = first == std::string::npos ? "" : pair.substr(first);
+        bool engine = name.compare(0, 3, "ff_") == 0 || name.compare(0, 10, "__Host-ff_") == 0;
+        if (!engine && first != std::string::npos) {
+            if (!out.empty()) out += "; ";
+            out += pair.substr(first);
+        }
+        start = semi + 1;
+    }
+    return out;
+}
+
+}  // namespace
+
+RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted,
+                          std::optional<std::string>* csrfToken) {
     RequestFacts facts;
     facts.method = admitted.method;
     facts.path = admitted.path.path;
@@ -91,15 +118,27 @@ RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& adm
 
     for (const Headers::Field& f : request.headers) {
         std::string name = lower(f.name);
+        std::string value = f.value;
+        if (name == "x-csrf-token") {
+            if (csrfToken && !*csrfToken) *csrfToken = value;
+            continue;
+        }
+        bool cookie = name == "cookie";
+        if (cookie) {
+            // Field by field, before merging, so no engine cookie can hide
+            // inside another's value.
+            value = withoutEngineCookies(value);
+            if (value.empty()) continue;
+        }
         bool merged = false;
-        for (auto& [existing, value] : facts.headers) {
+        for (auto& [existing, v] : facts.headers) {
             if (existing == name) {
-                value += ", " + f.value;
+                v += (cookie ? "; " : ", ") + value;   // Cookie fields join with "; " (RFC 6265 §5.4)
                 merged = true;
                 break;
             }
         }
-        if (!merged) facts.headers.emplace_back(name, f.value);
+        if (!merged) facts.headers.emplace_back(name, value);
     }
     for (auto& [name, value] : facts.headers) value = validUtf8(std::move(value));
 
@@ -108,6 +147,14 @@ RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& adm
         std::string mediaType = type ? lower(type->substr(0, type->find(';'))) : "";
         while (!mediaType.empty() && mediaType.back() == ' ') mediaType.pop_back();
         if (mediaType == "application/x-www-form-urlencoded") facts.form = parseUrlEncoded(request.body);
+    }
+    for (auto it = facts.form.begin(); it != facts.form.end();) {
+        if (it->first == "_csrf") {
+            if (csrfToken && !*csrfToken) *csrfToken = it->second;
+            it = facts.form.erase(it);
+        } else {
+            ++it;
+        }
     }
     return facts;
 }

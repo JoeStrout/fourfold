@@ -9,6 +9,7 @@
 #include "http/message.h"
 #include "partition/code_tree.h"
 #include "pipeline/stages.h"
+#include "policy/policy_gate.h"
 #include "script/script_host.h"
 
 namespace fourfold {
@@ -30,11 +31,12 @@ public:
 
     // Handles one request, and calls `done` exactly once with the response:
     // before returning, for anything that runs no code, or later, on the
-    // script thread, when a handler finishes. (A transport that needs the
-    // response on its own thread posts it there.)
+    // script thread or a worker, when a handler finishes. (A transport that
+    // needs the response on its own thread posts it there.)
     void handle(const HttpRequest& request, Done done) const;
 
 private:
+    PolicyGate gate_;
     mutable std::mutex appMutex_;
     std::shared_ptr<const CompiledApp> app_;   // guarded by appMutex_; swapped on recompile
     CodeTree code_;

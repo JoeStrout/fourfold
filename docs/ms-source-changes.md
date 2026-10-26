@@ -8,8 +8,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 
 | # | Change | Priority | Workaround today |
 |---|---|---|---|
-| 1 | Per-VM memory accounting and limit | **Before M5** | None adequate |
-| 2 | An async-safe "call this function with these arguments" for intrinsics | **Before M5** | A stub that reads two globals |
+| 1 | Per-VM memory accounting and limit | **High** (M5 shipped `fourfold serve` without it) | None adequate |
+| 2 | An async-safe "call this function with these arguments" for intrinsics | High (`data.update` uses the workaround) | A stub that reads two globals |
 | 3 | `Run` reports the instructions it executed | High | Count whole slices |
 | 4 | Intrinsics can charge extra instructions | Medium | None |
 | 5 | Built-in type maps per VM (or copy-on-write) | Medium | Frozen for everyone |
@@ -21,7 +21,7 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 | 11 | `Globals` id counter that can't overflow | Low (easy) | None |
 | 12 | `RunFunction` fails cleanly if the callee yields or waits | Low | Never use it |
 | 13 | Not-done intrinsics yield by default | Low | Fourfold's intrinsics set `yielding` themselves |
-| 14 | Bytecode serialization | Later (M5 decides, M10) | Recompile |
+| 14 | Bytecode serialization | Low (M5: not needed for v1) | Compile only the requested page |
 | 15 | A GC per thread | Later (M11) | Several processes |
 | 16 | Resumable compiling (one file in slices) | Low | Compile a file at a time |
 
@@ -38,7 +38,7 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 - A first version could count bytes *allocated* (cumulative, like an instruction budget), which is simple and deterministic. Counting *live* bytes is more precise, but needs the GC to credit frees back to their VM.
 
 **Workaround today.** None that's adequate:
-- `fourfold dev` listens only on localhost;
+- `fourfold dev` listens only on localhost (but since M5, `fourfold serve` doesn't, by decision; it says at startup that there's no per-request memory limit);
 - the wall-clock budget bounds how long a hog can grow;
 - `MAX_COLLECTION_SIZE` (set to 16 M) stops single huge allocations.
 
@@ -216,11 +216,11 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 **Suggested shape.** Save a compiled program (functions and their constants) to bytes, and load it back.
 
-**Workaround today.** Recompile. Since M3, compiling runs on the script thread, a file at a time, between requests; measured, that's good enough (m3-results.md).
+**Workaround today.** Recompile. Since M3, compiling runs on the script thread, a file at a time, between requests; measured, that's good enough (m3-results.md). For CGI mode, M5 measured cold starts (m5-results.md): compiling the whole app per request costs about 3.4 ms per 100-line page, too slow for a large app, but CGI mode can cache everything else and compile only the requested page's file and its imports, a few milliseconds. So this isn't needed for v1.
 
 **Benefit.**
 - Compiling could run in a separate process that hands back a serialized compiled app, isolating long compiles from serving. M3 didn't need this.
-- In CGI mode (M10), a request can load the cached compiled app from `private/state/` instead of recompiling every `.ms` file on a cold start (overview §8; risk R8).
+- In CGI mode (M10), a request could load the requested page's bytecode instead of compiling it: a few milliseconds saved per request.
 
 ## 15. A GC per thread
 

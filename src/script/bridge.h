@@ -19,6 +19,9 @@ std::string toStdString(MiniScript::Value v);
 // becomes U+FFFD.
 MiniScript::Value toValue(const std::string& s);
 
+// A Datum as a MiniScript value: new lists and maps, not frozen.
+MiniScript::Value toValue(const Datum& d);
+
 // The inert check (Arch §4): null, finite numbers, strings, and lists and
 // maps of them (map keys must be strings; `__isa` is left out). Fails, with
 // `error` set, on functions, handles, error values, non-finite numbers, and

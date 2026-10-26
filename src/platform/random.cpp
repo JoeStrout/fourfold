@@ -34,6 +34,12 @@ void secureRandomBytes(void* out, size_t size) {
 #endif
 }
 
+std::string randomBytes(size_t count) {
+    std::string out(count, '\0');
+    secureRandomBytes(out.data(), count);
+    return out;
+}
+
 std::string randomBase64(size_t bytes) {
     static const char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::vector<unsigned char> raw(bytes);

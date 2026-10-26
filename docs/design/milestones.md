@@ -7,7 +7,7 @@
 - **Milestone 1 is a minimal, working skeleton**: it serves static pages, but through the real component structure, so every later milestone fills in a component rather than restructuring one.
 - **After that, risk decides the order.** The milestones that come first are the ones whose outcome could change the design or force large rewrites: the threading model, per-request VM cost, swapping compiled apps, and the template security core. Features that are large but well understood (TLS, job scheduling, the dev panels) come later, when the foundations under them are settled.
 - **Each milestone ends with something runnable**, a sample app that exercises what's new, and automated tests. A milestone isn't done until its exit criteria are met, including any measurements.
-- **Security features arrive complete or not at all.** A milestone may leave a feature out, but never ships a weakened version of one. Where an early milestone runs without a protection that comes later (e.g. CSRF before M5), it runs only in dev mode on localhost, and says so at startup.
+- **Security features arrive complete or not at all.** A milestone may leave a feature out, but never ships a weakened version of one. Where an early milestone runs without a protection that comes later (e.g. CSRF before M5), it runs only in dev mode on localhost, and says so at startup. (From M5, `fourfold serve` runs on other addresses without sign-in, rate limits, or a per-request memory limit, and says so at startup.)
 
 ---
 
@@ -128,6 +128,8 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** the guestbook and a visitor counter persist across restarts; a concurrency test (many clients hitting `data.increment` and one session from several tabs) gives exact counts and no lost updates; a session over the cap returns a 500 without saving; the CGI decision is written down.
 
+**Decisions made here** (details and numbers in [m5-results.md](m5-results.md)): R7 retired. Sessions are in SQLite (`private/state/state.db`), with hashed IDs; a run that uses one parks until its lock is granted and it's loaded, and saving it after the run adds no wait. A session adds about 0.25 ms to a request. Whether a route uses the session is decided at compile time (its code names `session` or `flash`, or its page has `{{flash}}`), since MS2 can't detect a map's first access. Data files are values (`.json`, replaced atomically) or logs (`.jsonl`, appended); `file.update` became `data.update`, built on M2's callback stub. The CSRF token comes from a separate cookie, not the session, so visitors who don't write `session` still cost no record. The `Datum` codec is JSON. R8 checked: a CGI cold start is about 5 ms for a small app, but compiling grows with the app, so M10 caches the compiled app's plain parts and compiles only the requested page; **bytecode serialization isn't needed for v1**. Counters and sessions stay exact across concurrent CGI processes. The localhost-only restriction is lifted by a new `fourfold serve`, **without** the per-VM memory limit R4 called for: an accepted risk, stated at startup, until the MS2 change lands.
+
 ---
 
 ## M6 — Configuration, auth, and access control
@@ -202,7 +204,7 @@ The risks most likely to change the design, and where each is retired:
 **Goal:** the reduced hosting mode of §8, building on the M5 spike.
 
 **Scope:**
-- The CGI and FastCGI adapters; caching the compiled app in `private/state/` (with bytecode serialization, if M5 decided it's needed); recompiling when `code/` changes or `.deploy` is touched.
+- The CGI and FastCGI adapters; caching the compiled app's plain parts in `private/state/`, and compiling per request only the requested page's `.ms` file and its imports (M5 decided bytecode serialization isn't needed); recompiling when `code/` changes or `.deploy` is touched.
 - File-based locks for sessions and the schema lock; migrations run by the first request that sees new code.
 - `fourfold cgi-setup` (the entry point and `.htaccess`, with the app folder outside the web root); refusing to start if the app folder is inside the web root.
 - `fourfold run-jobs` for cron.

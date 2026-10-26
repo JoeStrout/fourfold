@@ -40,8 +40,8 @@ std::string describeMs(std::chrono::milliseconds ms) {
 
 // --- On the script thread ---
 
-void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request,
-                                RenderOptions render, ScriptHost::Done done) {
+void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RunContext context,
+                                ScriptHost::Done done) {
     const ScriptBundle* bundle = app ? app->scripts.get() : nullptr;
     const PageProgram* page = bundle ? bundle->page(handler.source) : nullptr;
     const HandlerStub* stub = bundle ? bundle->stub(handler) : nullptr;
@@ -61,11 +61,34 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
     run->page = page;
     run->stub = stub;
     run->handler = std::move(handler);
-    run->request = std::move(request);
-    run->render = std::move(render);
+    run->context = std::move(context);
     run->done = std::move(done);
     prepareInterpreter(*run, page->functions);
+    std::shared_ptr<SessionAccess> session = run->context.session;
+    if (!session) {
+        schedule(std::move(run));
+        return;
+    }
+
+    // Load the session (after its lock) before any of the page's code runs,
+    // parked meanwhile; the wall-clock budget covers the wait.
+    run->parked = true;
+    uint64_t id = nextRunId;   // schedule() gives it this id
     schedule(std::move(run));
+    session->open([this, id](Result<SessionInput> input) {
+        auto shared = std::make_shared<Result<SessionInput>>(std::move(input));
+        loop->post([this, id, shared] {
+            Run* r = find(id);
+            if (!r) return;
+            if (!*shared) {
+                finish(*r, errorOutcome("the session couldn't be loaded: " + shared->error().message, r->fileName));
+                return;
+            }
+            r->flashWaiting = shared->value().flash;
+            r->interp.SetGlobalValue("session", toValue(shared->value().app));
+            resume(id);
+        });
+    });
 }
 
 void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
@@ -82,9 +105,12 @@ void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
                                          describeMs(options.budget.wallClock) + ")",
                                r.fileName));
     });
+    bool parked = run->parked;   // a run waiting for its session starts parked
     runs.emplace(id, std::move(run));
-    runnable.push_back(id);
-    schedulePump();
+    if (!parked) {
+        runnable.push_back(id);
+        schedulePump();
+    }
 }
 
 void ScriptHost::Impl::schedulePump() {
@@ -131,7 +157,7 @@ bool ScriptHost::Impl::slice(Run& run) {
             // The top level has defined the page's functions; now call the
             // handler, in the same namespace, through its stub.
             run.phase = Run::Phase::Handler;
-            run.interp.SetGlobalValue("_ff_req", makeRequestValue(run.request));
+            run.interp.SetGlobalValue("_ff_req", makeRequestValue(run.context.request));
             vm.Reset(run.stub->functions, run.interp.GetGlobals());
             return true;
         }
@@ -152,6 +178,12 @@ bool ScriptHost::Impl::slice(Run& run) {
 
 void ScriptHost::Impl::finish(Run& run, HandlerOutcome outcome) {
     if (run.deadline) loop->cancelTimer(run.deadline);
+    // Locks a data.update was holding when the run ended (an error, or the
+    // budget ran out mid-update).
+    for (const auto& [name, ticket] : run.dataLocks) {
+        if (run.context.data) run.context.data->locks().release(ticket);
+    }
+    run.dataLocks.clear();
     ScriptHost::Done done = std::move(run.done);
     if (run.discovered) run.discovered(run, outcome);
     run.interp.Reset();   // releases the namespace; the VM goes with the interpreter
@@ -162,6 +194,21 @@ void ScriptHost::Impl::finish(Run& run, HandlerOutcome outcome) {
 
 void ScriptHost::Impl::park(Run& run) {
     run.parked = true;
+}
+
+Run* ScriptHost::Impl::find(uint64_t runId) {
+    auto it = runs.find(runId);
+    return it == runs.end() ? nullptr : it->second.get();
+}
+
+void ScriptHost::Impl::complete(uint64_t runId, AsyncResult result) {
+    auto shared = std::make_shared<AsyncResult>(std::move(result));
+    loop->post([this, runId, shared] {
+        Run* r = find(runId);
+        if (!r || !r->parked) return;
+        r->async = std::move(*shared);
+        resume(runId);
+    });
 }
 
 void ScriptHost::Impl::resume(uint64_t runId) {
@@ -238,25 +285,25 @@ CompiledScripts ScriptHost::compileScripts(const std::vector<CodeFile>& pages, c
     }
 }
 
-void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done,
-                     RenderOptions render) {
+void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, const GateApproval&,
+                     RunContext context, Done done) {
     // std::function needs a copyable callable, so the arguments ride in a
     // shared struct.
     struct Args {
         std::shared_ptr<const CompiledApp> app;
         HandlerRef handler;
-        RequestFacts request;
-        RenderOptions render;
+        RunContext context;
         Done done;
     };
-    auto args = std::make_shared<Args>(
-        Args{std::move(app), std::move(handler), std::move(request), std::move(render), std::move(done)});
+    auto args = std::make_shared<Args>(Args{std::move(app), std::move(handler), std::move(context), std::move(done)});
     Impl* impl = impl_.get();
     impl->loop->post([impl, args] {
-        impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->request),
-                       std::move(args->render), std::move(args->done));
+        impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->context),
+                       std::move(args->done));
     });
 }
+
+WorkerPool& ScriptHost::workers() { return *impl_->workers; }
 
 ScriptHost::Stats ScriptHost::stats(bool collectFirst) {
     Stats s;

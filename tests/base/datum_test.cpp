@@ -53,3 +53,74 @@ TEST_CASE("toJson: lists and maps") {
                           {"a", Datum::map({{"k", Datum::number(0.5)}})}});
     CHECK_EQ(toJson(d), "{\"a\":{\"k\":0.5},\"z\":[1,\"two\",null]}");
 }
+
+TEST_CASE("parseJson: reads back what toJson writes") {
+    using fourfold::parseJson;
+    Datum value = Datum::map({
+        {"n", Datum::number(-12.5)},
+        {"tiny", Datum::number(1e-300)},
+        {"s", Datum::string("a\"b\\c\n</script>\x01 \xE2\x80\xA8 \xF0\x9F\x98\x80 caf\xC3\xA9")},
+        {"nul", Datum::string(std::string("a\0b", 3))},
+        {"list", Datum::list({Datum(), Datum::number(0), Datum::list({}), Datum::map({})})},
+    });
+    auto back = parseJson(toJson(value));
+    REQUIRE(back.ok());
+    CHECK(back.value() == value);
+    CHECK_EQ(toJson(back.value()), toJson(value));
+    auto fromScript = parseJson(fourfold::toJsonForScript(value));
+    REQUIRE(fromScript.ok());
+    CHECK(fromScript.value() == value);
+}
+
+TEST_CASE("parseJson: accepts ordinary JSON") {
+    using fourfold::parseJson;
+    auto r = parseJson(" { \"b\" : [ 1 , 2.5e2 , -0 , true , false ] , \"a\" : \"\\u00e9\\ud83d\\ude00\\/\" } ");
+    REQUIRE(r.ok());
+    const auto& m = r.value().asMap();
+    CHECK_EQ(m.at("a").asString(), "\xC3\xA9\xF0\x9F\x98\x80/");
+    const auto& l = m.at("b").asList();
+    CHECK_EQ(l[1].asNumber(), 250);
+    CHECK_EQ(toJson(l[2]), "0");
+    CHECK_EQ(l[3].asNumber(), 1);   // MiniScript's true
+    CHECK_EQ(l[4].asNumber(), 0);
+}
+
+TEST_CASE("parseJson: refuses what isn't valid") {
+    using fourfold::parseJson;
+    const char* bad[] = {
+        "", " ", "{", "[1,]", "{\"a\":1,}", "{\"a\" 1}", "{a:1}", "[1 2]", "01", "1.", ".5", "-", "1e",
+        "+1", "NaN", "Infinity", "1e999", "\"abc", "\"\\x\"", "\"\\u12\"", "\"\\ud800\"", "\"\\udc00\"",
+        "\"\\ud800\\u0041\"", "\"a\nb\"", "\"\xC0\xAE\"", "\"\xFF\"", "nul", "[1] 2", "{\"a\":1,\"a\":2}",
+        "'a'",
+    };
+    for (const char* text : bad) {
+        INFO(text);
+        auto r = parseJson(text);
+        REQUIRE_FALSE(r.ok());
+        CHECK(r.error().code == fourfold::ErrorCode::Invalid);
+    }
+}
+
+TEST_CASE("parseJson: limits") {
+    using fourfold::parseJson;
+    fourfold::JsonLimits limits;
+    limits.maxDepth = 3;
+    CHECK(parseJson("[[[1]]]", limits).ok());   // the 1 is at depth 3, as in the bridge
+    CHECK_FALSE(parseJson("[[[[1]]]]", limits).ok());
+    limits.maxBytes = 4;
+    auto r = parseJson("[1,2]", limits);
+    REQUIRE_FALSE(r.ok());
+    CHECK(r.error().code == fourfold::ErrorCode::TooLarge);
+    // The default depth matches what scripts can store.
+    std::string deep(64, '[');
+    deep += std::string(64, ']');
+    CHECK(parseJson(deep).ok());
+}
+
+TEST_CASE("toJson: whole numbers are written whole") {
+    CHECK_EQ(toJson(Datum::number(400)), "400");
+    CHECK_EQ(toJson(Datum::number(-1000000)), "-1000000");
+    CHECK_EQ(toJson(Datum::number(9007199254740992.0)), "9007199254740992");
+    CHECK_EQ(toJson(Datum::number(1e16)), "1e+16");
+    CHECK_EQ(toJson(Datum::number(2.5e-7)), "2.5e-07");
+}

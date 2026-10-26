@@ -144,6 +144,11 @@ TEST_CASE("parse: attributes refused with or without fields") {
     refused("<div hx-vals=\"js:{a: f()}\">", "js: evaluates JavaScript");
     refused("<div hx-headers=' javascript:{}'>", "js: evaluates JavaScript");
     refused("<script nonce=\"x\"></script>", "don't write nonce attributes");
+    CHECK(pageError("<!DOCTYPE html><html><body hx-headers='{\"a\": \"b\"}'></body></html>")
+              .find("the engine sets hx-headers on <body>") != std::string::npos);
+    CHECK(pageError("<!DOCTYPE html><html><body data-hx-headers='{}'></body></html>")
+              .find("the engine sets hx-headers on <body>") != std::string::npos);
+    CHECK(fragmentError("<div hx-headers='{\"a\": \"b\"}'></div>").empty());
     refused("<meta name=\"htmx-config\" content='{\"allowEval\": true}'>", "htmx's settings are fixed");
     CHECK_EQ(fragmentError("<div hx-vals='{\"a\": 1}'>"), "");
 }

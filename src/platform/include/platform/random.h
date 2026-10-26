@@ -11,6 +11,9 @@ namespace fourfold {
 // can't supply them: there's no safe fallback.
 void secureRandomBytes(void* out, size_t size);
 
+// `count` random bytes.
+std::string randomBytes(size_t count);
+
 // `bytes` random bytes, as base64 (RFC 4648, with padding): the form a CSP
 // nonce takes.
 std::string randomBase64(size_t bytes);

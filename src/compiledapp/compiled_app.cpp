@@ -84,6 +84,7 @@ std::string describe(const CompiledApp& app) {
         for (const std::optional<HandlerRef>* h : {&entry.render, &entry.get, &entry.post}) {
             if (*h) s += "  " + (*h)->label() + " in " + (*h)->source.str();
         }
+        if (entry.usesSession) s += "  session";
         s += "\n";
     }
     if (!app.templates.fragments().empty()) {

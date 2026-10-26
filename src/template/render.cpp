@@ -134,6 +134,15 @@ struct Renderer {
                 headAt = out.size();
                 return true;
             case Kind::PostForm:
+                if (!options.csrfToken.empty()) {
+                    out += "<input type=\"hidden\" name=\"_csrf\" value=\"" + escapeHtml(options.csrfToken) + "\">";
+                }
+                return true;
+            case Kind::BodyStart:
+                if (!options.csrfToken.empty()) {
+                    out += " hx-headers=\"" + escapeHtml("{\"X-CSRF-Token\": \"" + options.csrfToken + "\"}") + "\"";
+                }
+                return true;
             case Kind::Include:
                 return true;
             case Kind::Field: {

@@ -8,3 +8,5 @@ form { display: grid; gap: 0.5em; margin: 1.5em 0; }
 input, textarea, button { font: inherit; padding: 0.3em 0.5em; }
 textarea { min-height: 4em; }
 .note { color: #777; font-size: 0.9em; }
+.flash { background: #eef7ee; border-left: 4px solid #5a5; padding: 0.4em 0.8em; }
+.flash:empty { display: none; }

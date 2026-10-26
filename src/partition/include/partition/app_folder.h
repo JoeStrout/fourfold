@@ -19,6 +19,7 @@
 #include "base/fd.h"
 #include "base/result.h"
 #include "partition/code_tree.h"
+#include "partition/data_dir.h"
 
 namespace fourfold {
 
@@ -39,12 +40,20 @@ public:
 
     // A read-only view of code/.
     Result<CodeTree> codeTree(CodeTreeLimits limits = {}) const;
+    // data/, dropbox/ and private/state/. Each call opens a new handle.
+    Result<DataDir> dataDir() const;
+    Result<Dropbox> dropbox() const;
+    Result<StateDir> stateDir() const;
 
 private:
-    AppFolder(std::string root, Fd code) : root_(std::move(root)), code_(std::move(code)) {}
+    struct Folders {
+        Fd code, data, dropbox, state;
+        std::string stateReal;   // private/state/'s real path, for SQLite
+    };
+    AppFolder(std::string root, Folders folders) : root_(std::move(root)), folders_(std::move(folders)) {}
 
     std::string root_;
-    Fd code_;
+    Folders folders_;
 };
 
 }  // namespace fourfold

@@ -19,12 +19,17 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "appdata/data_files.h"
+#include "base/datum.h"
 #include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
+#include "partition/data_dir.h"
+#include "platform/worker_pool.h"
 #include "template/template.h"
 
 namespace fourfold {
@@ -67,6 +72,64 @@ struct RequestFacts {
     Pairs form;            // decoded url-encoded POST body; raw strings
 };
 
+// The visitor's session as a run starts (overview §2, Session storage).
+struct SessionInput {
+    Datum app = Datum::map({});           // the `session` map
+    std::optional<std::string> flash;     // a flash message waiting to be shown
+};
+
+// What a run did to the session, for the engine to save after it.
+struct SessionResult {
+    // The `session` map at the end, as canonical JSON, checked to be inert
+    // and within the size cap.
+    std::string app;
+    // A flash message set by this run (`flash "..."`), for the next page.
+    std::optional<std::string> flashSet;
+    // The waiting flash message went into a {{flash}} field of the page
+    // rendered, so it's been shown.
+    bool flashShown = false;
+};
+
+// The engine's side of a run's session: loading it (after taking its lock).
+// The script host calls open() once, on the script thread, before the
+// page's code runs; the run waits, parked, under its wall-clock budget,
+// until `ready` is called (from any thread). Saving is the engine's, after
+// the run.
+class SessionAccess {
+public:
+    virtual ~SessionAccess() = default;
+    virtual void open(std::function<void(Result<SessionInput>)> ready) = 0;
+};
+
+// Proof that the policy gate allowed a request (Arch §7, "Access is checked
+// before any handler"): ScriptHost::run requires one, and only PolicyGate can
+// make one. (Tests make theirs through TestGate, in tests/support.)
+class GateApproval {
+private:
+    GateApproval() = default;
+    friend class PolicyGate;
+    friend struct TestGate;
+};
+
+// Everything one run may use (Arch §5, "The RunContext"): the request, and
+// the services the engine gives this kind of run. A module whose service is
+// null isn't available to the run (its functions return an error).
+struct RunContext {
+    RequestFacts request{};
+    // The response's CSP nonce and the Markdown stylesheet, for the page and
+    // every frag() the run renders.
+    RenderOptions render{};
+    // Set for a route whose code uses `session` or `flash`. Must stay alive
+    // until the run is done.
+    std::shared_ptr<SessionAccess> session{};
+    // The largest `session` map, serialized; over it, the run fails.
+    size_t sessionMaxBytes = 64 * 1024;
+    // The app's data/ (the `data` module). Must outlive the run.
+    DataFiles* data = nullptr;
+    // The app's dropbox/ (the `dropbox` module). Must outlive the run.
+    const Dropbox* dropbox = nullptr;
+};
+
 // A compile or runtime error in a script, located for the developer.
 struct ScriptError {
     std::string message;    // "Undefined Identifier: 'x' is unknown in this context"
@@ -99,6 +162,9 @@ struct HandlerOutcome {
     std::string location;      // Redirect
     int status = 0;            // Status
     ScriptError error;         // Error
+    // If the run had session access and its handler finished without an
+    // error: what it did to the session.
+    std::optional<SessionResult> session;
 };
 
 // The handlers found in one page's .ms file, by running its top level once at
@@ -107,6 +173,10 @@ struct PageHandlers {
     bool render = false;
     std::vector<std::string> get;    // the keys of `get`, sorted
     std::vector<std::string> post;   // the keys of `post`, sorted
+    // The file, or a code/lib/ file it imports, mentions `session` or
+    // `flash`: its runs get the session (loaded and locked). Requests to
+    // pages that don't never wait for a session's lock.
+    bool usesSession = false;
 };
 
 struct CompiledScripts {
@@ -145,13 +215,16 @@ public:
     CompiledScripts compileScripts(const std::vector<CodeFile>& pages,
                                    const std::vector<CodeFile>& libs) override;
 
-    // Runs `handler` from `app` for one request, in a fresh VM. `done` is
-    // called exactly once, on the script thread, unless the host is destroyed
-    // first. `app` stays pinned (with its bytecode) until then. Templates the
-    // run renders (the page, and every frag()) use `render`: the response's
-    // CSP nonce, and the Markdown stylesheet.
-    void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request, Done done,
-             RenderOptions render = {});
+    // Runs `handler` from `app` for one request, in a fresh VM, with the
+    // request and services in `context`. `done` is called exactly once, on
+    // the script thread, unless the host is destroyed first. `app` stays
+    // pinned (with its bytecode) until then.
+    void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, const GateApproval& approval,
+             RunContext context, Done done);
+
+    // The pool that does work that would block the script thread. Engines
+    // may share it (e.g. to save sessions).
+    WorkerPool& workers();
 
     // For tests and measurements; each call runs on the script thread and waits.
     struct Stats {

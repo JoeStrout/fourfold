@@ -4,7 +4,9 @@
 
 #include <deque>
 #include <functional>
+#include <map>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <unordered_map>
 
@@ -13,8 +15,17 @@
 #include "platform/event_loop.h"
 #include "platform/worker_pool.h"
 #include "script/script_host.h"
+#include "state/lock_service.h"
 
 namespace fourfold {
+
+// What work done off the script thread for an intrinsic brings back: plain
+// data, turned into a MiniScript value when the intrinsic resumes.
+struct AsyncResult {
+    std::optional<Error> error;
+    Datum value;
+    bool found = true;   // false: there was nothing to read
+};
 
 // One VM run: a request's handler, or (at compile time) a page's top level.
 struct Run {
@@ -37,11 +48,24 @@ struct Run {
     const PageProgram* page = nullptr;
     const HandlerStub* stub = nullptr;
     HandlerRef handler;
-    RequestFacts request;
-    RenderOptions render;                     // for the page and every frag()
+    RunContext context;                       // the request, render options, and services
     std::vector<RenderWarning> warnings;      // from frag(), so far
     ScriptHost::Done done;
     EventLoop::TimerId deadline = 0;
+
+    // Session runs only: the flash message waiting when the run started,
+    // one set by `flash`, and whether the rendered page showed the first.
+    std::optional<std::string> flashWaiting;
+    std::optional<std::string> flashSet;
+    bool flashShown = false;
+
+    // An async intrinsic's result, set just before the run resumes.
+    std::optional<AsyncResult> async;
+    // Data locks this run holds (data.update), by data name; released when
+    // the run ends, however it ends.
+    std::map<std::string, LockService::Ticket> dataLocks;
+    // The names of the data.update calls in progress, innermost last.
+    std::vector<RelPath> updates;
 
     // Discovery runs only: called as the run finishes, before its namespace
     // is released, with an Error outcome if the top level failed.
@@ -68,8 +92,8 @@ struct ScriptHost::Impl {
     bool pumpScheduled = false;
 
     // Starting and finishing request runs (scheduler.cpp).
-    void startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RequestFacts request,
-                  RenderOptions render, ScriptHost::Done done);
+    void startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RunContext context,
+                  ScriptHost::Done done);
     // Schedules a prepared run (a request or a discovery run), with its
     // wall-clock deadline.
     void schedule(std::unique_ptr<Run> run);
@@ -84,6 +108,11 @@ struct ScriptHost::Impl {
     // dropped; it then does nothing.
     void park(Run& run);
     void resume(uint64_t runId);
+    // Thread-safe: hands `result` to a parked run and resumes it (on the
+    // script thread). Does nothing if the run has ended.
+    void complete(uint64_t runId, AsyncResult result);
+    // The live run with this id, or null. Script thread only.
+    Run* find(uint64_t runId);
 
     // Compiling (compile.cpp). One file at a time, each in its own posted
     // task, with each page's top level run as a scheduled discovery run, so
@@ -101,11 +130,17 @@ void initMiniScriptRuntime(const ScriptHostOptions& options);
 // engine provides before a page's top level runs (`get` and `post`).
 void prepareInterpreter(Run& run, const MiniScript::List<MiniScript::FuncDef>& program);
 
+// "return __ffCallback(__ffCallbackArg)", compiled once (runtime.cpp): how an
+// intrinsic calls a script function without breaking the VM's time slicing.
+// Set the two globals, then push it with ManuallyPushCall.
+MiniScript::FuncDef callbackStub();
+
 // A located error from a MiniScript error value.
 ScriptError scriptErrorFrom(MiniScript::Value error, const std::string& fallbackFile);
 
 // The outcome of a finished handler phase (bridge.cpp), read from the run's
-// `_ff_result` global.
+// `_ff_result` global; for a session run, with what it did to the session
+// (or an Error, if the session can't be saved).
 HandlerOutcome outcomeFromResult(Run& run);
 
 // The frozen `req` map (bridge.cpp).

@@ -17,6 +17,9 @@
 #include "partition/paths.h"
 #include "pipeline/hooks.h"
 #include "script/script_host.h"
+#include "state/engine_log.h"
+#include "state/lock_service.h"
+#include "state/session_store.h"
 
 namespace fourfold {
 
@@ -34,6 +37,25 @@ struct EngineOptions {
     // The dev tools' part in requests: /__dev/ routes, the injected client
     // script, and the error page. Null in production. Must outlive the engine.
     EngineHooks* hooks = nullptr;
+
+    // The app's state (M5). Each may be null, which turns its feature off: a
+    // route that uses the session then runs with none (and can't keep one).
+    // All must outlive the engine.
+    SessionStore* sessions = nullptr;
+    LockService* sessionLocks = nullptr;   // required with `sessions`
+    DataFiles* data = nullptr;
+    const Dropbox* dropbox = nullptr;
+    // The engine log: script errors and refused requests. May be null.
+    EngineLog* log = nullptr;
+
+    // The site is reached over HTTPS (perhaps through a proxy that ends
+    // TLS): cookies get Secure and the __Host- prefix, and a request's own
+    // origin is https://<Host>. Off for dev mode's plain HTTP on localhost.
+    bool https = false;
+    // The engine's secret key, for CSRF tokens (loadOrCreateEngineKey). If
+    // empty, a random one is made for this engine, so tokens last only as
+    // long as the process.
+    std::string engineKey{};
 };
 
 // The host names `fourfold dev` answers to.
@@ -79,7 +101,10 @@ RequestFacts::Pairs parseUrlEncoded(std::string_view text);
 
 // The facts a handler's `req` is built from (overview §4, The request
 // object): the method, path, query, headers, and an url-encoded POST body.
-RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted);
+// The CSRF token field (_csrf) is left out of the form, and returned in
+// `csrfToken` if asked for.
+RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted,
+                          std::optional<std::string>* csrfToken = nullptr);
 
 // --- Reserved: the engine's own files, under /__fourfold/. ---
 
@@ -100,8 +125,10 @@ RenderOptions renderOptionsFor(const CompiledApp& app, std::string nonce);
 // Static files, pages with no code, Markdown pages, redirects and errors.
 // Not for routes with a handler (decision.handler set), which go to the
 // ScriptHost.
+// `fields` fills a page template's fields (a code-less page's {{flash}});
+// null leaves them empty. A page (RouteKind::Page) never reads `code`.
 HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, const CodeTree& code,
-                      const RenderOptions& render);
+                      const RenderOptions& render, const FieldSource* fields = nullptr);
 
 // --- Respond: turn results into responses. ---
 

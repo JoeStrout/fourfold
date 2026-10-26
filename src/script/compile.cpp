@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <set>
 
 #include "bridge.h"
 #include "host_impl.h"
@@ -76,6 +77,73 @@ std::string callFor(const std::string& target, Value function) {
     return takesReq ? target + "(_ff_req)" : target;
 }
 
+// What a file's code refers to, found by scanning its tokens: whether it
+// names the `session` or `flash` globals, and which libs it imports.
+struct References {
+    bool session = false;
+    std::set<std::string> imports;
+    bool dynamicImport = false;   // import of something other than a string literal
+};
+
+References scanReferences(const std::string& source) {
+    References refs;
+    size_t i = 0, n = source.size();
+    char prevSignificant = 0;     // the last non-space character before this token
+    bool afterImport = false;
+    while (i < n) {
+        char c = source[i];
+        if (c == '/' && i + 1 < n && source[i + 1] == '/') {   // comment
+            while (i < n && source[i] != '\n') i++;
+            continue;
+        }
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            i++;
+            continue;
+        }
+        if (c == '"') {   // string; "" is a quote inside it
+            i++;
+            std::string text;
+            while (i < n) {
+                if (source[i] == '"') {
+                    if (i + 1 < n && source[i + 1] == '"') {
+                        text += '"';
+                        i += 2;
+                        continue;
+                    }
+                    break;
+                }
+                text += source[i++];
+            }
+            i++;
+            if (afterImport) refs.imports.insert(text);
+            afterImport = false;
+            prevSignificant = '"';
+            continue;
+        }
+        if (afterImport && c != '(') {
+            refs.dynamicImport = true;
+            afterImport = false;
+        }
+        if (std::isalpha(static_cast<unsigned char>(c)) || c == '_' || (static_cast<unsigned char>(c) & 0x80)) {
+            size_t start = i;
+            while (i < n && (std::isalnum(static_cast<unsigned char>(source[i])) || source[i] == '_' ||
+                             (static_cast<unsigned char>(source[i]) & 0x80))) {
+                i++;
+            }
+            std::string word = source.substr(start, i - start);
+            bool member = prevSignificant == '.';   // x.session isn't the global
+            if (!member && (word == "session" || word == "flash")) refs.session = true;
+            afterImport = !member && word == "import";
+            prevSignificant = 'a';
+            continue;
+        }
+        prevSignificant = c;
+        i++;
+    }
+    if (afterImport) refs.dynamicImport = true;
+    return refs;
+}
+
 }  // namespace
 
 namespace {
@@ -91,6 +159,7 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
 
     CompiledScripts out;
     std::unique_ptr<ScriptBundle> bundle = std::make_unique<ScriptBundle>();
+    std::map<std::string, References> libRefs;   // by import name
     std::map<std::string, List<FuncDef>> stubCache;
     bool failed = false;
     size_t next = 0;   // the next step: libs first, then pages
@@ -138,6 +207,31 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         }
         bundle->root(module);
         bundle->libs[importName] = module;
+        libRefs[importName] = scanReferences(source);
+    }
+
+    // Whether code with these references can reach `session` or `flash`,
+    // directly or through the libs it imports (and theirs).
+    bool usesSession(const References& refs) const {
+        if (refs.session) return true;
+        std::set<std::string> seen;
+        std::vector<std::string> todo(refs.imports.begin(), refs.imports.end());
+        if (refs.dynamicImport) {
+            for (const auto& [name, r] : libRefs) todo.push_back(name);
+        }
+        while (!todo.empty()) {
+            std::string name = todo.back();
+            todo.pop_back();
+            if (!seen.insert(name).second) continue;
+            auto it = libRefs.find(name);
+            if (it == libRefs.end()) continue;
+            if (it->second.session) return true;
+            todo.insert(todo.end(), it->second.imports.begin(), it->second.imports.end());
+            if (it->second.dynamicImport) {
+                for (const auto& [other, r] : libRefs) todo.push_back(other);
+            }
+        }
+        return false;
     }
 
     void compilePage(const CodeFile& file) {
@@ -160,11 +254,12 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         run->libs = &bundle->libs;
         auto self = shared_from_this();
         RelPath path = file.path();
-        run->discovered = [self, path, functions](Run& r, const HandlerOutcome& outcome) {
+        bool session = usesSession(scanReferences(file.contents()));
+        run->discovered = [self, path, functions, session](Run& r, const HandlerOutcome& outcome) {
             if (outcome.kind == HandlerOutcome::Kind::Error) {
                 self->error(outcome.error);
             } else {
-                self->discover(r, path, functions);
+                self->discover(r, path, functions, session);
             }
             self->postNext();
         };
@@ -173,12 +268,13 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
     }
 
     // Reads a page's handlers from the globals its top level left.
-    void discover(Run& run, const RelPath& path, const List<FuncDef>& functions) {
+    void discover(Run& run, const RelPath& path, const List<FuncDef>& functions, bool usesSession) {
         const std::string& fileName = run.fileName;
         PageProgram program;
         program.fileName = fileName;
         program.functions = functions;
         PageHandlers handlers;
+        handlers.usesSession = usesSession;
         bool pageOk = true;
         auto pageError = [&](const std::string& message) {
             error({message, fileName, 0});

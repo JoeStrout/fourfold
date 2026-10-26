@@ -11,7 +11,9 @@
   {{> header}}
   <main>
     <h1>Guestbook</h1>
-    <p>{{count}} entries so far. Messages are Markdown (the safe, comment kind).</p>
+    <p class="flash">{{flash}}</p>
+    <p>{{count}} entries so far, and {{visits}} visits. You've signed it {{signed}} times.
+      Messages are Markdown (the safe, comment kind).</p>
 
     <ul id="entries">{{entries}}</ul>
 
@@ -24,8 +26,8 @@
       <label><input type="checkbox" name="shout" checked="{{shoutByDefault}}"> Shout</label>
       <button>Sign</button>
     </form>
-    <p class="note">This example doesn't store entries yet (that needs <code>data</code>, in M5),
-      so a new one shows until you reload.</p>
+    <p class="note">Entries are kept in <code>data/guestbook.jsonl</code>; delete it (and
+      <code>data/seeded.json</code>) to start over.</p>
   </main>
 
   <script type="application/json" id="guestbook-stats">{{stats}}</script>

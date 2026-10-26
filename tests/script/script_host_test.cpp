@@ -7,13 +7,14 @@
 #include <thread>
 
 #include "doctest.h"
+#include "test_gate.h"
 #include "partition/app_folder.h"
 #include "template/template.h"
 #include "temp_dir.h"
 
 using namespace fourfold;
 using fourfold::test::TempDir;
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 namespace {
 
@@ -128,9 +129,11 @@ struct Scripts {
                                       RequestFacts request = {}, RenderOptions renderOptions = {}) {
         auto promise = std::make_shared<std::promise<HandlerOutcome>>();
         auto future = promise->get_future();
-        host->run(
-            app, handler(source, label), std::move(request),
-            [promise](HandlerOutcome o) { promise->set_value(std::move(o)); }, std::move(renderOptions));
+        RunContext context;
+        context.request = std::move(request);
+        context.render = std::move(renderOptions);
+        host->run(app, handler(source, label), TestGate::approve(), std::move(context),
+                  [promise](HandlerOutcome o) { promise->set_value(std::move(o)); });
         return future;
     }
 
@@ -490,9 +493,9 @@ TEST_CASE("ScriptHost: an endless loop ends in an error, while other requests ar
     s.compile();
     REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
     auto forever = s.start("pages/b.ms", "get.forever");
-    auto t0 = Clock::now();
+    auto t0 = SteadyClock::now();
     HandlerOutcome quick = s.call("pages/b.ms", "get.quick");
-    auto quickTime = Clock::now() - t0;
+    auto quickTime = SteadyClock::now() - t0;
     CHECK_EQ(quick.body, "quick");
     CHECK(quickTime < std::chrono::milliseconds(500));
     REQUIRE(forever.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
@@ -540,7 +543,7 @@ TEST_CASE("ScriptHost: wait parks the VM instead of blocking the thread") {
     REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
     const int kRuns = 200;
     std::vector<std::future<HandlerOutcome>> runs;
-    auto t0 = Clock::now();
+    auto t0 = SteadyClock::now();
     for (int i = 0; i < kRuns; i++) runs.push_back(s.start("pages/w.ms", "get.nap"));
     for (auto& f : runs) {
         REQUIRE(f.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
@@ -548,7 +551,7 @@ TEST_CASE("ScriptHost: wait parks the VM instead of blocking the thread") {
         CHECK_EQ(o.body, "1");
     }
     // 200 naps of 0.2 s, overlapping: far less than 40 s.
-    CHECK(Clock::now() - t0 < std::chrono::seconds(2));
+    CHECK(SteadyClock::now() - t0 < std::chrono::seconds(2));
 }
 
 TEST_CASE("ScriptHost: many VMs parked on the worker pool, and the thread stays responsive") {
@@ -570,9 +573,9 @@ TEST_CASE("ScriptHost: many VMs parked on the worker pool, and the thread stays 
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     CHECK(s.host->stats(false).parkedRuns >= 100);
-    auto t0 = Clock::now();
+    auto t0 = SteadyClock::now();
     CHECK_EQ(s.call("pages/p.ms", "get.quick").body, "quick");
-    CHECK(Clock::now() - t0 < std::chrono::milliseconds(200));
+    CHECK(SteadyClock::now() - t0 < std::chrono::milliseconds(200));
 
     for (auto& f : slow) {
         REQUIRE(f.wait_for(std::chrono::seconds(30)) == std::future_status::ready);
@@ -676,18 +679,18 @@ TEST_CASE("ScriptHost: requests are served while a long compile runs") {
     }
     std::vector<CodeFile> pages, libs;
     s.readFiles(pages, libs);
-    auto t0 = Clock::now();
+    auto t0 = SteadyClock::now();
     auto compiling = std::async(std::launch::async, [&] { return s.host->compileScripts(pages, libs); });
-    Clock::duration worst{};
+    SteadyClock::duration worst{};
     int served = 0;
     while (compiling.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready) {
-        auto start = Clock::now();
+        auto start = SteadyClock::now();
         HandlerOutcome o = s.call("pages/q.ms", "get.quick");
-        worst = std::max(worst, Clock::now() - start);
+        worst = std::max(worst, SteadyClock::now() - start);
         CHECK_EQ(o.body, "quick");
         served++;
     }
-    auto compileTime = Clock::now() - t0;
+    auto compileTime = SteadyClock::now() - t0;
     CompiledScripts result = compiling.get();
     CHECK_MESSAGE(result.bundle, "compile failed");
     CHECK_EQ(result.pages.size(), 21u);

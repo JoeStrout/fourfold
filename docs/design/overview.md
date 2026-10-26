@@ -122,14 +122,14 @@ Rejected:
 
 #### What a session record holds
 
-- **The engine's part:** user ID (if signed in), created and last-used times, CSRF token. App code can't touch it.
+- **The engine's part:** user ID (if signed in), created and last-used times, a waiting flash message. App code can't touch it. (The CSRF token isn't here: it comes from a cookie of its own; see §5, [CSRF protection](#csrf-protection).)
 - **The app's part:** the `session` map.
 
 `req.user` is built from the user ID by **looking it up in the auth store on every request**. Roles are never cached in the session, so revoking a role or deleting a user takes effect immediately.
 
 #### Load lazily, lock lazily, save only if changed
 
-- **The engine loads the session on first access** to `session`. A request that never touches it doesn't load it and doesn't wait for any lock. That covers most static pages and many renders.
+- **The engine loads the session on first access** to `session`. A request that never touches it doesn't load it and doesn't wait for any lock. That covers most static pages and many renders. *(As built in M5: decided per route at compile time, since MS2 can't detect a map's first access. A route loads and locks the session if its code, or a lib it imports, names `session` or `flash`, or its page has a `{{flash}}` field. See [m5-results.md](m5-results.md).)*
 - **First access also locks the session** until the request ends. This is the per-session queuing, applied only to requests that actually use `session`. There's only one lock, so deadlock isn't possible, and request budgets limit how long one tab can make another wait.
 - At the end of the request, the engine serializes the map and **writes it only if it changed**.
 - **"Last used" is refreshed at most every few minutes**, not on every request, so sliding timeouts don't cost a write per page view.
@@ -266,10 +266,12 @@ Three tiers, all following the core rule (data is inert; executable things live 
 ### Tier 1: plain files in `data/`
 
 - **Atomic writes:** write to a temp file, then rename it over the original, so readers never see a half-written file, even if a request is killed by its budget.
-- **Locked read-modify-write:** e.g. `file.update(path, @f)` takes an exclusive lock, passes the current contents to `f`, and writes back the result. The request budget limits how long the lock can be held.
+- **Locked read-modify-write:** `data.update(name, @f)` takes an exclusive lock, passes the current value to `f`, and writes back the result. The request budget limits how long the lock can be held.
 - **Append** is offered separately, since appends are naturally safe to run concurrently.
 - **Value serialization that can't produce code:** a save/load (or JSON) facility for numbers, strings, lists, and maps that *refuses functions*. Loading data can never produce something callable (no equivalent of PHP's `unserialize` hole).
-- Shared counters etc. should use atomic operations (`data.increment`, `data.append`, compare-and-swap), so that the simple way is also the correct way.
+- Shared counters etc. should use atomic operations (`data.increment`, `data.append`, `data.compareAndSet`), so that the simple way is also the correct way.
+
+*As built in M5* ([m5-results.md](m5-results.md)): a name like `"guestbook"` or `"polls/lunch"` holds either a value (`data/guestbook.json`, read with `data.get` and replaced whole with `data.set` or `data.update`) or a log (`data/guestbook.jsonl`, added to with `data.append` and read with `data.get` as a list). The module also has `data.increment`, `data.compareAndSet`, `data.delete`, `data.exists` and `data.names`. Failures come back as error values.
 
 ### Middle tier: SQLite
 
@@ -874,6 +876,7 @@ Finer-grained checks ("only the author can delete this entry") stay in handler c
 Because the engine renders every page, it can protect forms automatically:
 
 - It adds a hidden token field to every `<form method="post">` when rendering, and an `hx-headers` token on `<body>` for HTMX requests.
+- The token is a keyed hash of a **CSRF cookie of its own**, not part of the session, so a visitor who never writes to `session` still gets no session record (decided in M5).
 - **Any request other than GET without a valid token is rejected before the handler runs.** The `Origin` header is checked as well.
 - The developer never has to think about any of this.
 

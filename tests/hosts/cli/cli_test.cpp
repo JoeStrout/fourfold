@@ -40,3 +40,20 @@ TEST_CASE("cli: dev argument errors are usage errors") {
         CHECK(err.str().find("Usage: fourfold dev") != std::string::npos);
     }
 }
+
+TEST_CASE("cli: serve argument errors are usage errors") {
+    for (std::vector<std::string> args : {
+             std::vector<std::string>{"serve"},
+             std::vector<std::string>{"serve", "app", "--listen"},
+             std::vector<std::string>{"serve", "app", "--listen", "8090"},
+             std::vector<std::string>{"serve", "app", "--listen", ":8090"},
+             std::vector<std::string>{"serve", "app", "--listen", "0.0.0.0:0"},
+             std::vector<std::string>{"serve", "app", "--listen", "0.0.0.0:8090"},   // no --host
+             std::vector<std::string>{"serve", "app", "--host", "a.com:80"},
+             std::vector<std::string>{"serve", "app", "--frobnicate"},
+         }) {
+        std::ostringstream out, err;
+        CHECK_EQ(run(args, out, err), 2);
+        CHECK(err.str().find("Usage: fourfold serve") != std::string::npos);
+    }
+}

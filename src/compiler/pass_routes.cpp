@@ -11,6 +11,7 @@
 //   pages/404.html            →  the not-found page (not a route)
 //   pages/500.html            →  the error page (not a route)
 
+#include <algorithm>
 #include <set>
 
 #include "compiler/content_types.h"
@@ -75,6 +76,7 @@ void routeHandlers(const RelPath& source, const std::vector<std::string_view>& s
     std::map<std::string, RouteEntry> entries;   // by handler name: get.x and post.x share a URL
     auto add = [&](HandlerRef::Kind kind, const std::string& name) {
         auto [it, isNew] = entries.try_emplace(name, RouteEntry{RouteKind::Handler, source});
+        it->second.usesSession = handlers.usesSession;
         HandlerRef ref{kind, source, name};
         (kind == HandlerRef::Kind::Get ? it->second.get : it->second.post) = ref;
     };
@@ -131,6 +133,11 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
             auto code = handlers.find(withExtension(file.path, ".ms"));
             if (code != handlers.end() && code->second.render) {
                 entry.render = HandlerRef{HandlerRef::Kind::Render, code->first, "render"};
+                entry.usesSession = code->second.usesSession;
+            }
+            if (const CompiledTemplate* t = app.templates.find(file.path)) {
+                std::vector<std::string> fields = t->fieldNames();
+                if (std::find(fields.begin(), fields.end(), "flash") != fields.end()) entry.usesSession = true;
             }
             addRoute(app, diagnostics, url, std::move(entry));
         } else if (extension == ".ms") {
@@ -150,6 +157,7 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                 std::string url = urlFor(segments, isIndex ? std::string_view() : stem);
                 RouteEntry entry{RouteKind::Page, file.path, isIndex && url != "/"};
                 entry.render = HandlerRef{HandlerRef::Kind::Render, file.path, "render"};
+                entry.usesSession = h.usesSession;
                 addRoute(app, diagnostics, url, std::move(entry), "render");
             }
             routeHandlers(file.path, segments, stem, h, app, diagnostics);

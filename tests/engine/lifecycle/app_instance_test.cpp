@@ -12,7 +12,7 @@
 using namespace fourfold;
 using fourfold::test::TempDir;
 using std::chrono::milliseconds;
-using Clock = std::chrono::steady_clock;
+using SteadyClock = std::chrono::steady_clock;
 
 namespace {
 
@@ -156,8 +156,8 @@ TEST_CASE("AppInstance: waits for changes to stop before compiling") {
     options.quietPeriod = milliseconds(150);
     f.startInstance(options);
     f.instance->start();
-    auto until = Clock::now() + milliseconds(400);
-    for (int i = 0; Clock::now() < until; i++) {
+    auto until = SteadyClock::now() + milliseconds(400);
+    for (int i = 0; SteadyClock::now() < until; i++) {
         f.edit("pages/index.html", "<!DOCTYPE html><p>{{v}} " + std::string(i, 'x') + "</p>");
         std::this_thread::sleep_for(milliseconds(30));
     }

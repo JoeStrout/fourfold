@@ -9,14 +9,18 @@
 // bytes. Numbers are finite: the script bridge refuses NaN and infinities
 // before they get here.
 //
-// M2 adds what json() needs; the canonical codec (and a binary form, if
-// profiling asks for one) comes with sessions and data in M5.
+// The canonical codec is JSON (decided in M5): toJson writes it, parseJson
+// reads it back. Equal data gives equal bytes, so "did the session change?"
+// is a byte comparison.
 #pragma once
 
 #include <map>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
+
+#include "base/result.h"
 
 namespace fourfold {
 
@@ -63,5 +67,17 @@ std::string toJson(const Datum& value);
 // it is, the value can't end a string, a template literal or a regular
 // expression.
 std::string toJsonForScript(const Datum& value);
+
+struct JsonLimits {
+    size_t maxBytes = 64 * 1024 * 1024;
+    int maxDepth = 64;   // as for values coming from scripts
+};
+
+// Reads JSON (RFC 8259) into a Datum. Fails (Invalid) on malformed JSON,
+// invalid UTF-8, a lone surrogate escape, a number too large to be finite, a
+// repeated map key, trailing text, or nesting deeper than `limits.maxDepth`
+// (the top level is depth 0); fails (TooLarge) on text over `limits.maxBytes`.
+// Every Datum toJson writes reads back equal.
+Result<Datum> parseJson(std::string_view text, const JsonLimits& limits = {});
 
 }  // namespace fourfold

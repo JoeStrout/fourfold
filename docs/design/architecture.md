@@ -34,7 +34,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 - An **instruction budget** per VM (count, then error), separate from wall-clock slices. *M2: counted in whole slices via `VM::Run(maxCycles)`; exact counts need MS2.*
 - A **memory budget** per VM. Hard with a shared GC; possible approaches are per-VM allocation counters, or a process-level limit as a backstop (§3). *M2: missing, and needed (R4, open).*
 - A way to **remove or replace compiling intrinsics** (`import`, any eval-like path) per VM, and an **import resolver hook** so `import` resolves within `code/lib/` through Fourfold. *M2: done host-side. Shell intrinsics are never registered, and `import` is replaced, process-wide.*
-- **Bytecode serialization**, so CGI mode can load a cached compiled app rather than recompiling (§8 of the overview). Without it, CGI mode recompiles `.ms` files when its cache is cold.
+- **Bytecode serialization**, so CGI mode can load a cached compiled app rather than recompiling (§8 of the overview). Without it, CGI mode recompiles `.ms` files when its cache is cold. *M5: not needed for v1; CGI mode will cache the compiled app's plain parts and compile only the requested page (see [m5-results.md](m5-results.md)).*
 - A clean **restricted VM** configuration (no I/O intrinsics) for evaluating declaration and config files as data.
 
 ---
@@ -81,7 +81,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 | **compiler** | `CodeTree` → `CompiledApp` + diagnostics | `compile(CodeTree, …)` |
 | **config** | `private/config` + server config → typed, clamped settings | `AppConfig` |
 | **script** | The script thread, VMs, scheduling, budgets, intrinsic modules | `ScriptHost`, `RunContext` |
-| **state** | Engine-owned stores in `private/state/` | `SessionStore`, `AuthStore`, `RateStore`, `JobQueue`, … |
+| **state** | Engine-owned stores in `private/state/`, and the engine log | `SessionStore`, `LockService`, `EngineLog`, `AuthStore`, `RateStore`, `JobQueue`, … |
 | **appdata** | The app's data: Tier 1 files, SQLite/Postgres, migrations | `DataFiles`, `Database`, `Migrator` |
 | **outbound** | Outbound HTTP with allowlist, IP rules, secret substitution | `OutboundClient`, `SecretVault` |
 | **mail** | Sending email (SMTP or a provider) | `Mailer` |
@@ -161,7 +161,7 @@ public:
 };
 ```
 
-- **Codec** (in `base`): `Datum` ↔ bytes, in one canonical serialization (probably JSON, plus a compact binary form if profiling asks for it). Canonical means equal data gives equal bytes, so "save the session only if it changed" is a byte comparison.
+- **Codec** (in `base`): `Datum` ↔ bytes, in one canonical serialization: JSON (decided in M5; `toJson` and `parseJson`), with a compact binary form later if profiling asks for it. Canonical means equal data gives equal bytes, so "save the session only if it changed" is a byte comparison.
 - **Bridge** (in `script`): `Datum` ↔ `Value`. `toDatum(Value)` is **the one place** where the inert check happens: it fails on functions, handles, and anything else that isn't inert, and on cycles and excessive depth. Every path from a VM to storage (`session`, `data`, `enqueue` args, `file` writes of values) passes through it, so none of them can implement the check differently.
 - Size caps (session 64 KB, job args) are applied to the serialized bytes.
 
@@ -196,7 +196,7 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 
 `CodeFile` is constructible only by `CodeTree`. That makes "code is compiled only from the code partition" a type rule: the compiler's entry points take `CodeFile`, not strings or paths (see §6).
 
-**`sqlite`, `net`, `threads`, `log`.** Thin wrappers. `log` provides two unrelated types, `EngineLog` (`private/state/logs/`) and the app's `Dropbox` writer, so engine code can't write security events where the app could forge or bury them (§1).
+**`sqlite`, `net`, `threads`.** Thin wrappers, in `platform`. The two kinds of log are unrelated types: `EngineLog` (in `state`, writing `private/state/logs/` through `StateDir`) and the app's `Dropbox` (in `partition`, append only), so engine code can't write security events where the app could forge or bury them (§1).
 
 ### Libraries
 
@@ -254,6 +254,8 @@ struct RunContext {
 };
 ```
 
+*As built in M5* (`script/script_host.h`): the request facts, the render options (nonce, CSRF token), `SessionAccess` (which the host calls to lock and load the session before the page's code runs), the session size cap, `DataFiles` and `Dropbox`. The app is passed to `ScriptHost::run` beside it, with the `GateApproval`. `script` depends on `appdata` for `DataFiles`; both are plain C++ below the engine.
+
 The intrinsic modules (`data`, `db`, `http`, `secrets`, `session`, `users`, `mail`, `frag`, `markdown`, `redirect`, `json`, `status`, `enqueue`, `publish`, `flash`, `formState`, `reshow`, `ratelimit`, `unsafeHTML`, …) are **each a separate file**, depending only on `RunContext` and the bridge. A VM gets a module only if its service pointer is non-null. So the per-kind restrictions in the overview (no `http` in migrations, no `session` in jobs, no `job` map outside `code/jobs/`) come from which services the engine supplies, not from checks scattered through the modules.
 
 Return values from handlers are converted into an engine-side `HandlerOutcome` (render with fields, fragment, redirect, JSON, status, reshow, no content, or error) before leaving `script`. Pending side effects (session changes, enqueued jobs, flash) are collected in the `RunContext`'s services and committed, or dropped, by the engine afterward.
@@ -266,7 +268,8 @@ Return values from handlers are converted into an engine-side `HandlerOutcome` (
 | `AuthStore` | users, roles, magic-link tokens |
 | `RateStore` | rate-limit counters, used challenges |
 | `JobQueue` | pending, running, and dead jobs; schedule state |
-| `LockService` | session locks and the schema lock (in memory in standalone mode, file locks in CGI mode) |
+| `LockService` | session locks and the schema lock (in memory in standalone mode, file locks in CGI mode); `DataFiles` uses the file kind for its locks |
+| `EngineLog` | the engine's log, `private/state/logs/` (M5) |
 
 Each store's interface deals in `Datum`, bytes, and plain structs. Redis or Postgres implementations for multi-server deployments (§2, §3) slot in behind the same interfaces.
 
@@ -357,7 +360,7 @@ Everything the request path needs is already resolved: the route's effective acc
 
 **The script half.** Compiled bytecode is made of MS2 objects, which live in the script thread's GC. So `ScriptUnits` holds opaque `ScriptUnitRef`s, and the bytecode itself is owned by `ScriptHost`, keyed by app generation. When the last request using an old compiled app finishes, `ScriptHost` unroots that generation's bytecode. Everything else in `CompiledApp` is plain C++ and can be read from any thread.
 
-**Serialization.** CGI mode caches the compiled app in `private/state/`. The plain C++ parts serialize easily. The bytecode needs MS2 support (§1); until then, a CGI cold start recompiles the `.ms` files.
+**Serialization.** CGI mode caches the compiled app in `private/state/`. The plain C++ parts serialize easily. The bytecode would need MS2 support (§1); M5 decided that isn't needed for v1: a CGI request compiles only the requested page's `.ms` file and its imports.
 
 ### `HttpRequest` / `HttpResponse` (transports → engine)
 
@@ -433,12 +436,12 @@ fourfold/
     devtools/
     hosts/         cli/, http-server/, cgi/, front/
   tests/           mirrors src/; plus apps/ (sample app folders for golden compiler tests)
-  third_party/     llhttp, md4c, htmx, doctest; later sqlite, …   (MS2 itself from ~/svnrepo/miniscript2)
+  third_party/     llhttp, md4c, htmx, doctest, sqlite, monocypher   (MS2 itself from ~/svnrepo/miniscript2)
 ```
 
 Each component directory has its public headers in `include/<component>/` and its internal files beside them. A component's tests use only its public headers, plus fakes of the interfaces below it. Each component is its own static library, and only components that declare a dependency on it can see its `include/` folder, so the build itself rejects a dependency that points upward or sideways. The build system and its conventions are described in [building.md](../building.md).
 
-Third-party pieces: llhttp for parsing HTTP/1.1 (chosen in M1); md4c's parser for Markdown, and htmx, served by the engine (M4). Likely, still to be decided: SQLite; nghttp2 for HTTP/2; OpenSSL or BoringSSL for TLS; libsodium for crypto; an ACME client or a small one of our own. The event loop is our own (`platform`'s `EventLoop`, over kqueue or epoll): the script thread needs little from it beyond readiness, timers, and a cross-thread wakeup.
+Third-party pieces: llhttp for parsing HTTP/1.1 (chosen in M1); md4c's parser for Markdown, and htmx, served by the engine (M4); SQLite, and Monocypher for hashing (M5). Likely, still to be decided: nghttp2 for HTTP/2; OpenSSL or BoringSSL for TLS; an ACME client or a small one of our own. The event loop is our own (`platform`'s `EventLoop`, over kqueue or epoll): the script thread needs little from it beyond readiness, timers, and a cross-thread wakeup.
 
 ---
 
@@ -465,6 +468,6 @@ Some examples of changes, and what each one touches:
 - ~~**Where the compiler's MS2 work runs.**~~ *Decided in M3:* on the script thread, sliced a file at a time, with each page's top level run as a scheduled discovery run. A request made during a large compile waits about one file's compile time (a few ms), not the whole compile's. A separate process (needing bytecode serialization) or a second GC heap (needing per-thread GCs) remain options if very large files make this a problem. See [m3-results.md](m3-results.md).
 - **Per-VM memory budgets** with a shared GC. Maybe per-VM allocation accounting in MS2; otherwise a process-level limit plus restarting a worker process that exceeds it, which favors the several-processes model.
 - **Event loop and HTTP stack.** Asio vs. libuv vs. a small hand-rolled loop. HTTP/2 and TLS tilt toward existing libraries.
-- **`Datum` serialization format.** JSON is debuggable and matches `json()`; a binary format is smaller and faster. Possibly JSON first, behind the codec, so it can change later.
+- ~~**`Datum` serialization format.**~~ *Decided in M5:* JSON, behind the codec, so a binary form can be added later.
 - **How much of the engine should be shared with `fourfold test`.** Ideally the whole pipeline, with an in-memory transport, fake stores, and a fake clock.
 - **Whether `front` should be a separate binary**, or a mode of the main one.

@@ -304,6 +304,16 @@ FuncDef compileCallbackStub() {
 
 }  // namespace
 
+FuncDef callbackStub() { return g_callbackStub; }
+
+void addModule(const char* name, const std::vector<std::pair<const char*, Intrinsic>>& functions) {
+    Value map = Value::make_map(static_cast<int>(functions.size()));
+    for (auto [key, f] : functions) map.MapSet(key, f.GetFunc());   // GetFunc isn't const
+    map.Freeze();
+    MiniScript::GCManager::AddRoot(map);   // for the life of the process
+    Intrinsic::Create(name).set_Code([map](Context, IntrinsicResult) { return IntrinsicResult(map); });
+}
+
 void initMiniScriptRuntime(const ScriptHostOptions& options) {
     Value::MAX_COLLECTION_SIZE = options.budget.maxCollectionSize;
     static bool initialized = false;
@@ -333,6 +343,9 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addFrag();
     addMarkdown();
     addUnsafeHtml();
+    addFlash();
+    addData();
+    addDropbox();
     addTestSlowWork();
     addTestWithValue();
     g_callbackStub = compileCallbackStub();
