@@ -178,6 +178,31 @@ The risks most likely to change the design, and where each is retired:
 
 ---
 
+## M6.1 — Markdown as a first-class format
+
+**Goal:** Markdown pages can be fetched as Markdown (`/about.md`), and can have fields, includes and code like HTML pages, so a site can be written entirely in Markdown, dynamic parts included, and read by a Markdown-only client such as a Markdown browser in Mini Micro. A small milestone between M6 and M7.
+
+**Why:** today a `.md` page is only ever sent as HTML, and has no fields and no code, so even a Markdown page with a visitor counter has to become HTML. Markdown's feature set is the right size for MiniScript and Mini Micro, which will never have a full HTML, CSS and JavaScript browser, but could easily have a Markdown one.
+
+**Decisions (2026-10-28):** designed in overview §4, [Fields in Markdown](overview.md#fields-in-markdown) and [Markdown as Markdown](overview.md#markdown-as-markdown). In short:
+- **`/about.md` serves the page as Markdown**, on by default (replacing the planned opt-in raw-source setting). It's the same route as `/about`, with the same access rules and code, and only Markdown pages have it. Chosen by extension, not by `Accept` header. Links are kept as written, since the source's relative `.md` links already resolve to these URLs. The HTML page links to it with `rel="alternate"`. No layout around the Markdown.
+- **Fields in Markdown in `code/`**, with the same syntax as HTML templates (`{{` in prose is a field; `\{{` is literal), never in code spans or code blocks, and never in runtime or `data/` Markdown, which stays inert. `about.md` pairs with `about.ms`.
+- **Parse first, fill second; one parse, two outputs.** Each `.md` template compiles to an HTML form and a Markdown form, with each field's position known. Values are escaped for the output: as HTML, or for Markdown by backslash-escaping all ASCII punctuation, turning line breaks into spaces, and protecting leading spaces. The URL rule applies in link destinations in both.
+- **Markdown templates take only Markdown.** Includes and rendered values stand alone on a line, at the top level, and are blocks. An HTML fragment or `unsafeHTML` in a Markdown template is an error in both outputs.
+- **`frag` and `markdown` handles render late**, in the format of the template they land in. In the Markdown output, `markdown(text)` is written back out as Markdown under its profile's rules.
+- **Reading only:** a Markdown client follows links but can't post; Markdown clients that sign in stay with the open question of non-browser clients.
+
+**Scope:**
+- `markdown`: parsing with field placeholders and recording each field's context; a Markdown writer beside the HTML renderer (md4c's parser, our renderer), applying the comment profile's rules; the Markdown escaping rules.
+- `template`/`compiler`: `.md` pages and fragments as templates with an HTML form and a Markdown form; `.md` includes (block level, Markdown only, loops an error); `.md` + `.ms` pairing in discovery; the field-placement errors; missing- and extra-field warnings; a page with `{{flash}}` uses the session, as for HTML.
+- `compiledapp`/`pipeline`: the `/x.md` alias on Markdown routes (route collisions checked, the gate and access unchanged); `text/markdown; charset=utf-8; variant=GFM`; `req.format`; the `rel="alternate"` link in the HTML output.
+- `script`: `frag` and `markdown` return late-rendered handles (HTML templates keep their behavior); a format mismatch is a render error.
+- Docs: overview §4 (written with these decisions), architecture, the user guide (Markdown pages with code, Markdown as Markdown, `req.format`, the quick reference), and `examples/markdown-site`.
+
+**Exit criteria:** a visitor counter and a guestbook listing (an `.md` fragment per entry) written entirely in Markdown work at `/x` and `/x.md`; a table-driven escaping test for the Markdown output with hostile values (every ASCII punctuation character, line breaks, leading spaces, `|` in table cells, `javascript:` and malformed URLs in destinations, GFM's `www.` and bare-URL autolinks), each checked by parsing the output again and confirming that it has the template's structure, with the value only in text; the same for comment-profile text written back out (no headings, images or raw HTML get through); a fuzz test of the Markdown writer for crashes and super-linear time; the clubhouse's members-only `.md` page refused at `/x.md` as at `/x`; every existing sample and fixture still compiles, with each Markdown `{{` that was meant as text in a code span or written `\{{`.
+
+---
+
 ## M7 — Forms and abuse protection
 
 **Goal:** declared forms and the spam defenses (§4, Forms and validation; §5, Rate limits and spam).
@@ -269,7 +294,7 @@ The risks most likely to change the design, and where each is retired:
 - The rest of the dev tools (§9): the full request inspector, session viewing and editing, the REPL against the dev instance, and pausing scheduled jobs.
 - `fourfold test`: handlers called with synthetic requests and fake users against a throwaway `data/`, using the engine with an in-memory transport.
 - The explicit routes table, with parameterized routes and `req.params`.
-- The open questions in the overview that are decided for 1.0 (fields in Markdown, non-browser clients, caching and compression, time zones and localization, a production admin console, account deletion and data export, engine and language versioning), each implemented or explicitly deferred past 1.0.
+- The open questions in the overview that are decided for 1.0 (non-browser clients, caching and compression, time zones and localization, a production admin console, account deletion and data export, engine and language versioning), each implemented or explicitly deferred past 1.0.
 - Redis or Postgres implementations of the engine stores for multi-server deployments, if they're in 1.0's scope.
 - Documentation: a tutorial that follows the progressive path (static HTML → a counter → a guestbook → a database app), a reference for every API, and the deployment guides (VPS, container platform, shared hosting).
 - A security review of the whole engine, ideally external, against the threat model in §5.
