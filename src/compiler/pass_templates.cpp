@@ -4,6 +4,7 @@
 //   frags/**/*.html   fragments, by name ("entry", "auth/login")
 //   frags/**/*.md     Markdown fragments, rendered now (no fields)
 //   frags/layout/markdown.html   the wrapper for Markdown pages: a whole document
+//   frags/auth/layout.html       the wrapper for the engine's sign-in pages: a whole document
 //   pages/**/*.html   pages
 //
 // Fragments' includes are resolved first, then the pages'.
@@ -18,6 +19,7 @@ namespace fourfold {
 namespace {
 
 const char* const kMarkdownLayout = "layout/markdown";
+const char* const kAuthLayout = "auth/layout";
 
 void report(const std::vector<TemplateProblem>& problems, Diagnostics& diagnostics) {
     for (const TemplateProblem& p : problems) {
@@ -40,7 +42,7 @@ void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp
 
     FragmentMap fragments;
     std::map<std::string, RelPath> fragmentSources;   // name → the file it came from
-    std::optional<CompiledTemplate> layout;
+    std::optional<CompiledTemplate> layout, authLayout;
 
     for (const CodeEntry& entry : listing.files) {
         if (!entry.path.isWithin(frags)) continue;
@@ -74,18 +76,21 @@ void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp
             fragments.emplace(name, CompiledTemplate::fromMarkdown(entry.path, std::move(md.html)));
             continue;
         }
-        // The Markdown layout wraps whole pages, so it's a page itself.
-        bool isLayout = name == kMarkdownLayout;
+        // The layouts wrap whole pages, so each is a page itself.
+        bool isLayout = name == kMarkdownLayout || name == kAuthLayout;
         ParsedTemplate parsed = parseTemplate(file.value(), isLayout ? TemplateKind::Page : TemplateKind::Fragment);
         report(parsed.errors, diagnostics);
         if (!parsed.ok()) continue;
         if (isLayout) {
             const auto& names = parsed.compiled.fieldNames();
+            bool markdown = name == kMarkdownLayout;
             if (std::find(names.begin(), names.end(), "content") == names.end()) {
-                diagnostics.error(fileName, "the Markdown layout needs a {{content}} field, where each page goes");
+                diagnostics.error(fileName, markdown ? "the Markdown layout needs a {{content}} field, where each page goes"
+                                                     : "the sign-in layout needs a {{content}} field, where the engine "
+                                                       "puts its form");
                 continue;
             }
-            layout = std::move(parsed.compiled);
+            (markdown ? layout : authLayout) = std::move(parsed.compiled);
         } else {
             fragments.emplace(name, std::move(parsed.compiled));
         }
@@ -94,6 +99,10 @@ void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp
     if (layout) {
         report(resolveIncludes(*layout, fragments), diagnostics);
         app.markdownLayout = std::move(layout);
+    }
+    if (authLayout) {
+        report(resolveIncludes(*authLayout, fragments), diagnostics);
+        app.authLayout = std::move(authLayout);
     }
 
     for (const CodeEntry& entry : listing.files) {

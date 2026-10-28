@@ -8,7 +8,8 @@ namespace {
 
 // Paths the engine serves itself, which aren't routes.
 bool isEnginePath(const std::string& path) {
-    return path.compare(0, 12, "/__fourfold/") == 0 || path.compare(0, 7, "/__dev/") == 0;
+    return path.compare(0, 12, "/__fourfold/") == 0 || path.compare(0, 7, "/__dev/") == 0 ||
+           path.compare(0, 8, "/__auth/") == 0;
 }
 
 }  // namespace

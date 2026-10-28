@@ -44,12 +44,16 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
         }
     }
 
-    // The app's state: private/state/ (the engine's), data/ and dropbox/.
+    // The app's state: private/state/ (the engine's), data/ and dropbox/;
+    // and its config, private/config/.
     auto state = app.value().stateDir();
     auto data = app.value().dataDir();
     auto dropbox = app.value().dropbox();
-    if (!state || !data || !dropbox) {
-        err << command << (!state ? state.error() : !data ? data.error() : dropbox.error()).message << "\n";
+    auto configDir = app.value().configDir();
+    if (!state || !data || !dropbox || !configDir) {
+        err << command
+            << (!state ? state.error() : !data ? data.error() : !dropbox ? dropbox.error() : configDir.error()).message
+            << "\n";
         return nullptr;
     }
     auto key = loadOrCreateEngineKey(state.value());
@@ -58,13 +62,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
         err << command << (!key ? key.error() : dbPath.error()).message << "\n";
         return nullptr;
     }
-    auto sessions = SessionStore::open(dbPath.value(), SessionConfig{});
-    if (!sessions) {
-        err << command << "can't open private/state/state.db: " << sessions.error().message << "\n";
-        return nullptr;
-    }
-    server->sessions_ = std::move(sessions).value();
-    server->sessionLocks_ = makeMemoryLockService();
+    server->configDir_ = std::make_unique<ConfigDir>(std::move(configDir).value());
     server->data_ = std::make_unique<DataFiles>(std::move(data).value());
     server->dropbox_ = std::make_unique<Dropbox>(std::move(dropbox).value());
     server->log_ = std::make_unique<EngineLog>(std::move(state).value());
@@ -99,6 +97,70 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     }
     server->scripts_ = std::move(scripts).value();
 
+    // The config, evaluated by the script host. An invalid one stops
+    // `fourfold serve` (its defaults may be wider than what was meant, e.g.
+    // open sign-up); `fourfold dev` starts with the defaults, and reloads
+    // once it's fixed.
+    ConfigSources sources;
+    sources.dir = server->configDir_.get();
+    sources.mode = options.dev ? ConfigMode::Dev : ConfigMode::Serve;
+    sources.devMailOutput = [self](const std::string& text) { self->printMail(text); };
+    if (!options.serverConfig.empty()) {
+        auto file = ConfigDir::readServerConfig(options.serverConfig);
+        if (!file) {
+            err << command << "can't read the server config: " << file.error().message << "\n";
+            return nullptr;
+        }
+        sources.serverConfig = std::move(file).value();
+    }
+    std::string stamp = configStamp(*server->configDir_);
+    ConfigLoad load = loadConfig(sources, *server->scripts_);
+    for (const Diagnostic& d : load.diagnostics) err << d.toString() << "\n";
+    if (!load.ok()) {
+        if (!options.dev) {
+            err << command << "the config has errors (above); fix them and start again\n";
+            return nullptr;
+        }
+        err << command << "the config has errors (above); using the defaults until they're fixed\n";
+        ConfigSources defaults = sources;
+        defaults.dir = nullptr;
+        load = loadConfig(defaults, *server->scripts_);
+        if (!load.ok()) {
+            for (const Diagnostic& d : load.diagnostics) err << d.toString() << "\n";
+            return nullptr;
+        }
+    }
+    std::shared_ptr<const AppConfig> config = load.config;
+    server->scripts_->setBudget(config->budget);
+
+    auto sessions = SessionStore::open(dbPath.value(), config->session);
+    auto auth = sessions ? AuthStore::open(dbPath.value(), config->auth.store)
+                         : Result<std::unique_ptr<AuthStore>>(sessions.error());
+    if (!sessions || !auth) {
+        err << command << "can't open private/state/state.db: " << (!sessions ? sessions.error() : auth.error()).message
+            << "\n";
+        return nullptr;
+    }
+    server->sessions_ = std::move(sessions).value();
+    server->auth_ = std::move(auth).value();
+    server->sessionLocks_ = makeMemoryLockService();
+    server->authFlow_ = std::make_unique<AuthFlow>(*server->auth_, *server->sessions_, *server->sessionLocks_,
+                                                   server->scripts_->workers(), server->log_.get());
+
+    // The host names the app answers to: localhost's in dev; in serve mode,
+    // --host's and the config's domain.
+    std::vector<std::string> hosts = options.hosts;
+    if (!options.dev && !config->site.domain.empty()) hosts.push_back(config->site.domain);
+    if (options.dev || hosts.empty()) {
+        if (!options.dev && options.address != "127.0.0.1" && options.address != "::1" &&
+            options.address != "localhost") {
+            err << command << "give the site's host name with --host, or config.domain in private/config/app.ms "
+                              "(requests for any other name are refused)\n";
+            return nullptr;
+        }
+        hosts = localhostNames();
+    }
+
     server->observers_.add(self);
     if (options.dev) {
         server->devtools_ = std::make_unique<DevTools>(*server->loop_, std::move(devCode).value());
@@ -106,7 +168,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     }
 
     EngineOptions engineOptions;
-    engineOptions.allowedHosts = options.hosts.empty() ? localhostNames() : options.hosts;
+    engineOptions.allowedHosts = hosts;
     engineOptions.showErrorDetails = options.dev;
     engineOptions.observer = &server->observers_;
     engineOptions.hooks = server->devtools_.get();
@@ -115,10 +177,20 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     engineOptions.data = server->data_.get();
     engineOptions.dropbox = server->dropbox_.get();
     engineOptions.log = server->log_.get();
+    engineOptions.auth = server->auth_.get();
+    engineOptions.authRoutes = server->authFlow_.get();
     engineOptions.https = options.https;
     engineOptions.engineKey = std::move(key).value();
     server->engine_ = std::make_unique<Engine>(nullptr, std::move(engineCode).value(), server->scripts_.get(),
                                                std::move(engineOptions));
+    server->engine_->setConfig(config);
+    if (server->devtools_) server->devtools_->setAppSource([self] { return self->engine_->app(); });
+
+    ConfigWatch watch;
+    watch.sources = sources;
+    watch.stamp = stamp;
+    watch.loaded = [self](const ConfigLoad& reloaded) { self->configLoaded(reloaded, false); };
+    options.lifecycle.config = std::move(watch);
 
     if (!options.dev) options.lifecycle.trigger = LifecycleOptions::Trigger::DeployOnly;
     auto instance = AppInstance::create(std::move(watchedCode).value(), server->scripts_.get(), *server->engine_,
@@ -171,9 +243,12 @@ AppServer::~AppServer() {
     scripts_.reset();
     engine_.reset();
     devtools_.reset();
+    authFlow_.reset();
     data_.reset();
     sessionLocks_.reset();
+    auth_.reset();
     sessions_.reset();
+    configDir_.reset();
     loop_.reset();
     dropbox_.reset();
     log_.reset();
@@ -184,9 +259,34 @@ void AppServer::scheduleSweep(std::chrono::milliseconds delay) {
         scripts_->workers().submit([this] {
             auto removed = sessions_->sweepExpired();
             if (!removed) log_->write("session", "sweeping expired sessions failed: " + removed.error().message);
+            auto tokens = auth_->sweep();
+            if (!tokens) log_->write("auth", "sweeping old sign-in links failed: " + tokens.error().message);
         });
         scheduleSweep(kSweepInterval);
     });
+}
+
+void AppServer::configLoaded(const ConfigLoad& load, bool first) {
+    for (const Diagnostic& d : load.diagnostics) {
+        sayError(d.toString());
+        log_->write("config", d.toString());
+    }
+    if (!load.ok()) {
+        sayError("The config has errors; still using the previous one.");
+        return;
+    }
+    sessions_->setConfig(load.config->session);
+    auth_->setConfig(load.config->auth.store);
+    scripts_->setBudget(load.config->budget);
+    if (!first) {
+        say("Config reloaded.");
+        log_->write("config", "reloaded");
+    }
+}
+
+void AppServer::printMail(const std::string& text) {
+    if (dev_) say("\n" + text + "\n");
+    log_->write("mail", text);
 }
 
 void AppServer::compileFinished(const CompileReport& report) {

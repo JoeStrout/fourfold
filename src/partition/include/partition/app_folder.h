@@ -19,6 +19,7 @@
 #include "base/fd.h"
 #include "base/result.h"
 #include "partition/code_tree.h"
+#include "partition/config_dir.h"
 #include "partition/data_dir.h"
 
 namespace fourfold {
@@ -27,7 +28,9 @@ class AppFolder {
 public:
     enum class Missing {
         Fail,     // a missing partition folder is an error
-        Create,   // create missing folders (and the app folder itself): `fourfold dev`
+        Create,   // create missing folders (and the app folder itself): `fourfold dev`.
+                  // A new private/config/ gets commented app.ms and secrets.ms
+                  // templates.
     };
 
     static Result<AppFolder> open(const std::string& root, Missing missing = Missing::Fail);
@@ -40,6 +43,8 @@ public:
 
     // A read-only view of code/.
     Result<CodeTree> codeTree(CodeTreeLimits limits = {}) const;
+    // private/config/, read-only.
+    Result<ConfigDir> configDir() const;
     // data/, dropbox/ and private/state/. Each call opens a new handle.
     Result<DataDir> dataDir() const;
     Result<Dropbox> dropbox() const;
@@ -47,7 +52,7 @@ public:
 
 private:
     struct Folders {
-        Fd code, data, dropbox, state;
+        Fd code, data, dropbox, config, state;
         std::string stateReal;   // private/state/'s real path, for SQLite
     };
     AppFolder(std::string root, Folders folders) : root_(std::move(root)), folders_(std::move(folders)) {}

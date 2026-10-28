@@ -775,6 +775,7 @@ The app sees only `req.user`.
 **v1:** email **magic link**, plus the **dev-mode fake login**.
 
 - Magic links require email sending to be set up in the host config (SMTP or a provider).
+- *As built in M6:* the emailed link opens a page with a "Sign in" button, and the POST from it signs in, so mail scanners that fetch links can't use the token. A link works once, for 15 minutes; links are throttled per address and per visitor. The form answers "check your email" whether or not the address may sign in. A first sign-in creates the user unless `auth.signUp` is `"closed"`. See [m6-results.md](m6-results.md).
 - **Dev-mode fake login:** a "sign in as…" picker with a few test users, including an admin. No email or setup needed, so testing "what does an admin see?" takes one click.
 
 **Later**, enabled per app in the host config:
@@ -1292,6 +1293,8 @@ config.email = {"smtpHost": "smtp.example.com", "from": "noreply@example.com",
 config.session = {"capKB": 64, "anonIdleHours": 24, "userIdleDays": 14}
 config.db = {"url": "postgres://db.internal/guestbook", "passwordSecret": "dbPassword"}
 ```
+
+*As built in M6:* the email settings are `config.mail` (`transport`, `from`, `smtpHost`, `smtpUser`, `passwordSecret`, or Postmark's `postmarkTokenSecret`); `budget.memoryMB` is refused until there's a memory limit (R4); unknown settings are errors. The full list is in the [user guide](../user/user_guide.md#configuration-privateconfig).
 
 ### Secrets: a separate file
 

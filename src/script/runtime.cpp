@@ -188,6 +188,9 @@ void addImport() {
                 return errorResult("import needs the name of a file in code/lib/, like import \"util\"");
             }
             Run* run = Run::of(ctx);
+            if (run && run->kind == Run::Kind::Data) {
+                return errorResult("import can't be used in a declaration or config file");
+            }
             if (!run || !run->libs) return errorResult("import isn't available here");
             auto it = run->libs->find(name);
             if (it == run->libs->end()) return errorResult("import: there's no code/lib/" + name + ".ms");
@@ -347,6 +350,7 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addRawData();
     addFile();
     addDropbox();
+    addUsers();
     addTestSlowWork();
     addTestWithValue();
     g_callbackStub = compileCallbackStub();
@@ -372,6 +376,7 @@ void prepareInterpreter(Run& run, const MiniScript::List<MiniScript::FuncDef>& p
         if (print) print(file, std::string(text.c_str(), static_cast<size_t>(text.LengthB())));
     });
     run.interp.Reset(program);
+    if (run.kind == Run::Kind::Data) return;
     // The engine creates these before the file runs (overview §4).
     run.interp.SetGlobalValue("get", Value::make_map(4));
     run.interp.SetGlobalValue("post", Value::make_map(4));

@@ -70,10 +70,13 @@ Testing/
 # macOS
 .DS_Store
 
-# Partition folders that `fourfold dev` creates in the examples
+# Partition folders that `fourfold dev` creates in the examples, and the
+# config templates it writes; a sample's own app.ms is kept
 examples/*/data/
 examples/*/dropbox/
-examples/*/private/
+examples/*/private/state/
+examples/*/private/config/*
+!examples/clubhouse/private/config/app.ms
 
 # Local test fixtures that aren't ours to publish (e.g. copies of real
 # sites, for checking the template rules); kept on this machine only

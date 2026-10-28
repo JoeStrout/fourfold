@@ -22,6 +22,7 @@ CompileOutput compileApp(const std::string& root, AppFolder::Missing missing = A
     REQUIRE(host.ok());
     CompileOptions options;
     options.scripts = host.value().get();
+    options.evaluator = host.value().get();
     return compile(tree.value(), options);
 }
 
@@ -491,4 +492,149 @@ TEST_CASE("compile: routes whose code uses the session are marked") {
     CHECK(route(out, "/f")->usesSession);      // a {{flash}} field, no code
     CHECK_FALSE(route(out, "/g")->usesSession);
     CHECK(contains(describe(*out.app), "/a  page  pages/a.html  fields: x  render in pages/a.ms  session"));
+}
+
+// --- Access (M6) ---
+
+namespace {
+
+std::string accessOf(const CompileOutput& out, const std::string& url) {
+    const RouteEntry* r = route(out, url);
+    REQUIRE_MESSAGE(r, url);
+    return r->access.describe();
+}
+
+}  // namespace
+
+TEST_CASE("compile: access rules cover their path and below, on whole segments") {
+    TempDir dir;
+    dir.write("code/access.ms",
+              "rules = {}\n"
+              "rules[\"/admin\"] = \"admin\"\n"
+              "rules[\"/members\"] = \"login\"\n"
+              "rules[\"/forum/mod\"] = [\"moderator\", \"admin\"]\n"
+              "rules[\"/guestbook/sign\"] = \"login\"\n");
+    dir.write("code/pages/index.html", "<!DOCTYPE html><p>home</p>");
+    dir.write("code/pages/admin/index.html", "<!DOCTYPE html><p>admin</p>");
+    dir.write("code/pages/admin/users.html", "<!DOCTYPE html><p>users</p>");
+    dir.write("code/pages/admin/media/logo.png", "png");
+    dir.write("code/pages/administrator.html", "<!DOCTYPE html><p>not admin</p>");
+    dir.write("code/pages/members/index.md", "# Members\n");
+    dir.write("code/pages/members/video.mp4", "mp4");
+    dir.write("code/pages/forum/mod.ms", "get.queue = function\n  return \"q\"\nend function\n");
+    dir.write("code/pages/guestbook.html", "<!DOCTYPE html><p>book</p>");
+    dir.write("code/pages/guestbook.ms",
+              "get.more = function\n  return \"more\"\nend function\n"
+              "post.sign = function\n  return null\nend function\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    CHECK_EQ(accessOf(out, "/"), "public");
+    CHECK_EQ(accessOf(out, "/admin"), "admin");
+    CHECK_EQ(accessOf(out, "/admin/users"), "admin");
+    CHECK_EQ(accessOf(out, "/admin/media/logo.png"), "admin");
+    CHECK_EQ(accessOf(out, "/administrator"), "public");
+    CHECK_EQ(accessOf(out, "/members"), "login");
+    CHECK_EQ(accessOf(out, "/members/video.mp4"), "login");
+    CHECK_EQ(accessOf(out, "/forum/mod/queue"), "admin or moderator");
+    CHECK_EQ(accessOf(out, "/guestbook"), "public");
+    CHECK_EQ(accessOf(out, "/guestbook/more"), "public");
+    CHECK_EQ(accessOf(out, "/guestbook/sign"), "login");
+    const RouteEntry* sign = route(out, "/guestbook/sign");
+    CHECK_EQ(sign->accessSources, std::vector<std::string>{"code/access.ms: /guestbook/sign"});
+    CHECK(contains(describe(*out.app), "/admin/users  page  pages/admin/users.html  access: admin (code/access.ms: /admin)"));
+}
+
+TEST_CASE("compile: access = in a page file, combined with the central rules") {
+    TempDir dir;
+    dir.write("code/access.ms", "rules = {}\nrules[\"/team\"] = \"login\"\nrules[\"/team/pay\"] = \"admin\"\n");
+    dir.write("code/pages/team/index.html", "<!DOCTYPE html><p>team</p>");
+    dir.write("code/pages/team/index.ms", "access = \"editor\"\nget.list = function\n  return \"l\"\nend function\n");
+    dir.write("code/pages/team/pay.ms", "access = \"accountant\"\nrender = function\n  return \"pay\"\nend function\n");
+    dir.write("code/pages/notes.html", "<!DOCTYPE html><p>notes</p>");
+    dir.write("code/pages/notes.ms", "access = [\"editor\", \"admin\"]\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    // "login" is implied by a role, so it drops out.
+    CHECK_EQ(accessOf(out, "/team"), "editor");
+    CHECK_EQ(accessOf(out, "/team/list"), "editor");
+    // Every rule must be met: both roles are needed.
+    CHECK_EQ(accessOf(out, "/team/pay"), "accountant and admin");
+    // A page with no render still gets its .ms file's access.
+    CHECK_EQ(accessOf(out, "/notes"), "admin or editor");
+    const RouteEntry* team = route(out, "/team");
+    CHECK_EQ(team->accessSources, std::vector<std::string>{"code/access.ms: /team", "code/pages/team/index.ms"});
+}
+
+TEST_CASE("compile: AccessLevel only tightens") {
+    AccessLevel a;
+    CHECK(a.isPublic());
+    CHECK(a.allows(false, {}));
+    a.require({});
+    CHECK_EQ(a.describe(), "login");
+    CHECK_FALSE(a.allows(false, {}));
+    CHECK(a.allows(true, {}));
+    a.require({"b", "a"});
+    CHECK_EQ(a.describe(), "a or b");
+    a.require({"a", "b", "c"});   // implied by "a or b"
+    CHECK_EQ(a.describe(), "a or b");
+    a.require({});                // implied
+    CHECK_EQ(a.describe(), "a or b");
+    a.require({"a"});             // tighter: replaces "a or b"
+    CHECK_EQ(a.describe(), "a");
+    a.require({"c", "d"});
+    CHECK_EQ(a.describe(), "a and (c or d)");
+    CHECK(a.allows(true, {"a", "d"}));
+    CHECK_FALSE(a.allows(true, {"a"}));
+    CHECK_FALSE(a.allows(true, {"c", "d"}));
+    CHECK_FALSE(a.allows(false, {"a", "c"}));
+}
+
+TEST_CASE("compile: bad access rules and declarations") {
+    auto check = [](const std::string& accessMs, const std::string& expected) {
+        CAPTURE(accessMs);
+        TempDir dir;
+        dir.write("code/access.ms", accessMs);
+        dir.write("code/pages/index.html", "<!DOCTYPE html><p>home</p>");
+        CompileOutput out = compileApp(dir.path());
+        CHECK_FALSE(out.ok());
+        CHECK_MESSAGE(hasDiagnostic(out, expected), allDiagnostics(out));
+    };
+    check("x = 1\n", "must set `rules`");
+    check("rules = [1]\n", "must be a map");
+    check("rules = {\"/admin/*\": \"admin\"}\n", "no wildcards");
+    check("rules = {\"/admin/\": \"admin\"}\n", "trailing slash");
+    check("rules = {\"admin\": \"admin\"}\n", "not a plain URL path");
+    check("rules = {\"/a/../b\": \"admin\"}\n", "not a plain URL path");
+    check("rules = {\"/\": \"public\"}\n", "isn't a role name");
+    check("rules = {\"/\": [\"admin\", \"login\"]}\n", "goes on its own");
+    check("rules = {\"/\": []}\n", "use \"login\"");
+    check("rules = {\"/\": 1}\n", "use \"login\"");
+    check("rules = data.get(\"x\")\n", "can't be used");
+
+    TempDir dir;
+    dir.write("code/pages/index.html", "<!DOCTYPE html><p>home</p>");
+    dir.write("code/pages/index.ms", "access = \"Bad Role\"\n");
+    CompileOutput out = compileApp(dir.path());
+    CHECK_FALSE(out.ok());
+    CHECK_MESSAGE(hasDiagnostic(out, "code/pages/index.ms: error: access: \"Bad Role\" isn't a role name"),
+                  allDiagnostics(out));
+}
+
+TEST_CASE("compile: a rule that covers nothing is a warning") {
+    TempDir dir;
+    dir.write("code/access.ms", "rules = {}\nrules[\"/admin\"] = \"admin\"\nrules[\"/old-admin\"] = \"admin\"\n");
+    dir.write("code/pages/admin.html", "<!DOCTYPE html><p>admin</p>");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    CHECK(hasDiagnostic(out, "code/access.ms: warning: the rule for /old-admin covers no page"));
+    CHECK_FALSE(hasDiagnostic(out, "rule for /admin "));
+}
+
+TEST_CASE("compile: golden route table for examples/clubhouse") {
+    CompileOutput out = compileApp(FOURFOLD_TESTS_DIR "/../examples/clubhouse", AppFolder::Missing::Fail);
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    std::string actual = describe(*out.app);
+    std::string goldenPath = FOURFOLD_TESTS_DIR "/compiler/golden/clubhouse.txt";
+    if (std::getenv("FOURFOLD_UPDATE_GOLDEN")) std::ofstream(goldenPath, std::ios::binary) << actual;
+    CHECK_EQ(actual, readFile(goldenPath));
 }

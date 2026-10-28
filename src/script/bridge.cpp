@@ -227,8 +227,19 @@ std::vector<std::string> ValueFields::names() const {
     return result;
 }
 
+Value userValue(const UserFacts& user) {
+    Value map = Value::make_map(4);
+    map.MapSet("id", toValue(user.id));
+    map.MapSet("name", toValue(user.name));
+    map.MapSet("email", toValue(user.email));
+    Value roles = Value::make_list(static_cast<int>(user.roles.size()));
+    for (const std::string& role : user.roles) roles.Push(toValue(role));
+    map.MapSet("roles", roles);
+    return map;
+}
+
 Value makeRequestValue(const RequestFacts& facts) {
-    Value req = Value::make_map(8);
+    Value req = Value::make_map(9);
     req.MapSet("method", toValue(facts.method));
     req.MapSet("path", toValue(facts.path));
     req.MapSet("query", pairsToMap(facts.query));
@@ -238,6 +249,7 @@ Value makeRequestValue(const RequestFacts& facts) {
     bool htmx = false;
     for (const auto& [name, value] : facts.headers) htmx = htmx || (name == "hx-request" && value == "true");
     req.MapSet("htmx", htmx ? Value::one : Value::zero);
+    req.MapSet("user", facts.user ? userValue(*facts.user) : Value::Null);
     req.Freeze();   // deep: handlers can read req, never change it
     return req;
 }

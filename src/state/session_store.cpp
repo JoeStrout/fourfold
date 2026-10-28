@@ -35,6 +35,16 @@ Result<std::unique_ptr<SessionStore>> SessionStore::open(const std::string& path
     return std::unique_ptr<SessionStore>(new SessionStore(std::move(db).value(), std::move(config), clock));
 }
 
+SessionConfig SessionStore::config() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return config_;
+}
+
+void SessionStore::setConfig(SessionConfig config) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    config_ = std::move(config);
+}
+
 std::string SessionStore::newId() { return toBase64Url(randomBytes(kIdBytes)); }
 
 std::optional<std::string> SessionStore::hashOfId(std::string_view cookieValue) {
@@ -136,12 +146,34 @@ Result<bool> SessionStore::replaceApp(const std::string& idHash, const std::stri
 
 Status SessionStore::touch(const std::string& idHash, int64_t lastUsedAt) {
     int64_t now = clock_.nowMillis();
-    if (now - lastUsedAt < config_.touchInterval.count()) return {};
     std::lock_guard<std::mutex> lock(mutex_);
+    if (now - lastUsedAt < config_.touchInterval.count()) return {};
     auto stmt = db_->statement("UPDATE sessions SET last_used_at = ?2 WHERE id_hash = ?1");
     if (!stmt) return stmt.error();
     stmt.value()->bindBlob(1, idHash).bindInt(2, now);
     return stmt.value()->run();
+}
+
+Status SessionStore::signIn(const std::optional<std::string>& oldIdHash, const std::string& newId,
+                            const std::string& userId, const std::string& addressGroup, const std::string& app) {
+    auto hash = hashOfId(newId);
+    if (!hash) return makeError(ErrorCode::Invalid, "not a session ID");
+    std::lock_guard<std::mutex> lock(mutex_);
+    return db_->transaction([&]() -> Status {
+        if (oldIdHash) {
+            auto del = db_->statement("DELETE FROM sessions WHERE id_hash = ?1");
+            if (!del) return del.error();
+            del.value()->bindBlob(1, *oldIdHash);
+            if (Status s = del.value()->run(); !s) return s;
+        }
+        auto stmt = db_->statement(
+            "INSERT INTO sessions (id_hash, user_id, created_at, last_used_at, address_group, engine, app)"
+            " VALUES (?1, ?2, ?3, ?3, ?4, '{}', ?5)");
+        if (!stmt) return stmt.error();
+        stmt.value()->bindBlob(1, *hash).bindText(2, userId).bindInt(3, clock_.nowMillis()).bindText(4, addressGroup)
+            .bindBlob(5, app);
+        return stmt.value()->run();
+    });
 }
 
 Status SessionStore::remove(const std::string& idHash) {

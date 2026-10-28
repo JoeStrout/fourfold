@@ -113,6 +113,25 @@ const char* const kDevClientScript = R"js((function () {
     try { return JSON.parse(event.data); } catch (e) { return {}; }
   }
 
+  // A small corner menu: dev mode's "sign in as..." picker and the access
+  // report.
+  function addMenu() {
+    var box = el("div", {
+      position: "fixed", left: "8px", bottom: "8px", zIndex: "2147483646", padding: "2px 8px",
+      background: "rgba(20, 20, 24, 0.75)", borderRadius: "4px",
+      font: "12px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
+    });
+    [["sign in as\u2026", "/__auth/fake?next=" + encodeURIComponent(location.pathname + location.search)],
+     ["access", "/__dev/access"]].forEach(function (item, i) {
+      if (i) box.appendChild(el("span", { color: "#888" }, " \u00b7 "));
+      var a = el("a", { color: "#eee" }, item[0]);
+      a.href = item[1];
+      box.appendChild(a);
+    });
+    document.body.appendChild(box);
+  }
+  if (document.body) addMenu(); else document.addEventListener("DOMContentLoaded", addMenu);
+
   var source = new EventSource("/__dev/reload");
   source.addEventListener("hello", function (e) {
     var d = data(e);

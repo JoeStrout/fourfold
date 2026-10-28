@@ -11,8 +11,10 @@
 // Compiles run on the instance's own thread, one at a time. The .ms files
 // are compiled on the script thread, a file at a time, between requests.
 //
-// Later milestones add config watching and the drain–migrate–swap sequence
-// here.
+// It also watches private/config/ (M6), if given a ConfigWatch: a changed
+// config is read again, and if it's valid, swapped into the engine; if not,
+// the previous one stays (overview §10). Later milestones add the
+// drain–migrate–swap sequence here.
 #pragma once
 
 #include <chrono>
@@ -25,6 +27,7 @@
 
 #include "base/result.h"
 #include "compiledapp/compiled_app.h"
+#include "config/app_config.h"
 #include "observer/observer.h"
 #include "partition/code_tree.h"
 #include "pipeline/engine.h"
@@ -32,6 +35,15 @@
 #include "script/script_host.h"
 
 namespace fourfold {
+
+// Watching the config (M6).
+struct ConfigWatch {
+    ConfigSources sources;     // sources.dir must outlive the instance
+    std::string stamp;         // configStamp() of the config already in use
+    // Called on the instance's thread after each reload, valid or not (a
+    // valid one is already in the engine).
+    std::function<void(const ConfigLoad&)> loaded;
+};
 
 struct LifecycleOptions {
     enum class Trigger {
@@ -42,6 +54,9 @@ struct LifecycleOptions {
     std::chrono::milliseconds pollInterval{250};
     // How long the tree must stay unchanged before compiling.
     std::chrono::milliseconds quietPeriod{200};
+    // Reload private/config/ when it changes (needs a script host, which
+    // evaluates it).
+    std::optional<ConfigWatch> config;
 };
 
 class AppInstance {
@@ -84,6 +99,7 @@ private:
     // On the instance's thread.
     void schedulePoll();
     void poll();
+    void pollConfig();
     CompileReport compileNow(const Snapshot& snapshot);
     std::optional<Snapshot> snapshot() const;
 

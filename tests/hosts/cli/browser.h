@@ -95,6 +95,8 @@ public:
         token_.clear();
     }
     const std::map<std::string, std::string>& cookies() const { return jar_; }
+    // Sets a cookie, as if a response had (e.g. to replay an old one).
+    void setCookie(const std::string& name, const std::string& value) { jar_[name] = value; }
 
 private:
     void remember(const std::string& response) {
@@ -105,7 +107,13 @@ private:
             size_t start = at + 14;
             std::string pair = headers.substr(start, headers.find(';', start) - start);
             size_t eq = pair.find('=');
-            jar_[pair.substr(0, eq)] = pair.substr(eq + 1);
+            std::string value = pair.substr(eq + 1);
+            // An empty value (Max-Age=0) deletes the cookie.
+            if (value.empty()) {
+                jar_.erase(pair.substr(0, eq));
+            } else {
+                jar_[pair.substr(0, eq)] = value;
+            }
         }
         std::string token = textBetween(response, "X-CSRF-Token&quot;: &quot;", "&quot;");
         if (token.empty()) token = textBetween(response, "name=\"_csrf\" value=\"", "\"");

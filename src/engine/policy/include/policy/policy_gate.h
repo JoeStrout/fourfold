@@ -1,6 +1,12 @@
-// PolicyGate: decides whether a request may reach a handler (Arch §5 policy;
-// overview §5). So far, CSRF protection; access rules, rate limits and the
-// spam checks join it in M6 and M7. Each check can only add a denial.
+// PolicyGate: decides whether a request may reach a route (Arch §5 policy;
+// overview §5): its access level, then CSRF protection. Rate limits and the
+// spam checks join it in M7. Each check is its own function, and can only
+// add a denial.
+//
+// Access (overview §5, Access control): the route's effective level,
+// computed by the compiler, against the visitor, looked up for this request.
+// Every route goes through the gate: pages, handlers, Markdown pages and
+// static files alike.
 //
 // CSRF (overview §5, CSRF protection), for every method but GET, HEAD and
 // OPTIONS:
@@ -19,11 +25,18 @@
 
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "compiledapp/compiled_app.h"
 #include "script/script_host.h"
 
 namespace fourfold {
+
+// Who's asking: signed in or not, and with which roles.
+struct Visitor {
+    bool signedIn = false;
+    std::vector<std::string> roles;   // sorted
+};
 
 // What the gate looks at, from the request.
 struct GateFacts {
@@ -32,11 +45,19 @@ struct GateFacts {
     std::string ownOrigin;                   // "https://example.com" (scheme, Host header)
     std::optional<std::string> csrfCookie;   // the CSRF cookie's value
     std::optional<std::string> csrfToken;    // from _csrf or X-CSRF-Token
+    Visitor visitor;
 };
 
 struct GateDecision {
+    enum class Denial {
+        None,        // allowed
+        NeedLogin,   // the route needs a signed-in visitor, and this one isn't (401)
+        Forbidden,   // signed in, but without a role the route needs (403)
+        Csrf,        // the request failed CSRF protection (403)
+    };
     std::optional<GateApproval> approval;   // set if allowed
-    int status = 0;                         // if denied: 403
+    Denial denial = Denial::None;
+    int status = 0;                         // if denied: 401 or 403
     std::string reason;                     // if denied: why, for the log and dev mode
 };
 
@@ -59,6 +80,10 @@ public:
     static const char* const kHeader;      // "X-CSRF-Token"
 
 private:
+    // Each adds a denial to `d`, or leaves it alone.
+    static void checkAccess(const RouteEntry& route, const GateFacts& facts, GateDecision& d);
+    void checkCsrf(const GateFacts& facts, GateDecision& d) const;
+
     std::string key_;
 };
 

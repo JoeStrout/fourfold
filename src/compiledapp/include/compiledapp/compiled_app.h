@@ -59,6 +59,32 @@ struct HandlerRef {
     std::string label() const;
 };
 
+// Who may use a route (overview §5, Access control), already combined from
+// every rule that applies: each requirement in `all` must be met (AND), and
+// a requirement is met by any of its roles (OR). A requirement with no
+// roles is "login": any signed-in user. No requirements: public.
+struct AccessLevel {
+    std::vector<std::vector<std::string>> all;   // each sorted, no repeats
+
+    bool isPublic() const { return all.empty(); }
+    // Adds a requirement (empty: "login"). Only ever tightens: a requirement
+    // already implied by another (a superset of roles, or "login" once a
+    // role is required) is dropped.
+    void require(std::vector<std::string> anyOf);
+    // Whether a visitor with these roles may use the route; `signedIn` false
+    // means not signed in (no roles).
+    bool allows(bool signedIn, const std::vector<std::string>& roles) const;
+    // "public", "login", "admin", "admin or moderator", "login and editor"...
+    std::string describe() const;
+
+    bool operator==(const AccessLevel& o) const { return all == o.all; }
+};
+
+// A role name: a letter, then letters, digits, '_' or '-', at most 64
+// bytes; and not "login" or "public", which mean something else in access
+// rules.
+bool isValidRoleName(const std::string& role);
+
 struct RouteEntry {
     RouteKind kind;
     // The file in code/ this route comes from: the .html for a page that has
@@ -75,6 +101,11 @@ struct RouteEntry {
     // names `session` or `flash`), or its page has a {{flash}} field: the
     // session is loaded, and locked while its code runs.
     bool usesSession = false;
+    // Who may use it (overview §5), from code/access.ms and the page's
+    // `access =`; `accessSources` names each rule that applied
+    // ("code/access.ms: /admin", "code/pages/admin/index.ms").
+    AccessLevel access{};
+    std::vector<std::string> accessSources{};
 };
 
 // Canonical URL path (see canonicalUrlPath, which reports the trailing slash
@@ -144,6 +175,10 @@ struct CompiledApp {
     // frags/layout/markdown.html, which wraps every Markdown page, if the
     // app has one (with {{content}} and {{title}}); else a built-in page.
     std::optional<CompiledTemplate> markdownLayout;
+    // frags/auth/layout.html, which wraps the engine's sign-in pages (with
+    // {{content}}, the engine's form or message, and {{title}}), if the app
+    // has one; else a built-in page.
+    std::optional<CompiledTemplate> authLayout;
     // pages/markdown.css exists, so pages with Markdown link it instead of
     // the built-in stylesheet.
     bool hasMarkdownCss = false;

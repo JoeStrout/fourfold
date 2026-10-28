@@ -52,6 +52,16 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
 // After the routes pass, which it checks links against.
 void markdownPass(const CodeListing& listing, const CodeTree& code, CompiledApp& app, Diagnostics& diagnostics);
 
+// Each route's effective access, from code/access.ms (evaluated by
+// `evaluator`) and the page files' `access =`. After the routes pass.
+void accessPass(const CodeListing& listing, const CodeTree& code, const std::map<RelPath, PageHandlers>& handlers,
+                DataEvaluator* evaluator, CompiledApp& app, Diagnostics& diagnostics);
+
+// An access level as written ("login", "admin", ["admin", "moderator"]): the
+// roles of which any will do, empty for "login"; or nullopt, with `error`
+// saying why it isn't one.
+std::optional<std::vector<std::string>> parseAccessValue(const Datum& value, std::string& error);
+
 // Warns about each local URL written in a template (href, src, hx-get, ...)
 // that no route serves. After the routes pass.
 void linksPass(const CodeListing& listing, const CompiledApp& app, Diagnostics& diagnostics);

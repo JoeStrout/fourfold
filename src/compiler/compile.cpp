@@ -53,6 +53,7 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
     templatesPass(listing.value(), code, *app, diagnostics);
     auto handlers = scriptsPass(listing.value(), code, options.scripts, *app, diagnostics);
     routesPass(listing.value(), handlers, *app, diagnostics);
+    accessPass(listing.value(), code, handlers, options.evaluator, *app, diagnostics);
     markdownPass(listing.value(), code, *app, diagnostics);
     linksPass(listing.value(), *app, diagnostics);
 

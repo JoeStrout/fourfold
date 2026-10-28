@@ -20,6 +20,15 @@ constexpr auto kPumpBatch = std::chrono::milliseconds(2);
 
 const char* const kTopLevelOverBudget =
     "the top level didn't finish within its budget; it should only define functions";
+const char* const kDataOverBudget =
+    "didn't finish within its budget; a declaration or config file should only build maps and lists";
+
+// The over-budget message for a run of this kind.
+std::string overBudget(const Run& run, const std::string& requestMessage) {
+    if (run.kind == Run::Kind::Discovery) return kTopLevelOverBudget;
+    if (run.kind == Run::Kind::Data) return kDataOverBudget;
+    return requestMessage;
+}
 
 std::atomic<bool> g_hostExists{false};
 
@@ -98,10 +107,8 @@ void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
         if (it == runs.end()) return;
         Run& r = *it->second;
         r.deadline = 0;
-        finish(r, errorOutcome(r.kind == Run::Kind::Discovery
-                                   ? kTopLevelOverBudget
-                                   : "the request took longer than its time budget (" +
-                                         describeMs(options.budget.wallClock) + ")",
+        finish(r, errorOutcome(overBudget(r, "the request took longer than its time budget (" +
+                                                 describeMs(options.budget.wallClock) + ")"),
                                r.fileName));
     });
     bool parked = run->parked;   // a run waiting for its session starts parked
@@ -148,7 +155,7 @@ bool ScriptHost::Impl::slice(Run& run) {
         return false;
     }
     if (!vm.IsRunning()) {
-        if (run.kind == Run::Kind::Discovery) {
+        if (run.kind == Run::Kind::Discovery || run.kind == Run::Kind::Data) {
             finish(run, HandlerOutcome{});   // the top level ran; `discovered` reads its globals
             return false;
         }
@@ -163,12 +170,11 @@ bool ScriptHost::Impl::slice(Run& run) {
         finish(run, outcomeFromResult(run));
         return false;
     }
-    if (run.instructions >= options.budget.instructions) {
-        finish(run, errorOutcome(run.kind == Run::Kind::Discovery
-                                     ? kTopLevelOverBudget
-                                     : "the request used more than its budget of " +
-                                           std::to_string(options.budget.instructions) +
-                                           " instructions (an endless loop?)",
+    uint64_t limit = run.instructionLimit ? run.instructionLimit : options.budget.instructions;
+    if (run.instructions >= limit) {
+        finish(run, errorOutcome(overBudget(run, "the request used more than its budget of " +
+                                                     std::to_string(options.budget.instructions) +
+                                                     " instructions (an endless loop?)"),
                                  run.fileName));
         return false;
     }
@@ -299,6 +305,14 @@ void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler,
     impl->loop->post([impl, args] {
         impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->context),
                        std::move(args->done));
+    });
+}
+
+void ScriptHost::setBudget(ScriptBudget budget) {
+    Impl* impl = impl_.get();
+    impl->loop->post([impl, budget] {
+        impl->options.budget = budget;
+        MiniScript::Value::MAX_COLLECTION_SIZE = budget.maxCollectionSize;
     });
 }
 

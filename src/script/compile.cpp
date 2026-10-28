@@ -1,8 +1,10 @@
-// Compiling .ms files into a ScriptBundle, and finding each page's handlers.
+// Compiling .ms files into a ScriptBundle, and finding each page's handlers;
+// and evaluating declaration and config files as data.
 
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <future>
 #include <set>
 
 #include "bridge.h"
@@ -281,6 +283,20 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
             pageOk = false;
         };
 
+        // access = "login" (overview §5): read now, at compile time. The top
+        // level has no data, session or files here, so the declaration can't
+        // depend on anything but the code (R10).
+        Value access = run.interp.GetGlobalValue("access");
+        if (!access.IsNull()) {
+            std::string why;
+            std::optional<Datum> d = toDatum(access, why);
+            if (!d) {
+                pageError("access must be \"login\", a role name, or a list of role names; it " + why);
+            } else {
+                handlers.access = std::move(*d);
+            }
+        }
+
         Value render = run.interp.GetGlobalValue("render");
         if (!render.IsNull()) {
             if (!render.IsFuncRef()) {
@@ -335,6 +351,81 @@ void ScriptHost::Impl::compile(const std::vector<CodeFile>& pages, const std::ve
     job->libs = &libs;
     job->done = std::move(done);
     job->step();
+}
+
+namespace {
+
+// What a data file's run may use: about a tenth of a request's budget. A
+// declaration or config file only builds maps and lists.
+constexpr uint64_t kDataInstructions = 1'000'000;
+
+}  // namespace
+
+void ScriptHost::Impl::evaluate(const std::string& source, const std::string& fileName, const std::string& global,
+                                std::function<void(EvaluatedData)> done) {
+    Value compileError;
+    List<FuncDef> functions = compileProgram(source, fileName, &compileError);
+    if (!compileError.IsNull()) {
+        EvaluatedData out;
+        out.error = scriptErrorFrom(compileError, fileName);
+        done(std::move(out));
+        return;
+    }
+    auto run = std::make_unique<Run>();
+    run->kind = Run::Kind::Data;
+    run->host = this;
+    run->fileName = fileName;
+    run->instructionLimit = kDataInstructions;
+    // The functions are kept alive by the interpreter that runs them.
+    run->discovered = [global, fileName, done](Run& r, const HandlerOutcome& outcome) {
+        EvaluatedData out;
+        if (outcome.kind == HandlerOutcome::Kind::Error) {
+            out.error = outcome.error;
+        } else {
+            std::string why;
+            Value v = r.interp.GetGlobalValue(String(global.c_str()));
+            std::optional<Datum> d = toDatum(v, why);
+            if (v.IsError()) {
+                out.error = scriptErrorFrom(v, fileName);   // a failed call, like data.get here
+            } else if (!d) {
+                out.error = ScriptError{global + " " + why + " (only numbers, strings, lists and maps are allowed here)",
+                                        fileName, 0};
+            } else {
+                out.value = std::move(*d);
+            }
+        }
+        done(std::move(out));
+    };
+    prepareInterpreter(*run, functions);
+    schedule(std::move(run));
+}
+
+namespace {
+
+EvaluatedData evaluateOnScriptThread(ScriptHost::Impl* impl, std::string source, std::string fileName,
+                                     std::string global) {
+    auto finished = std::make_shared<std::promise<EvaluatedData>>();
+    std::future<EvaluatedData> result = finished->get_future();
+    impl->loop->post([impl, source = std::move(source), fileName, global = std::move(global), finished] {
+        impl->evaluate(source, fileName, global, [finished](EvaluatedData out) { finished->set_value(std::move(out)); });
+    });
+    try {
+        return result.get();
+    } catch (const std::future_error&) {
+        EvaluatedData out;
+        out.error = ScriptError{"the script host stopped while evaluating", fileName, 0};
+        return out;
+    }
+}
+
+}  // namespace
+
+EvaluatedData ScriptHost::evaluate(const CodeFile& file, const std::string& global) {
+    return evaluateOnScriptThread(impl_.get(), file.contents(), codeFileName(file.path()), global);
+}
+
+EvaluatedData ScriptHost::evaluate(const ConfigFile& file, const std::string& global) {
+    return evaluateOnScriptThread(impl_.get(), file.contents(), file.name(), global);
 }
 
 }  // namespace fourfold

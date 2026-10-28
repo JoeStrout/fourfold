@@ -155,3 +155,27 @@ TEST_CASE("SessionStore: sweepExpired") {
     CHECK(f.live(fresh));
     CHECK_EQ(f.store->count().value(), 1);
 }
+
+TEST_CASE("SessionStore: signing in rotates the ID and keeps the app's part") {
+    Fixture f;
+    std::string anon = f.make("10.0.0.1", "{\"cart\":[1,2]}");
+    std::string signedIn = SessionStore::newId();
+    REQUIRE(f.store->signIn(SessionStore::hashOfId(anon), signedIn, "u1", "10.0.0.1", "{\"cart\":[1,2]}"));
+    CHECK_FALSE(f.live(anon));
+    auto r = f.store->load(*SessionStore::hashOfId(signedIn)).value();
+    REQUIRE(r);
+    CHECK_EQ(r->userId.value_or(""), "u1");
+    CHECK_EQ(r->app, "{\"cart\":[1,2]}");
+
+    // Without an anonymous session first, too.
+    std::string other = SessionStore::newId();
+    REQUIRE(f.store->signIn(std::nullopt, other, "u1", "10.0.0.2", "{}"));
+    CHECK(f.live(other));
+
+    // Signed-in sessions last longer than anonymous ones, and go together.
+    f.clock.advanceSeconds(3 * 24 * 3600);
+    CHECK(f.live(signedIn));
+    REQUIRE(f.store->removeForUser("u1"));
+    CHECK_FALSE(f.live(signedIn));
+    CHECK_FALSE(f.live(other));
+}

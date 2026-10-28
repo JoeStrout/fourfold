@@ -84,6 +84,18 @@ pre i { display: inline-block; width: 3.5em; color: #777; font-style: normal; us
 .note { color: #888; font-size: .85rem; }
 )css";
 
+const char* const kReportStyle = R"css(
+body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #fafafa; color: #222; }
+main { max-width: 64rem; margin: 0 auto; padding: 2rem 1.25rem; }
+h1 { font-size: 1.3rem; }
+table { border-collapse: collapse; width: 100%; background: #fff; }
+th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #e3e3e3; vertical-align: top; }
+td:first-child { font-family: ui-monospace, Menlo, monospace; }
+tr.restricted td:nth-child(3) { font-weight: 600; color: #8a3b00; }
+.note { color: #666; }
+.warning { background: #fff4d6; padding: .4rem .75rem; border-radius: 4px; }
+)css";
+
 }  // namespace
 
 std::string serverSentEvent(const std::string& name, const Datum& data) {
@@ -215,9 +227,62 @@ void DevTools::compileFinished(const CompileReport& report) {
     hub->loop.post([hub, event] { hub->broadcast(event); });
 }
 
+Datum DevTools::accessReport(const CompiledApp& app) {
+    Datum::ListItems routes;
+    for (const auto& [url, entry] : app.routes) {
+        Datum::ListItems sources;
+        for (const std::string& source : entry.accessSources) sources.push_back(str(source));
+        routes.push_back(Datum::map({{"url", str(url + (entry.trailingSlash && url != "/" ? "/" : ""))},
+                                     {"kind", str(routeKindName(entry.kind))},
+                                     {"access", str(entry.access.describe())},
+                                     {"sources", Datum::list(std::move(sources))}}));
+    }
+    Datum::ListItems warnings;
+    for (const Diagnostic& d : app.diagnostics) {
+        if (d.file == "code/access.ms" || d.message.compare(0, 7, "access:") == 0) warnings.push_back(str(d.toString()));
+    }
+    return Datum::map({{"generation", num(static_cast<double>(app.generation))},
+                       {"routes", Datum::list(std::move(routes))},
+                       {"warnings", Datum::list(std::move(warnings))}});
+}
+
 std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const AdmittedRequest& admitted) {
     if (request.method != "GET" && request.method != "HEAD") return std::nullopt;
     const std::string& path = admitted.path.path;
+    if (path == "/__dev/access" || path == "/__dev/access.json") {
+        std::shared_ptr<const CompiledApp> app = currentApp_ ? currentApp_() : nullptr;
+        if (!app) return HttpResponse::text(503, "The app hasn't compiled yet.\n");
+        Datum report = accessReport(*app);
+        HttpResponse r;
+        r.headers.set("Cache-Control", "no-store");
+        if (path == "/__dev/access.json") {
+            r.headers.set("Content-Type", "application/json");
+            r.body = toJson(report);
+            return r;
+        }
+        r.headers.set("Content-Type", "text/html; charset=utf-8");
+        std::string html = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Access report</title><style>";
+        html += kReportStyle;
+        html += "</style></head>\n<body><main>\n<h1>Access report</h1>\n<p class=\"note\">Every URL the app serves "
+                "(generation " + std::to_string(app->generation) + "), who may use it, and the rules that say so: "
+                "code/access.ms and each page file's <code>access =</code>. Dev mode only.</p>\n";
+        for (const Datum& w : report.asMap().at("warnings").asList()) {
+            html += "<p class=\"warning\">" + escapeHtml(w.asString()) + "</p>\n";
+        }
+        html += "<table>\n<tr><th>URL</th><th>Kind</th><th>Access</th><th>From</th></tr>\n";
+        for (const Datum& route : report.asMap().at("routes").asList()) {
+            const auto& m = route.asMap();
+            std::string access = m.at("access").asString();
+            std::string sources;
+            for (const Datum& s : m.at("sources").asList()) sources += (sources.empty() ? "" : "<br>") + escapeHtml(s.asString());
+            html += "<tr" + std::string(access == "public" ? "" : " class=\"restricted\"") + "><td>" +
+                    escapeHtml(m.at("url").asString()) + "</td><td>" + escapeHtml(m.at("kind").asString()) +
+                    "</td><td>" + escapeHtml(access) + "</td><td>" + sources + "</td></tr>\n";
+        }
+        html += "</table>\n</main></body></html>\n";
+        r.body = std::move(html);
+        return r;
+    }
     if (path == "/__dev/client.js") {
         HttpResponse r;
         r.headers.set("Content-Type", "text/javascript; charset=utf-8");

@@ -6,6 +6,7 @@
 // - file: any file in data/, whole (file.readLines, file.saveRaw, ...).
 // - RawData: a buffer of bytes, for binary files (raw_data.h).
 // - dropbox: the app's append-only output (dropbox.write).
+// - users: the engine's users (users.get, users.grant, ...).
 #pragma once
 
 #include <string>
@@ -23,6 +24,7 @@ void addData();
 void addFile();
 void addRawData();
 void addDropbox();
+void addUsers();
 
 // An intrinsic's error result.
 MiniScript::IntrinsicResult intrinsicError(const std::string& message);

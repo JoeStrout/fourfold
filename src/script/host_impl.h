@@ -35,6 +35,7 @@ struct Run {
     enum class Kind {
         Request,     // a handler, for one request; may park
         Discovery,   // a page's top level at compile time; may not park
+        Data,        // a declaration or config file, evaluated as data; may not park or import
     };
     enum class Phase { TopLevel, Handler };
 
@@ -66,12 +67,13 @@ struct Run {
     // What this run's RawData buffers hold (made on first use).
     std::shared_ptr<RawBudget> rawBudget;
 
-    // Discovery runs only: called as the run finishes, before its namespace
-    // is released, with an Error outcome if the top level failed.
+    // Discovery and Data runs only: called as the run finishes, before its
+    // namespace is released, with an Error outcome if the top level failed.
     std::function<void(Run&, const HandlerOutcome&)> discovered;
 
     MiniScript::Interpreter interp;
     uint64_t instructions = 0;   // counted in whole slices (see ScriptBudget)
+    uint64_t instructionLimit = 0;   // if set, instead of the budget's (Data runs)
     bool parked = false;         // waiting on a timer or a worker; not runnable
 
     // The run's state, for intrinsics: they reach it through hostData.
@@ -119,6 +121,11 @@ struct ScriptHost::Impl {
     // the script thread. The files must stay alive until then.
     void compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs,
                  std::function<void(CompiledScripts)> done);
+
+    // Evaluating a file as data (evaluate.cpp). `done` is called on the
+    // script thread.
+    void evaluate(const std::string& source, const std::string& fileName, const std::string& global,
+                  std::function<void(EvaluatedData)> done);
 };
 
 // One-time MiniScript setup, and Fourfold's intrinsics (runtime.cpp). Call on
@@ -141,6 +148,9 @@ ScriptError scriptErrorFrom(MiniScript::Value error, const std::string& fallback
 // `_ff_result` global; for a session run, with what it did to the session
 // (or an Error, if the session can't be saved).
 HandlerOutcome outcomeFromResult(Run& run);
+
+// A user as a map: id, name, email, roles (bridge.cpp). Not frozen.
+MiniScript::Value userValue(const UserFacts& user);
 
 // The frozen `req` map (bridge.cpp).
 MiniScript::Value makeRequestValue(const RequestFacts& facts);

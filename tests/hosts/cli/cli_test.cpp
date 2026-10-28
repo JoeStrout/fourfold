@@ -48,7 +48,7 @@ TEST_CASE("cli: serve argument errors are usage errors") {
              std::vector<std::string>{"serve", "app", "--listen", "8090"},
              std::vector<std::string>{"serve", "app", "--listen", ":8090"},
              std::vector<std::string>{"serve", "app", "--listen", "0.0.0.0:0"},
-             std::vector<std::string>{"serve", "app", "--listen", "0.0.0.0:8090"},   // no --host
+             std::vector<std::string>{"serve", "app", "--server-config"},
              std::vector<std::string>{"serve", "app", "--host", "a.com:80"},
              std::vector<std::string>{"serve", "app", "--frobnicate"},
          }) {

@@ -81,3 +81,76 @@ TEST_CASE("PolicyGate: CSRF cookies") {
     CHECK_FALSE(PolicyGate::isCsrfCookie(c.substr(1)));
     CHECK_FALSE(PolicyGate::isCsrfCookie(c + "x"));
 }
+
+TEST_CASE("PolicyGate: access, every level against every kind of visitor and method") {
+    PolicyGate gate(kKey);
+    std::string cookie = PolicyGate::newCsrfCookie();
+    std::string token = gate.tokenFor(cookie);
+
+    auto level = [](std::vector<std::vector<std::string>> reqs) {
+        AccessLevel a;
+        for (auto& r : reqs) a.require(r);
+        return a;
+    };
+    struct Level {
+        const char* name;
+        AccessLevel access;
+    };
+    const Level levels[] = {
+        {"public", level({})},
+        {"login", level({{}})},
+        {"admin", level({{"admin"}})},
+        {"admin or moderator", level({{"admin", "moderator"}})},
+        {"editor and admin", level({{"editor"}, {"admin"}})},
+    };
+    struct Who {
+        const char* name;
+        Visitor visitor;
+    };
+    const Who visitors[] = {
+        {"anonymous", {false, {}}},
+        {"member", {true, {}}},
+        {"moderator", {true, {"moderator"}}},
+        {"admin", {true, {"admin"}}},
+        {"admin+editor", {true, {"admin", "editor"}}},
+    };
+    // Expected: allowed? by [level][visitor]
+    const bool expected[5][5] = {
+        {true, true, true, true, true},
+        {false, true, true, true, true},
+        {false, false, false, true, true},
+        {false, false, true, true, true},
+        {false, false, false, false, true},
+    };
+    for (size_t l = 0; l < 5; l++) {
+        RouteEntry route{RouteKind::Static, RelPath::parse("pages/x.png").value()};
+        route.access = levels[l].access;
+        for (size_t v = 0; v < 5; v++) {
+            for (const char* method : {"GET", "HEAD", "POST", "DELETE"}) {
+                INFO(levels[l].name << " / " << visitors[v].name << " / " << method);
+                GateFacts f = post(std::nullopt, cookie, token);
+                f.method = method;
+                f.visitor = visitors[v].visitor;
+                GateDecision d = gate.check(route, f);
+                CHECK_EQ(d.approval.has_value(), expected[l][v]);
+                if (expected[l][v]) continue;
+                bool signedIn = visitors[v].visitor.signedIn;
+                CHECK(d.denial == (signedIn ? GateDecision::Denial::Forbidden : GateDecision::Denial::NeedLogin));
+                CHECK_EQ(d.status, signedIn ? 403 : 401);
+            }
+        }
+    }
+}
+
+TEST_CASE("PolicyGate: access is checked before CSRF, and both must pass") {
+    PolicyGate gate(kKey);
+    RouteEntry route{RouteKind::Handler, RelPath::parse("pages/x.ms").value()};
+    route.access.require({"admin"});
+    GateFacts f = post(std::nullopt, std::nullopt, std::nullopt);
+    GateDecision d = gate.check(route, f);
+    CHECK(d.denial == GateDecision::Denial::NeedLogin);
+    f.visitor = {true, {"admin"}};
+    d = gate.check(route, f);
+    CHECK(d.denial == GateDecision::Denial::Csrf);
+    CHECK_FALSE(d.approval);
+}

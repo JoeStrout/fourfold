@@ -35,7 +35,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 - A **memory budget** per VM. Hard with a shared GC; possible approaches are per-VM allocation counters, or a process-level limit as a backstop (§3). *M2: missing, and needed (R4, open).*
 - A way to **remove or replace compiling intrinsics** (`import`, any eval-like path) per VM, and an **import resolver hook** so `import` resolves within `code/lib/` through Fourfold. *M2: done host-side. Shell intrinsics are never registered, and `import` is replaced, process-wide.*
 - **Bytecode serialization**, so CGI mode can load a cached compiled app rather than recompiling (§8 of the overview). Without it, CGI mode recompiles `.ms` files when its cache is cold. *M5: not needed for v1; CGI mode will cache the compiled app's plain parts and compile only the requested page (see [m5-results.md](m5-results.md)).*
-- A clean **restricted VM** configuration (no I/O intrinsics) for evaluating declaration and config files as data.
+- A clean **restricted VM** configuration (no I/O intrinsics) for evaluating declaration and config files as data. *M6: done host-side, as a run kind (`Run::Kind::Data`) that gets no services, can't import or wait, and has a small budget; see [m6-results.md](m6-results.md).*
 
 ---
 
@@ -182,7 +182,7 @@ The extra conversion step (`Value` → `Datum` → bytes, instead of `Value` →
 | `CodeTree` | list and read; yields `CodeFile` objects. **No write.** |
 | `DataDir` | read, atomic write, locked update, append, list, delete; hides `data/.fourfold/` |
 | `Dropbox` | append only |
-| `ConfigDir` | read only |
+| `ConfigDir` | read only; yields `ConfigFile`, which only it creates (M6) |
 | `StateDir` | read and write, engine only |
 
 Path canonicalization and the anti-traversal rule live here and nowhere else. **Nothing else in Fourfold opens files in an app folder directly**; a code-review rule, but easy to check by grepping for raw file APIs outside `partition` and `sqlite`.
@@ -227,7 +227,7 @@ The compiler is, apart from its use of `script`, **a pure function from files to
 
 Internally it's a set of passes over a shared in-progress model, so each feature (forms, Markdown, migrations) adds a pass without disturbing the others.
 
-**`config`.** Reads `private/config/app.ms`, `secrets.ms`, and the optional server config (via `DataEvaluator`), applies defaults, and clamps app values to the server's ceilings. The result is an immutable `AppConfig` struct, made of one sub-struct per area (`SessionConfig`, `BudgetConfig`, `OutboundConfig`, …). **Each component receives only its own sub-struct**, so adding a setting touches `config` and the one component that uses it. Secret values go into a `SecretVault`, which is handed only to `outbound`, `mail`, and `appdata`, and never to `script`.
+**`config`.** Reads `private/config/app.ms`, `secrets.ms`, and the optional server config (via `DataEvaluator`), applies defaults, and clamps app values to the server's ceilings. The result is an immutable `AppConfig` struct, made of one sub-struct per area (`SessionConfig`, `BudgetConfig`, `OutboundConfig`, …). **Each component receives only its own sub-struct**, so adding a setting touches `config` and the one component that uses it. Secret values go into a `SecretVault`, which is handed only to `outbound`, `mail`, and `appdata`, and never to `script`. *As built in M6* (`config/app_config.h`): `loadConfig` returns an `AppConfig` with `SiteConfig`, `ScriptBudget`, `SessionConfig`, `AuthConfig` and `MailConfig`, and builds the `Mailer` itself, so engine-only secrets never leave `config` except inside it; the vault proper comes with `outbound` (M9). `lifecycle` reloads the config when `private/config/` changes.
 
 **`script`.** Everything that knows about MiniScript. Its public face is small:
 
@@ -254,7 +254,7 @@ struct RunContext {
 };
 ```
 
-*As built in M5* (`script/script_host.h`): the request facts, the render options (nonce, CSRF token), `SessionAccess` (which the host calls to lock and load the session before the page's code runs), the session size cap, `DataFiles` and `Dropbox`. The app is passed to `ScriptHost::run` beside it, with the `GateApproval`. `script` depends on `appdata` for `DataFiles`; both are plain C++ below the engine.
+*As built in M5* (`script/script_host.h`): the request facts, the render options (nonce, CSRF token), `SessionAccess` (which the host calls to lock and load the session before the page's code runs), the session size cap, `DataFiles` and `Dropbox`; from M6, the `UserDirectory` behind the `users` module (the engine's adapter over `AuthStore`), and `req.user` in the request facts. The app is passed to `ScriptHost::run` beside it, with the `GateApproval`. `script` depends on `appdata` for `DataFiles`; both are plain C++ below the engine.
 
 The intrinsic modules (`data`, `file`, `RawData`, `db`, `http`, `secrets`, `session`, `users`, `mail`, `frag`, `markdown`, `redirect`, `json`, `status`, `enqueue`, `publish`, `formState`, `reshow`, `ratelimit`, `unsafeHTML`, …) are **each a separate file**, depending only on `RunContext` and the bridge. A VM gets a module only if its service pointer is non-null. So the per-kind restrictions in the overview (no `http` in migrations, no `session` in jobs, no `job` map outside `code/jobs/`) come from which services the engine supplies, not from checks scattered through the modules.
 
@@ -282,7 +282,7 @@ Each store's interface deals in `Datum`, bytes, and plain structs. Redis or Post
 
 **`outbound`.** `OutboundClient::send(OutboundRequest)` where header and URL parts are `std::variant<std::string, SecretRef>`. The client checks the allowlist (from the compiled app) and the host config's tightening, resolves DNS, checks and pins IPs, follows redirects, enforces limits, and **substitutes secret values only as the bytes go out**. A `SecretRef` is a name; the script side wraps it in a handle. The secret's value never exists on the script thread, so no script bug can leak it into a page or a log.
 
-**`mail`.** `Mailer::send(Message)` with structured fields only (no raw headers). Used by `authflow` for magic links and by the `mail` intrinsic.
+**`mail`.** `Mailer::send(Message)` with structured fields only (no raw headers). Used by `authflow` for magic links and by the `mail` intrinsic. *As built in M6:* SMTP and Postmark over the system's libcurl, plus a log mailer for dev mode.
 
 ### Engine
 
@@ -301,7 +301,7 @@ Reserved prefixes (`/__auth/`, `/__fourfold/`, `/__dev/`) are routed to their ow
 
 **`policy`.** `PolicyGate::check(RouteEntry, RequestFacts, stores) → Decision`. Access level, CSRF token and `Origin`, rate limits, timing tokens, and challenges. Each check is a separate function that can only add a denial, which mirrors the overview's "rules can only tighten". Table-driven tests cover it thoroughly; it's the piece most worth over-testing.
 
-**`authflow`.** The engine's own pages and flows (§5): magic-link request and redemption, sign-out (one device, or everywhere), fake login in dev. It uses `AuthStore`, `SessionStore`, `Mailer`, and `template` (wrapping the engine-rendered form in the app's `frags/auth/` template). It's routes plus logic, and never runs app code.
+**`authflow`.** The engine's own pages and flows (§5): magic-link request and redemption, sign-out (one device, or everywhere), fake login in dev. It uses `AuthStore`, `SessionStore`, `Mailer`, and `template` (wrapping the engine-rendered form in the app's `frags/auth/` template). It's routes plus logic, and never runs app code. *As built in M6:* it implements `AuthRoutes`, an interface in `pipeline` (like `EngineHooks`), so `pipeline` doesn't depend on it; the pipeline runs Identify and the CSRF check before handing it a request. The wrapper is `frags/auth/layout.html`.
 
 **`jobs`.** Evaluates the schedule (cron and the friendlier forms), claims due and queued jobs from `JobQueue`, and runs them through `ScriptHost` with a job `RunContext`, a job budget, and a capped worker count. `fourfold run-jobs` (CGI mode) drives the same code from the CLI.
 
@@ -392,7 +392,8 @@ Several of the overview's guarantees can be made structural in the C++ code itse
 | Fields are escaped; HTML comes only from templates or `unsafeHTML` (§4) | `Html` is a distinct type; `FieldSource` returns strings and `Html` as different variants. |
 | Secrets go only to their hosts (§6) | `SecretRef` in requests; values held only in `SecretVault`, never on the script thread. |
 | Engine logs are separate from the dropbox (§1) | `EngineLog` and `Dropbox` are unrelated types. |
-| Access is checked before any handler (§5) | `ScriptHost` runs a handler only given a `GateApproval` token, which only `PolicyGate` creates. |
+| Access is checked before any handler (§5) | `ScriptHost` runs a handler only given a `GateApproval` token, which only `PolicyGate` creates. (From M6, the gate runs for every route, static files included.) |
+| Config is evaluated only from `private/config/` (§10) | `DataEvaluator` takes `CodeFile` or `ConfigFile`, which only `CodeTree` and `ConfigDir` create. |
 | Rules can only tighten | Combination code (access, limits, config ceilings) builds from "deny" toward "allow" one way only, in one function per kind. |
 
 ---

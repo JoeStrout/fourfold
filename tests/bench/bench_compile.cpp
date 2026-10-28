@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
         CompileOptions options;
         options.generation = generation;
         options.scripts = host.get();
+        options.evaluator = host.get();
         return compile(code, options);
     };
 

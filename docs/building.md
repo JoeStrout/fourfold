@@ -4,9 +4,10 @@
 
 - CMake 3.21 or later, and Ninja
 - A C++17 compiler: Clang 10+ (including Apple Clang) or GCC 9+
+- libcurl, for sending email (M6): part of the macOS SDK; on Debian/Ubuntu, `apt install libcurl4-openssl-dev`
 - [MiniScript 2](https://github.com/JoeStrout/miniscript2), checked out next to this repository as `../miniscript2` (or set `FOURFOLD_MS2_DIR`). Configuring fails without it.
 
-On macOS: `xcode-select --install`, then `brew install cmake ninja`. On Debian/Ubuntu: `apt install build-essential cmake ninja-build`.
+On macOS: `xcode-select --install`, then `brew install cmake ninja`. On Debian/Ubuntu: `apt install build-essential cmake ninja-build libcurl4-openssl-dev`.
 
 ## Build and test
 
@@ -24,6 +25,7 @@ To run a sample app:
 ./build/dev/bin/fourfold dev examples/scripts         # pages with MiniScript (M2)
 ./build/dev/bin/fourfold dev examples/guestbook       # templates, fragments, Markdown and HTMX (M4)
 ./build/dev/bin/fourfold dev examples/markdown-site   # a site made only of .md files (M4)
+./build/dev/bin/fourfold dev examples/clubhouse       # sign-in and access rules (M6)
 ```
 
 `fourfold dev` watches `code/`: save a file, and open pages reload (or, for a stylesheet, swap it in place). Compile errors show as an overlay on open pages, while the last version that compiled keeps serving. Touching `code/.deploy` recompiles at once.

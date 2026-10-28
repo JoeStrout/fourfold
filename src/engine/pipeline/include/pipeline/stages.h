@@ -1,8 +1,8 @@
 // The request pipeline's stages (Arch §5, pipeline). Each is a function over
 // plain structs, so it can be tested on its own. Engine::handle runs them in
-// order. So far there are Admit, Route, Parse (query and url-encoded forms,
-// as raw strings), Dispatch, and Respond; Identify, Gate and Commit arrive
-// with their milestones.
+// order: Admit, Route, Identify (the signed-in user), Gate (PolicyGate),
+// Parse (query and url-encoded forms, as raw strings), Dispatch, Respond,
+// and Commit (the session).
 #pragma once
 
 #include <functional>
@@ -15,8 +15,10 @@
 #include "observer/observer.h"
 #include "partition/code_tree.h"
 #include "partition/paths.h"
+#include "pipeline/auth_routes.h"
 #include "pipeline/hooks.h"
 #include "script/script_host.h"
+#include "state/auth_store.h"
 #include "state/engine_log.h"
 #include "state/lock_service.h"
 #include "state/session_store.h"
@@ -47,6 +49,13 @@ struct EngineOptions {
     const Dropbox* dropbox = nullptr;
     // The engine log: script errors and refused requests. May be null.
     EngineLog* log = nullptr;
+    // Users (M6): who's signed in, for access rules, `req.user` and the
+    // `users` module. Needs `sessions`; without it, every visitor is
+    // anonymous, and restricted routes are refused. Must outlive the engine.
+    AuthStore* auth = nullptr;
+    // The sign-in pages under /__auth/; null: not found. Must outlive the
+    // engine.
+    AuthRoutes* authRoutes = nullptr;
 
     // The site is reached over HTTPS (perhaps through a proxy that ends
     // TLS): cookies get Secure and the __Host- prefix, and a request's own

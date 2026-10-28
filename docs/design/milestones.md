@@ -6,8 +6,8 @@
 
 - **Milestone 1 is a minimal, working skeleton**: it serves static pages, but through the real component structure, so every later milestone fills in a component rather than restructuring one.
 - **After that, risk decides the order.** The milestones that come first are the ones whose outcome could change the design or force large rewrites: the threading model, per-request VM cost, swapping compiled apps, and the template security core. Features that are large but well understood (TLS, job scheduling, the dev panels) come later, when the foundations under them are settled.
-- **Each milestone ends with something runnable**, a sample app that exercises what's new, and automated tests. A milestone isn't done until its exit criteria are met, including any measurements.
-- **Security features arrive complete or not at all.** A milestone may leave a feature out, but never ships a weakened version of one. Where an early milestone runs without a protection that comes later (e.g. CSRF before M5), it runs only in dev mode on localhost, and says so at startup. (From M5, `fourfold serve` runs on other addresses without sign-in, rate limits, or a per-request memory limit, and says so at startup.)
+- **Each milestone ends with something runnable**, a sample app that exercises what's new, and automated tests. Its docs include what's new for site authors ([user guide](../user/user_guide.md)) and for whoever runs the server ([admin guide](../admin/admin_guide.md), from M6). A milestone isn't done until its exit criteria are met, including any measurements.
+- **Security features arrive complete or not at all.** A milestone may leave a feature out, but never ships a weakened version of one. Where an early milestone runs without a protection that comes later (e.g. CSRF before M5), it runs only in dev mode on localhost, and says so at startup. (From M5, `fourfold serve` runs on other addresses without sign-in, rate limits, or a per-request memory limit, and says so at startup; M6 added sign-in and access rules, with sign-in links throttled.)
 
 ---
 
@@ -174,6 +174,8 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** an app with a public area, a members area (including static files), and an admin area, verified by a test that requests every route as each kind of visitor; the access report matches; magic-link sign-in works end to end against a real mail server.
 
+**Decisions made here** (details in [m6-results.md](m6-results.md)): R10 retired: `access.ms` and config files run in a restricted VM (`DataEvaluator`, host-side, no MS2 change), and a page's `access =` is read during its compile-time discovery run, which has no data, session or files. The gate now runs for every route, static files included. Mail goes through the system's libcurl (SMTP with required STARTTLS or TLS, and Postmark). The emailed link shows a page, and signing in takes a POST from it, so mail scanners can't use the token. Sign-in links are throttled in `AuthStore` (per address and per visitor), since M7's rate limits come later. Sign-up is open by default (`auth.signUp`). Unknown config settings are errors; an invalid config keeps the previous one, and `fourfold serve` won't start with one. Sign-in links point to `config.domain` in serve mode, never the request's Host. Responses to signed-in visitors are `private, no-store`. The sign-in pages wrap in `frags/auth/layout.html`. Sign-in against a real mail server is left to check by hand.
+
 ---
 
 ## M7 — Forms and abuse protection
@@ -185,10 +187,11 @@ The risks most likely to change the design, and where each is retired:
 - Multipart parsing under limits; uploads checked by content; `req.files`; saving uploads to `data/`; serving files from `data/` safely (content-type allowlist, `attachment` by default).
 - Checking forms against templates: mismatch warnings, and adding browser-side validation attributes.
 - `state.RateStore`; default limits for non-GET requests; `limits.ms`; `ratelimit()` from code; IPv6 /64 grouping; 429 handling.
+- The visitor's real address behind a reverse proxy: a server setting naming trusted proxy addresses, whose `X-Forwarded-For` is used only for requests from them (never trusted otherwise). Until then, everyone behind a proxy shares one address group, so M6's per-address sign-in throttle and M5's anonymous-session caps count the whole site together (admin guide, "Behind a reverse proxy").
 - Timing tokens (`minSeconds`) and proof-of-work challenges, including the client-side solver.
 - `devtools`: limits and form warnings added to the access report; the request inspector shows counted limits and rejections.
 
-**Exit criteria:** the guestbook with a declared form, error redisplay, and spam rules; tampered submissions (extra fields, bad choices, forged file types) are rejected or dropped in tests; a flood test is throttled as configured.
+**Exit criteria:** the guestbook with a declared form, error redisplay, and spam rules; tampered submissions (extra fields, bad choices, forged file types) are rejected or dropped in tests; a flood test is throttled as configured, including behind a trusted proxy (visitors told apart by forwarded address; a forged `X-Forwarded-For` from an untrusted peer ignored).
 
 ---
 

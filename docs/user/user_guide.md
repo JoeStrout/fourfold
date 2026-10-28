@@ -3,11 +3,12 @@
 How to build a web site with Fourfold: pages, templates, MiniScript code,
 stored data and sessions. This guide is for the person writing the site. It
 assumes Fourfold is already installed and serving your app with
-`fourfold serve`; setting that up is covered in the admin guide.
+`fourfold serve`; setting that up is covered in the
+[admin guide](../admin/admin_guide.md).
 
-*Status: covers what works as of Milestone 5. Features still to come (sign-in,
-access rules, form validation, uploads, databases, background jobs and more)
-will be added here as they arrive.*
+*Status: covers what works as of Milestone 6. Features still to come (form
+validation, rate limits, uploads, databases, background jobs and more) will be
+added here as they arrive.*
 
 MiniScript itself isn't covered here; see [miniscript.org](https://miniscript.org)
 for the language. This guide covers what Fourfold adds to it.
@@ -29,14 +30,18 @@ for the language. This guide covers what Fourfold adds to it.
 11. [Files in data/: file and RawData](#files-in-data-file-and-rawdata)
 12. [Remembering visitors: session](#remembering-visitors-session)
 13. [One-time messages: session.flash](#one-time-messages-sessionflash)
-14. [Forms and CSRF protection](#forms-and-csrf-protection)
-15. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
-16. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
-17. [Output: print and the dropbox](#output-print-and-the-dropbox)
-18. [Errors and limits](#errors-and-limits)
-19. [Deploying changes](#deploying-changes)
-20. [Developing on your own machine](#developing-on-your-own-machine)
-21. [Quick reference](#quick-reference)
+14. [Signing in: req.user](#signing-in-requser)
+15. [Who may see what: access rules](#who-may-see-what-access-rules)
+16. [Users and roles: users](#users-and-roles-users)
+17. [Configuration: private/config](#configuration-privateconfig)
+18. [Forms and CSRF protection](#forms-and-csrf-protection)
+19. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
+20. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
+21. [Output: print and the dropbox](#output-print-and-the-dropbox)
+22. [Errors and limits](#errors-and-limits)
+23. [Deploying changes](#deploying-changes)
+24. [Developing on your own machine](#developing-on-your-own-machine)
+25. [Quick reference](#quick-reference)
 
 ---
 
@@ -49,7 +54,7 @@ An app is one folder with four parts:
 | `code/` | Your site: pages, templates, MiniScript, images, CSS | nothing at run time; it's compiled when deployed |
 | `data/` | What the app stores, through [`data`](#persistent-site-wide-data-data) and [`file`](#files-in-data-file-and-rawdata) | read and write it |
 | `dropbox/` | The app's output: logs it writes, and `print` output | only add to it |
-| `private/` | Fourfold's own files: sessions, logs, keys | nothing |
+| `private/` | the app's [configuration](#configuration-privateconfig) (`private/config/`, which you write), and Fourfold's own files: users, sessions, logs, keys (`private/state/`) | nothing |
 
 Inside `code/`:
 
@@ -58,6 +63,7 @@ Inside `code/`:
 | `code/pages/` | Everything with a URL: pages, their code, and static files |
 | `code/frags/` | Pieces of HTML (and Markdown) that pages and code put together |
 | `code/lib/` | MiniScript modules shared by pages |
+| `code/access.ms` | who may see what: [access rules](#who-may-see-what-access-rules) |
 
 Nothing outside `code/pages/` has a URL, and the only way anything in `data/`
 reaches a visitor is through your code.
@@ -427,6 +433,7 @@ is **frozen**: you can read it but not change it.
 | `req.form` | a submitted form's fields, as a map of strings |
 | `req.headers` | the request headers, with **lowercase** names: `req.headers["user-agent"]` |
 | `req.htmx` | 1 if HTMX sent the request, else 0 |
+| `req.user` | the [signed-in visitor](#signing-in-requser), or `null` |
 
 Things to know:
 
@@ -801,7 +808,9 @@ end function
 Treat a session as a convenience that can vanish, not as permanent storage.
 It's gone when:
 
-- the visitor hasn't been back for **24 hours**, or it's **7 days** old;
+- the visitor hasn't been back for **24 hours**, or it's **7 days** old (for
+  a signed-in visitor, **14 days** and **30 days**);
+- the visitor signs out;
 - the visitor clears their cookies or uses another browser;
 - the server has to make room (it keeps at most 1,000 sessions per visitor
   address, and 100,000 in all, dropping the oldest first).
@@ -883,6 +892,272 @@ storing anything else in `session`. Put `{{flash}}` only on the pages your
 redirects land on, rather than in a header shared by every page: every page
 with that field loads the visitor's session, so other pages would load it for
 nothing.
+
+---
+
+## Signing in: `req.user`
+
+Fourfold signs visitors in for you. Your code never sees a password, a
+sign-in token or a session cookie; it sees `req.user`:
+
+```
+render = function(req)
+    if req.user == null then return {"greeting": "Hello, visitor."}
+    return {"greeting": "Hello, " + req.user.name + "."}
+end function
+```
+
+`req.user` is `null` for a visitor who isn't signed in, or a frozen map:
+
+| Field | Contents |
+|---|---|
+| `id` | a stable, opaque string: use it as the key for the user's data |
+| `name` | a display name (at first, the part of the email address before the `@`) |
+| `email` | the email address they signed in with (lowercase) |
+| `roles` | a list of role names, like `["admin"]` |
+
+Fourfold keeps only this; anything else about a user (a profile, settings,
+their posts) is your app's data, kept with `data` and keyed by `req.user.id`.
+
+### The sign-in pages
+
+The pages live at reserved URLs, and you link to them:
+
+| URL | Is |
+|---|---|
+| `/__auth/login?next=/somewhere` | the sign-in form; afterward, the visitor goes to `next` |
+| `/__auth/logout` | a page with "Sign out" and "Sign out on every device" buttons |
+
+To sign out from your own page, post to `/__auth/logout` (a form in your
+template gets its CSRF token like any other):
+
+```html
+<form method="post" action="/__auth/logout"><button>Sign out</button></form>
+```
+
+Add a hidden `everywhere` field with the value `1` to sign out on every
+device, and a `next` field to say where to go afterward (the home page if you
+don't).
+
+**Signing in is by email:** the visitor types their address, and Fourfold
+emails them a link. The link works once, for 15 minutes; opening it shows a
+"Sign in" button, and pressing it signs them in. There's no password, and
+nothing to sign up for: an address's first sign-in creates its user. (To
+allow only users you've chosen, see `signUp` under
+[Configuration](#configuration-privateconfig).) Sending email needs setting
+up, also under Configuration; in dev mode, the email is printed in the
+terminal instead.
+
+What Fourfold does along the way:
+
+- **The answer to "email me a link" is the same** whether or not the address
+  can sign in, so the form doesn't tell anyone who has an account.
+- **Links are limited:** three an hour for one address, and ten an hour from
+  one visitor's address, so the form can't be used to flood an inbox.
+- **Signing in starts a new session**, with a new ID, so an ID someone
+  planted beforehand is useless. Whatever the visitor had in `session` before
+  signing in (a shopping cart, say) is kept.
+- **Signing out deletes the session** on the server, not just the cookie,
+  along with everything in it.
+- Sign-ins, sign-outs and refused links are written to the engine log.
+
+### Making the pages look like your site
+
+The sign-in pages are plain. To wrap them in your site's design, add
+`code/frags/auth/layout.html`, a whole page with a `{{content}}` field (and
+`{{title}}`, if you like):
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head><title>{{title}} · My Site</title><link rel="stylesheet" href="/style.css"></head>
+<body>
+  {{> header}}
+  <main>{{content}}</main>
+</body>
+</html>
+```
+
+Fourfold puts its form (or message) in `{{content}}`, so the design is yours
+but the form isn't: a template can't drop its protection or send it
+somewhere else.
+
+---
+
+## Who may see what: access rules
+
+Pages are public unless a rule says otherwise. A rule names who may use a
+URL:
+
+| Value | Means |
+|---|---|
+| `"login"` | anyone signed in |
+| `"admin"` (any role name) | signed in, with that role |
+| `["admin", "moderator"]` | signed in, with **any** of these roles |
+
+Rules go in two places.
+
+**`code/access.ms`**, for whole parts of the site:
+
+```
+rules = {}
+rules["/members"] = "login"
+rules["/admin"] = "admin"
+rules["/forum/mod"] = ["admin", "moderator"]
+rules["/board/post"] = "login"
+```
+
+A rule covers its path **and everything below it**: `"/members"` covers
+`/members/`, `/members/handbook`, and `/members/photos/team.jpg`, but not
+`/membership`. That includes static files and Markdown pages, so a members'
+folder keeps its images and videos to members too. A rule can also name one
+handler (`/board/post` above), leaving the rest of its page public. There are
+no wildcards (`/users/*/edit`); a rule is a plain path, written without a
+trailing slash.
+
+**`access =` in a page's `.ms` file**, for that page and every handler in it:
+
+```
+// pages/admin/index.ms
+access = "admin"
+```
+
+How they combine:
+
+- **Every rule that applies must be met.** If `access.ms` says `"login"` for
+  `/team` and `pages/team/pay.ms` says `"accountant"`, a visitor needs to be
+  signed in *and* an accountant. A rule can only make a page harder to reach,
+  never easier.
+- So there's no public page inside a protected folder: to make
+  `/admin/help` public, move it out of `/admin`.
+- `access.ms` and `access =` are read when the app is compiled, as data:
+  they can build strings and lists, but can't use `data`, `session`, files or
+  `import`. A change takes effect with the next deploy, like any code.
+- A rule in `access.ms` that covers nothing gets a warning when the app
+  compiles, usually because a folder was renamed. A mistake in a rule (a bad
+  path or value) is a compile error.
+
+What visitors see when a rule keeps them out:
+
+| Who | Asking for a page (GET) | Anything else (a POST, say) |
+|---|---|---|
+| not signed in | sent to sign in, then back to the page | 401 |
+| signed in, without the role | 403 | 403 |
+
+Your handlers never run for them. Pages behind a rule are sent with
+`Cache-Control: private, no-store`, so shared caches never hand them to
+someone else. (So are pages shown to a signed-in visitor, since they may
+mention who's asking.)
+
+Finer checks, like "only the author may delete this post", are your code's:
+compare `req.user.id` with what you stored.
+
+In dev mode, **the access report** at `/__dev/access` lists every URL your app
+serves, who may use it, and which rules said so.
+
+---
+
+## Users and roles: `users`
+
+Roles are names you choose: `"admin"`, `"moderator"`, `"editor"`. A user's
+roles are in `req.user.roles`, and your code can change them with `users`:
+
+| Call | Does |
+|---|---|
+| `users.get(id)` | the user's map (like `req.user`), or `null` |
+| `users.find(email)` | the same, by email address |
+| `users.grant(id, role)` | gives the user the role |
+| `users.revoke(id, role)` | takes it away |
+
+```
+post.promote = function(req)
+    u = users.find(req.form.email)
+    if u == null then return status(404, "No such user; they need to sign in once first.")
+    users.grant u.id, "moderator"
+    return redirect("/admin/")
+end function
+```
+
+- A change applies from the user's next request: roles are looked up on every
+  request, never remembered in the session.
+- A role name starts with a letter, then letters, digits, `_` or `-`.
+  `"login"` and `"public"` can't be roles.
+- Granting a role a user has, or revoking one they don't, is fine. A user that
+  doesn't exist is an error.
+- Your code is trusted to do this; guard the pages that call it with an access
+  rule (`"admin"`, say).
+- The first admins come from the configuration (`auth.admins`): they get the
+  `"admin"` role when they sign in.
+
+---
+
+## Configuration: `private/config`
+
+An app needs no configuration to start: every setting has a default. When it
+does need some, it goes in `private/config/app.ms`, a MiniScript file read as
+data (no `data`, files or `import`), which sets a map called `config`:
+
+```
+// private/config/app.ms
+config = {}
+config.domain = "club.example.com"
+config.auth = {"admins": ["you@example.com"], "signUp": "open"}
+config.mail = {"transport": "smtp", "from": "Club <noreply@example.com>",
+    "smtpHost": "smtp.example.com", "smtpUser": "noreply@example.com",
+    "passwordSecret": "smtpPassword"}
+```
+
+`fourfold dev` creates `private/config/` with a commented `app.ms` and
+`secrets.ms` to start from. Setting up mail, the domain and the first admin
+on a server is covered in the [admin guide](../admin/admin_guide.md#mail-for-sign-in).
+
+| Setting | Default | Is |
+|---|---|---|
+| `domain` | none | the site's host name; sign-in links point to it. Needed by `fourfold serve` to send them |
+| `auth.admins` | `[]` | email addresses given the `"admin"` role when they sign in |
+| `auth.signUp` | `"open"` | `"open"`: anyone with an email address can sign in. `"closed"`: only users who already exist, and `admins` |
+| `auth.methods` | `["magicLink"]` | sign-in methods; `[]` turns sign-in off |
+| `auth.linkMinutes` | 15 | how long a sign-in link works |
+| `auth.fakeLogin` | on in dev | the "sign in as..." test users; can't be on with `fourfold serve` |
+| `mail.transport` | `"log"` in dev, else `"none"` | `"smtp"`, `"postmark"`, `"log"` (written to the engine log, and in dev to the terminal), or `"none"` |
+| `mail.from` | | the sender: `"noreply@example.com"` or `"Name <noreply@example.com>"` |
+| `mail.smtpHost`, `smtpPort` | port 587 | your mail server |
+| `mail.smtpSecurity` | `"starttls"` | `"starttls"` (required), `"tls"` (port 465), or `"none"` (only for a server on the same machine) |
+| `mail.smtpUser`, `passwordSecret` | | the login, and the name of the secret holding the password |
+| `mail.postmarkTokenSecret`, `postmarkStream` | stream `"outbound"` | for Postmark: the secret holding the server token |
+| `budget.instructions`, `budget.seconds` | 10,000,000; 10 | each request's limits |
+| `session.capKB` | 64 | the largest `session` |
+| `session.anonIdleHours`, `anonMaxDays` | 24; 7 | when an anonymous session ends |
+| `session.userIdleDays`, `userMaxDays` | 14; 30 | when a signed-in session ends |
+| `session.anonPerAddress`, `anonTotal` | 1,000; 100,000 | the most anonymous sessions per visitor address, and in all |
+
+**Secrets** (passwords and API keys) go in `private/config/secrets.ms`, so
+`app.ms` can be shared or kept in version control while `secrets.ms` isn't:
+
+```
+// private/config/secrets.ms
+secrets = {}
+secrets.smtpPassword = {"value": "..."}
+```
+
+`app.ms` names secrets; it never holds them. A secret with no `hosts` (like
+this one) is for Fourfold's own use and never visible to your code. (Secrets
+with `hosts`, for your code's requests to other services, will come with a
+later version.)
+
+How changes are handled:
+
+- **A changed config is read again within a second or so**, without a deploy.
+  (A changed `domain` takes effect after a restart.)
+- **A misspelled or unknown setting is an error**, not ignored, so a typo
+  can't leave something at its default.
+- **A config with an error isn't used.** The previous one stays, and the error
+  goes to the terminal (dev) or the engine log. `fourfold serve` won't start
+  with one; `fourfold dev` starts with the defaults and picks up the fix.
+- Your host may set **ceilings** (in its own server config) on budgets and
+  session limits; a value over one is lowered to it, with a warning. (See
+  [Server limits](../admin/admin_guide.md#server-limits---server-config) in
+  the admin guide.)
 
 ---
 
@@ -1120,7 +1395,9 @@ Fourfold then compiles the new code and switches to it:
 - **If the new code doesn't compile**, the old version keeps serving, and the
   errors (with file and line) go to the engine log. Fix them and touch
   `code/.deploy` again.
-- `data/`, sessions and `dropbox/` are untouched by a deploy.
+- `data/`, sessions, users and `dropbox/` are untouched by a deploy.
+- Changes to `private/config/` don't need a deploy: they're read again on
+  their own (see [Configuration](#configuration-privateconfig)).
 
 Since anything in `code/` with an error stops the whole deploy, it's best to
 check your changes locally first.
@@ -1150,6 +1427,14 @@ loop:
   printed in the terminal, and missing and extra fields also appear in a small
   panel on the page.
 - **`print`** goes to the terminal.
+- **Sign in as a test user**: the small menu in the corner of every page (or
+  the sign-in page) has "sign in as...", which offers an admin, a member with
+  no roles, and a user for each other role your access rules name. Each has
+  its own session, so switching doesn't mix them up.
+- **Sign-in emails are printed** in the terminal instead of sent (unless
+  `config.mail` sets up a real transport), so you can follow the link.
+- **The access report**, at `/__dev/access` (also in the corner menu): every
+  URL, who may use it, and why.
 
 Dev mode listens only on your own machine (`localhost`), over plain HTTP.
 It uses the app's real `data/` folder, so work on a copy if the data matters.
@@ -1171,7 +1456,11 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `code/frags/x.html`, `x.md` | the fragment `x` |
 | `code/frags/layout/markdown.html` | the page around Markdown pages |
 | `code/lib/x.ms` | the module for `import "x"` |
+| `code/access.ms` | access rules: `rules["/path"] = "login"` |
+| `code/frags/auth/layout.html` | the page around the sign-in pages |
 | `code/.deploy` | touch it to deploy |
+| `private/config/app.ms` | the configuration: `config = {}` |
+| `private/config/secrets.ms` | passwords and keys: `secrets = {}` |
 
 ### Template syntax
 
@@ -1216,12 +1505,15 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `file.name`, `file.parent`, `file.child` | path strings |
 | `new RawData` | an empty buffer of bytes |
 | `dropbox.write(name, text)` | null |
+| `users.get(id)`, `users.find(email)` | the user's map, or null |
+| `users.grant(id, role)`, `users.revoke(id, role)` | null |
 
 ### Globals
 
 | Name | Is |
 |---|---|
-| `req` | the request (frozen) |
+| `req` | the request (frozen); `req.user` is the signed-in visitor, or null |
+| `access` | set in a page's `.ms` file: who may use its page and handlers |
 | `session` | this visitor's map, saved if changed; `session.flash` is removed once a page shows it |
 | `get`, `post` | maps of handlers |
 | `render` | the page's render function, if it has one |

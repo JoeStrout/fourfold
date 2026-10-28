@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin · Clubhouse</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  {{nav}}
+  <main>
+    <h1>Admin</h1>
+    <p class="flash">{{flash}}</p>
+    <form method="post" action="/admin/grant">
+      <label>Email <input type="email" name="email" required></label>
+      <button type="submit">Make a moderator</button>
+      <button type="submit" formaction="/admin/revoke">Stop being a moderator</button>
+    </form>
+  </main>
+</body>
+</html>

@@ -13,6 +13,8 @@
 #include <vector>
 
 #include "appdata/data_files.h"
+#include "authflow/auth_flow.h"
+#include "config/app_config.h"
 #include "devtools/dev_tools.h"
 #include "httpserver/http_server.h"
 #include "lifecycle/app_instance.h"
@@ -20,6 +22,7 @@
 #include "pipeline/engine.h"
 #include "platform/event_loop.h"
 #include "script/script_host.h"
+#include "state/auth_store.h"
 #include "state/engine_log.h"
 #include "state/lock_service.h"
 #include "state/session_store.h"
@@ -35,9 +38,11 @@ struct ServerOptions {
     bool dev = true;
     std::string address = "127.0.0.1";
     uint16_t port = 0;   // 0 picks a free port
-    // Host names the app answers to (the Host header, without the port).
-    // Empty: localhost's names.
+    // Host names the app answers to (the Host header, without the port),
+    // besides config.domain. Empty, with no domain: localhost's names.
     std::vector<std::string> hosts;
+    // The server config (overview §10), by host path; empty for none.
+    std::string serverConfig;
     // Reached over HTTPS (through a proxy that ends TLS): Secure cookies,
     // and https:// as the site's origin. Dev mode is plain HTTP.
     bool https = false;
@@ -72,6 +77,10 @@ public:
     // For tests: locks held or waited for, and runs in progress.
     LockService::Stats sessionLockStats() const { return sessionLocks_->stats(); }
     LockService::Stats dataLockStats() const { return data_->locks().stats(); }
+    // The engine's users (for tests).
+    AuthStore& users() { return *auth_; }
+    // The config in use.
+    std::shared_ptr<const AppConfig> config() const { return engine_->config(); }
     ScriptHost::Stats scriptStats() { return scripts_->stats(); }
 
 private:
@@ -88,8 +97,13 @@ private:
     void scriptError(const ScriptError& e) override;
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
 
-    // Removes expired sessions now, and every hour.
+    // Removes expired sessions and sign-in tokens now, and every hour.
     void scheduleSweep(std::chrono::milliseconds delay);
+    // Reports a config's problems; puts a valid one into the stores and the
+    // script host (the engine has it already).
+    void configLoaded(const ConfigLoad& load, bool first);
+    // Where dev mode's printed mail goes.
+    void printMail(const std::string& text);
 
     std::ostream& out_;
     std::ostream& err_;
@@ -109,9 +123,12 @@ private:
     std::unique_ptr<EngineLog> log_;
     std::unique_ptr<Dropbox> dropbox_;
     std::unique_ptr<ScriptHost> scripts_;
+    std::unique_ptr<ConfigDir> configDir_;
     std::unique_ptr<SessionStore> sessions_;
+    std::unique_ptr<AuthStore> auth_;
     std::unique_ptr<LockService> sessionLocks_;
     std::unique_ptr<DataFiles> data_;
+    std::unique_ptr<AuthFlow> authFlow_;
     std::unique_ptr<DevTools> devtools_;
     ObserverList observers_;
     std::unique_ptr<Engine> engine_;

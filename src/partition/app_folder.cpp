@@ -51,6 +51,44 @@ bool within(const std::string& inner, const std::string& outer) {
            inner[outer.size()] == '/';
 }
 
+// What a new private/config/ starts with (overview §10, "Defaults for
+// everything": a hobby app needs no config at all).
+const char* const kAppTemplate = R"(// The app's configuration: MiniScript, evaluated as data (no I/O, no
+// imports). Every setting has a default, so all of this is optional.
+// Changes take effect within a second or so; a config with an error is
+// reported, and the previous one stays in use.
+config = {}
+
+// The site's domain: required for `fourfold serve`, for sign-in links.
+// config.domain = "example.com"
+
+// Sign-in. "admins" get the admin role when they sign in. "signUp": "open"
+// lets anyone sign in with their email address; "closed" only existing users.
+// config.auth = {"admins": ["you@example.com"], "signUp": "open"}
+
+// Email, for sign-in links. In dev mode, messages are printed instead.
+// config.mail = {"transport": "smtp", "from": "noreply@example.com",
+//     "smtpHost": "smtp.example.com", "smtpUser": "noreply@example.com",
+//     "passwordSecret": "smtpPassword"}
+)";
+
+const char* const kSecretsTemplate = R"(// Secrets: passwords and API keys. Keep this file out of version control.
+//
+// A secret with no "hosts" is engine-only: used for things like the SMTP
+// password, and never visible to app code. A secret with "hosts" will be
+// usable by app code, but only in requests to those hosts.
+secrets = {}
+
+// secrets.smtpPassword = {"value": "..."}
+)";
+
+void writeTemplate(int folder, const char* name, const char* contents) {
+    Fd fd(openat(folder, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+    if (!fd.valid()) return;   // a template is a convenience; never fail for one
+    std::string text(contents);
+    (void)!::write(fd.get(), text.data(), text.size());
+}
+
 }  // namespace
 
 Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
@@ -63,6 +101,7 @@ Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
     if (!rootFd.valid()) return osError(root.value());
 
     std::vector<std::pair<const char*, std::string>> reals;
+    bool newConfig = false;
     for (const PartitionSpec& spec : kPartitions) {
         struct stat info;
         if (fstatat(rootFd.get(), spec.name, &info, 0) < 0) {
@@ -74,6 +113,7 @@ Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
             if (mkdirat(rootFd.get(), spec.name, spec.mode) < 0) {
                 return osError(root.value() + "/" + spec.name);
             }
+            newConfig = newConfig || std::string(spec.name) == "private/config";
         } else if (!S_ISDIR(info.st_mode)) {
             return makeError(ErrorCode::Invalid, root.value() + "/" + spec.name + " is not a folder");
         }
@@ -95,13 +135,17 @@ Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
 
     // reals is in kPartitions order: code, data, dropbox, private/config, private/state.
     Folders folders;
-    Fd* fds[] = {&folders.code, &folders.data, &folders.dropbox, nullptr, &folders.state};
+    Fd* fds[] = {&folders.code, &folders.data, &folders.dropbox, &folders.config, &folders.state};
     for (size_t i = 0; i < reals.size(); i++) {
         if (!fds[i]) continue;
         *fds[i] = Fd(::open(reals[i].second.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
         if (!fds[i]->valid()) return osError(reals[i].second);
     }
     folders.stateReal = reals[4].second;
+    if (newConfig) {
+        writeTemplate(folders.config.get(), "app.ms", kAppTemplate);
+        writeTemplate(folders.config.get(), "secrets.ms", kSecretsTemplate);
+    }
     return AppFolder(std::move(root).value(), std::move(folders));
 }
 
@@ -119,6 +163,12 @@ Result<CodeTree> AppFolder::codeTree(CodeTreeLimits limits) const {
     auto fd = duplicate(folders_.code, "code");
     if (!fd) return fd.error();
     return CodeTree(std::move(fd).value(), limits);
+}
+
+Result<ConfigDir> AppFolder::configDir() const {
+    auto fd = duplicate(folders_.config, "private/config");
+    if (!fd) return fd.error();
+    return ConfigDir(std::move(fd).value());
 }
 
 Result<DataDir> AppFolder::dataDir() const {

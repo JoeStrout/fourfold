@@ -1,6 +1,73 @@
 #include "compiledapp/compiled_app.h"
 
+#include <algorithm>
+#include <cctype>
+
 namespace fourfold {
+
+namespace {
+
+// Whether requirement `a` implies `b`: every visitor meeting `a` meets `b`.
+// Empty means "login", which every requirement implies.
+bool implies(const std::vector<std::string>& a, const std::vector<std::string>& b) {
+    if (b.empty()) return true;
+    if (a.empty()) return false;
+    for (const std::string& role : a) {
+        if (!std::binary_search(b.begin(), b.end(), role)) return false;
+    }
+    return true;
+}
+
+}  // namespace
+
+void AccessLevel::require(std::vector<std::string> anyOf) {
+    std::sort(anyOf.begin(), anyOf.end());
+    anyOf.erase(std::unique(anyOf.begin(), anyOf.end()), anyOf.end());
+    for (const auto& existing : all) {
+        if (implies(existing, anyOf)) return;
+    }
+    all.erase(std::remove_if(all.begin(), all.end(),
+                             [&](const std::vector<std::string>& existing) { return implies(anyOf, existing); }),
+              all.end());
+    all.push_back(std::move(anyOf));
+    std::sort(all.begin(), all.end());
+}
+
+bool AccessLevel::allows(bool signedIn, const std::vector<std::string>& roles) const {
+    if (all.empty()) return true;
+    if (!signedIn) return false;
+    for (const auto& anyOf : all) {
+        if (anyOf.empty()) continue;
+        bool met = false;
+        for (const std::string& role : roles) met = met || std::binary_search(anyOf.begin(), anyOf.end(), role);
+        if (!met) return false;
+    }
+    return true;
+}
+
+std::string AccessLevel::describe() const {
+    if (all.empty()) return "public";
+    std::string out;
+    for (const auto& anyOf : all) {
+        if (!out.empty()) out += " and ";
+        if (anyOf.empty()) {
+            out += "login";
+            continue;
+        }
+        std::string roles;
+        for (const std::string& role : anyOf) roles += (roles.empty() ? "" : " or ") + role;
+        out += anyOf.size() > 1 && all.size() > 1 ? "(" + roles + ")" : roles;
+    }
+    return out;
+}
+
+bool isValidRoleName(const std::string& role) {
+    if (role.empty() || role.size() > 64 || !std::isalpha(static_cast<unsigned char>(role[0]))) return false;
+    for (char c : role) {
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-')) return false;
+    }
+    return role != "login" && role != "public";
+}
 
 std::string Diagnostic::toString() const {
     std::string s = file;
@@ -85,6 +152,11 @@ std::string describe(const CompiledApp& app) {
             if (*h) s += "  " + (*h)->label() + " in " + (*h)->source.str();
         }
         if (entry.usesSession) s += "  session";
+        if (!entry.access.isPublic()) {
+            s += "  access: " + entry.access.describe() + " (";
+            for (size_t i = 0; i < entry.accessSources.size(); i++) s += (i ? "; " : "") + entry.accessSources[i];
+            s += ")";
+        }
         s += "\n";
     }
     if (!app.templates.fragments().empty()) {
@@ -99,6 +171,7 @@ std::string describe(const CompiledApp& app) {
         }
     }
     if (app.markdownLayout) s += "markdown layout: " + app.markdownLayout->source().str() + "\n";
+    if (app.authLayout) s += "sign-in layout: " + app.authLayout->source().str() + "\n";
     s += "not found page: " + (app.notFoundPage ? app.notFoundPage->str() : std::string("(none)")) + "\n";
     s += "error page: " + (app.errorPage ? app.errorPage->str() : std::string("(none)")) + "\n";
     s += "diagnostics:\n";

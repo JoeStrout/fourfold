@@ -28,6 +28,7 @@
 #include "base/datum.h"
 #include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
+#include "partition/config_dir.h"
 #include "partition/data_dir.h"
 #include "platform/worker_pool.h"
 #include "template/template.h"
@@ -64,6 +65,19 @@ struct ScriptHostOptions {
     std::function<void(const std::string& file, const std::string& text)> printOutput;
 };
 
+// A signed-in user, as handlers see it (`req.user`, overview §5, The user
+// object) and as the `users` module returns it.
+struct UserFacts {
+    std::string id;       // stable and opaque
+    std::string name;
+    std::string email;
+    std::vector<std::string> roles;   // sorted
+
+    bool operator==(const UserFacts& o) const {
+        return id == o.id && name == o.name && email == o.email && roles == o.roles;
+    }
+};
+
 // What a handler sees of a request (`req`, overview §4). Plain data, built by
 // the pipeline; the script thread turns it into a frozen map.
 struct RequestFacts {
@@ -74,6 +88,23 @@ struct RequestFacts {
     Pairs query;           // decoded; for a repeated name, the first wins
     Pairs headers;         // names lowercased; repeated names joined with ", "
     Pairs form;            // decoded url-encoded POST body; raw strings
+    std::optional<UserFacts> user;   // the signed-in visitor, looked up for this request
+};
+
+// The engine's users, for the `users` module (overview §5, The user object):
+// app code may look users up and grant or revoke roles (it's trusted, per
+// the threat model). Implemented by the engine over its AuthStore. Every
+// method blocks, so the module calls them on the worker pool; they may be
+// called from several threads at once.
+class UserDirectory {
+public:
+    virtual ~UserDirectory() = default;
+    virtual Result<std::optional<UserFacts>> get(const std::string& id) = 0;
+    virtual Result<std::optional<UserFacts>> findByEmail(const std::string& email) = 0;
+    // NotFound if there's no such user. Granting a role the user has, or
+    // revoking one they don't, is fine.
+    virtual Status grant(const std::string& id, const std::string& role) = 0;
+    virtual Status revoke(const std::string& id, const std::string& role) = 0;
 };
 
 // The visitor's session as a run starts (overview §2, Session storage).
@@ -129,6 +160,8 @@ struct RunContext {
     DataFiles* data = nullptr;
     // The app's dropbox/ (the `dropbox` module). Must outlive the run.
     const Dropbox* dropbox = nullptr;
+    // The engine's users (the `users` module). Must outlive the run.
+    UserDirectory* users = nullptr;
 };
 
 // A compile or runtime error in a script, located for the developer.
@@ -178,6 +211,9 @@ struct PageHandlers {
     // runs get the session (loaded and locked). Requests to
     // pages that don't never wait for a session's lock.
     bool usesSession = false;
+    // The file's `access =` declaration (overview §5, Access control), as
+    // its top level left it; nullopt if it set none. The compiler checks it.
+    std::optional<Datum> access;
 };
 
 struct CompiledScripts {
@@ -198,7 +234,27 @@ public:
                                            const std::vector<CodeFile>& libs) = 0;
 };
 
-class ScriptHost : public ScriptCompiler {
+// The result of evaluating a file as data.
+struct EvaluatedData {
+    Datum value;                        // the named global; null if the file didn't set it
+    std::optional<ScriptError> error;   // set if the file failed, or its value isn't inert
+};
+
+// Runs declaration and config files as data (overview §5, §10; Arch §5
+// script): in a restricted VM with no data, session, files, imports or
+// waiting, and a small budget. The only output is one global, which must be
+// inert (numbers, strings, lists and maps). Files come only as CodeFile
+// (code/access.ms) or ConfigFile (private/config/), never from data/.
+class DataEvaluator {
+public:
+    virtual ~DataEvaluator() = default;
+
+    // Waits for the result: don't call from the script thread.
+    virtual EvaluatedData evaluate(const CodeFile& file, const std::string& global) = 0;
+    virtual EvaluatedData evaluate(const ConfigFile& file, const std::string& global) = 0;
+};
+
+class ScriptHost : public ScriptCompiler, public DataEvaluator {
 public:
     using Done = std::function<void(HandlerOutcome)>;
 
@@ -216,12 +272,19 @@ public:
     CompiledScripts compileScripts(const std::vector<CodeFile>& pages,
                                    const std::vector<CodeFile>& libs) override;
 
+    // DataEvaluator.
+    EvaluatedData evaluate(const CodeFile& file, const std::string& global) override;
+    EvaluatedData evaluate(const ConfigFile& file, const std::string& global) override;
+
     // Runs `handler` from `app` for one request, in a fresh VM, with the
     // request and services in `context`. `done` is called exactly once, on
     // the script thread, unless the host is destroyed first. `app` stays
     // pinned (with its bytecode) until then.
     void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, const GateApproval& approval,
              RunContext context, Done done);
+
+    // Changes the budget for runs started from now on (config reloads).
+    void setBudget(ScriptBudget budget);
 
     // The pool that does work that would block the script thread. Engines
     // may share it (e.g. to save sessions).

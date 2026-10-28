@@ -7,10 +7,13 @@
 #include <sstream>
 
 #include "appdata/data_files.h"
+#include "authflow/auth_flow.h"
 #include "compiler/compiler.h"
+#include "config/app_config.h"
 #include "partition/app_folder.h"
 #include "pipeline/engine.h"
 #include "script/script_host.h"
+#include "state/auth_store.h"
 #include "state/engine_log.h"
 #include "state/lock_service.h"
 #include "state/session_store.h"
@@ -100,27 +103,49 @@ int runCgi(const std::string& folder, const CgiEnvironment& env, std::istream& i
     auto state = app.value().stateDir();
     auto data = app.value().dataDir();
     auto dropbox = app.value().dropbox();
-    if (!code || !engineCode || !state || !data || !dropbox) return fail("can't open the app's partitions");
+    auto configDir = app.value().configDir();
+    if (!code || !engineCode || !state || !data || !dropbox || !configDir) {
+        return fail("can't open the app's partitions");
+    }
     auto key = loadOrCreateEngineKey(state.value());
     auto dbPath = state.value().sqlitePath(RelPath::parse("state.db").value());
     if (!key || !dbPath) return fail((!key ? key.error() : dbPath.error()).message);
-    auto sessions = SessionStore::open(dbPath.value(), SessionConfig{});
-    if (!sessions) return fail("can't open private/state/state.db: " + sessions.error().message);
 
     auto scripts = ScriptHost::create();
     if (!scripts) return fail(scripts.error().message);
+    EngineLog log(app.value().stateDir().value());
+
+    // The config, as `fourfold serve` reads it: an invalid one is refused.
+    ConfigSources sources;
+    sources.dir = &configDir.value();
+    sources.mode = ConfigMode::Serve;
+    sources.devMailOutput = [&log](const std::string& text) { log.write("mail", text); };
+    ConfigLoad config = loadConfig(sources, *scripts.value());
+    if (!config.ok()) {
+        for (const auto& d : config.diagnostics) log.write("config", d.toString());
+        return fail("the config has errors; see private/state/logs/");
+    }
+    scripts.value()->setBudget(config.config->budget);
+
+    auto sessions = SessionStore::open(dbPath.value(), config.config->session);
+    auto auth = sessions ? AuthStore::open(dbPath.value(), config.config->auth.store)
+                         : Result<std::unique_ptr<AuthStore>>(sessions.error());
+    if (!sessions || !auth) {
+        return fail("can't open private/state/state.db: " + (!sessions ? sessions.error() : auth.error()).message);
+    }
     // Session locks are shared with every other process serving this app.
     const StateDir& stateDir = state.value();
     auto sessionLocks = makeFileLockService([&stateDir](const std::string& key) { return stateDir.lockFile(key); },
                                             scripts.value()->workers());
     DataFiles dataFiles(std::move(data).value());
-    EngineLog log(app.value().stateDir().value());
+    AuthFlow authFlow(*auth.value(), *sessions.value(), *sessionLocks, scripts.value()->workers(), &log);
     double openMs = msSince(start);
 
     // Cold: compile every time. (M10 caches what can be cached.)
     auto compileStart = SteadyClock::now();
     CompileOptions compileOptions;
     compileOptions.scripts = scripts.value().get();
+    compileOptions.evaluator = scripts.value().get();
     CompileOutput compiled = compile(code.value(), compileOptions);
     double compileMs = msSince(compileStart);
     if (!compiled.ok()) {
@@ -134,9 +159,12 @@ int runCgi(const std::string& folder, const CgiEnvironment& env, std::istream& i
     options.data = &dataFiles;
     options.dropbox = &dropbox.value();
     options.log = &log;
+    options.auth = auth.value().get();
+    options.authRoutes = &authFlow;
     options.https = env("HTTPS").value_or("") == "on";
     options.engineKey = key.value();
     Engine engine(compiled.app, std::move(engineCode).value(), scripts.value().get(), std::move(options));
+    engine.setConfig(config.config);
 
     auto handleStart = SteadyClock::now();
     std::promise<HttpResponse> done;

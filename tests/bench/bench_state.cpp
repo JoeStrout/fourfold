@@ -58,6 +58,7 @@ struct Bench {
         host = ScriptHost::create().value();
         CompileOptions options;
         options.scripts = host.get();
+        options.evaluator = host.get();
         CompileOutput out = compile(app.codeTree().value(), options);
         if (!out.ok()) {
             for (const auto& d : out.diagnostics) std::fprintf(stderr, "%s\n", d.toString().c_str());

@@ -24,7 +24,7 @@ void printUsage(std::ostream& out) {
            "Commands:\n"
            "  dev <app-folder> [--port N]   Serve an app on localhost for development\n"
            "  serve <app-folder> [--listen ADDRESS:PORT] [--host NAME]... [--plain-http]\n"
-           "                                Serve an app for real use, behind a proxy that\n"
+           "        [--server-config FILE]  Serve an app for real use, behind a proxy that\n"
            "                                provides HTTPS\n"
            "  version                       Print the Fourfold version\n"
            "  help                          Show this message\n";
@@ -102,16 +102,19 @@ struct ServeArgs {
     uint16_t port = kDefaultPort;
     std::vector<std::string> hosts;
     bool plainHttp = false;
+    std::string serverConfig;
 };
-
-bool isLoopback(const std::string& address) {
-    return address == "127.0.0.1" || address == "::1" || address == "localhost";
-}
 
 bool parseServeArgs(const std::vector<std::string>& args, ServeArgs& out, std::string& error) {
     for (size_t i = 0; i < args.size(); i++) {
         const std::string& a = args[i];
-        if (a == "--listen" || a == "--host") {
+        if (a == "--server-config") {
+            if (i + 1 >= args.size()) {
+                error = a + " needs a file";
+                return false;
+            }
+            out.serverConfig = args[++i];
+        } else if (a == "--listen" || a == "--host") {
             if (i + 1 >= args.size()) {
                 error = a + " needs a value";
                 return false;
@@ -155,10 +158,6 @@ bool parseServeArgs(const std::vector<std::string>& args, ServeArgs& out, std::s
         error = "no app folder given";
         return false;
     }
-    if (out.hosts.empty() && !isLoopback(out.address)) {
-        error = "give the site's host name with --host (requests for any other name are refused)";
-        return false;
-    }
     return true;
 }
 
@@ -167,7 +166,8 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
     std::string problem;
     if (!parseServeArgs(args, serve, problem)) {
         err << "fourfold serve: " << problem
-            << "\nUsage: fourfold serve <app-folder> [--listen ADDRESS:PORT] [--host NAME]... [--plain-http]\n";
+            << "\nUsage: fourfold serve <app-folder> [--listen ADDRESS:PORT] [--host NAME]... [--plain-http] "
+               "[--server-config FILE]\n";
         return kExitUsage;
     }
     ServerOptions options;
@@ -176,6 +176,7 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
     options.port = serve.port;
     options.hosts = serve.hosts;
     options.https = !serve.plainHttp;
+    options.serverConfig = serve.serverConfig;
 
     auto server = AppServer::start(serve.folder, options, out, err);
     if (!server) return kExitError;
@@ -190,7 +191,7 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
         << ".\n"
         << "  - No per-request memory limit yet: a script can use as much memory as the\n"
         << "    machine has (time and instruction limits do apply).\n"
-        << "  - No sign-in, access rules or rate limits yet.\n"
+        << "  - No rate limits or spam protection yet (sign-in links are throttled).\n"
         << "Press Ctrl-C to stop.\n"
         << std::flush;
     server->loop().run();

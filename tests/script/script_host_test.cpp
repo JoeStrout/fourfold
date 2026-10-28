@@ -26,6 +26,7 @@ struct Scripts {
     std::shared_ptr<CompiledApp> app = std::make_shared<CompiledApp>();
     std::vector<std::string> printed;
     std::mutex printedMutex;
+    UserDirectory* users = nullptr;   // given to every run
 
     explicit Scripts(ScriptHostOptions options = testOptions()) {
         options.printOutput = [this](const std::string& file, const std::string& text) {
@@ -132,6 +133,7 @@ struct Scripts {
         RunContext context;
         context.request = std::move(request);
         context.render = std::move(renderOptions);
+        context.users = users;
         host->run(app, handler(source, label), TestGate::approve(), std::move(context),
                   [promise](HandlerOutcome o) { promise->set_value(std::move(o)); });
         return future;
@@ -901,4 +903,196 @@ TEST_CASE("ScriptHost: missing and unused fields are warned about") {
     CHECK_MESSAGE(contains(all, "frags/entry.html:1: {{when}} wasn't given a value"), all);
     CHECK_MESSAGE(contains(all, "pages/t.html:1: {{title}} wasn't given a value"), all);
     CHECK_MESSAGE(contains(all, "\"typo\" was given a value"), all);
+}
+
+namespace {
+
+// Users in memory, for the users module.
+class MemoryUsers : public UserDirectory {
+public:
+    std::map<std::string, UserFacts> users;
+    std::mutex mutex;
+
+    Result<std::optional<UserFacts>> get(const std::string& id) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = users.find(id);
+        return it == users.end() ? std::optional<UserFacts>() : std::optional<UserFacts>(it->second);
+    }
+    Result<std::optional<UserFacts>> findByEmail(const std::string& email) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        for (const auto& [id, u] : users) {
+            if (u.email == email) return std::optional<UserFacts>(u);
+        }
+        return std::optional<UserFacts>();
+    }
+    Status grant(const std::string& id, const std::string& role) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = users.find(id);
+        if (it == users.end()) return makeError(ErrorCode::NotFound, "no such user");
+        auto& roles = it->second.roles;
+        if (std::find(roles.begin(), roles.end(), role) == roles.end()) roles.push_back(role);
+        std::sort(roles.begin(), roles.end());
+        return {};
+    }
+    Status revoke(const std::string& id, const std::string& role) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        auto it = users.find(id);
+        if (it == users.end()) return makeError(ErrorCode::NotFound, "no such user");
+        auto& roles = it->second.roles;
+        roles.erase(std::remove(roles.begin(), roles.end(), role), roles.end());
+        return {};
+    }
+};
+
+CodeFile codeFile(Scripts& s, const std::string& path) {
+    auto folder = AppFolder::open(s.dir.path(), AppFolder::Missing::Create);
+    REQUIRE(folder.ok());
+    auto file = folder.value().codeTree().value().read(RelPath::parse(path).value());
+    REQUIRE(file.ok());
+    return file.value();
+}
+
+}  // namespace
+
+TEST_CASE("DataEvaluator: a file's global, as data") {
+    Scripts s;
+    s.write("access.ms",
+            "rules = {}\n"
+            "rules[\"/admin\"] = \"admin\"\n"
+            "rules[\"/forum/mod\"] = [\"admin\", \"moderator\"]\n"
+            "for i in range(1, 3)\n  rules[\"/n\" + i] = \"login\"\nend for\n");
+    EvaluatedData d = s.host->evaluate(codeFile(s, "access.ms"), "rules");
+    REQUIRE_MESSAGE(!d.error, d.error->message);
+    CHECK_EQ(toJson(d.value),
+             "{\"/admin\":\"admin\",\"/forum/mod\":[\"admin\",\"moderator\"],\"/n1\":\"login\",\"/n2\":\"login\","
+             "\"/n3\":\"login\"}");
+
+    // Unset: null, for the caller to judge.
+    s.write("empty.ms", "x = 1\n");
+    d = s.host->evaluate(codeFile(s, "empty.ms"), "rules");
+    CHECK_FALSE(d.error);
+    CHECK(d.value.kind() == Datum::Kind::Null);
+}
+
+TEST_CASE("DataEvaluator: config files come from private/config/") {
+    Scripts s;
+    s.dir.write("private/config/app.ms", "config = {}\nconfig.domain = \"example.com\"\n");
+    auto folder = AppFolder::open(s.dir.path(), AppFolder::Missing::Create);
+    REQUIRE(folder.ok());
+    auto file = folder.value().configDir().value().read("app.ms");
+    REQUIRE(file.ok());
+    EvaluatedData d = s.host->evaluate(*file.value(), "config");
+    REQUIRE_MESSAGE(!d.error, d.error->message);
+    CHECK_EQ(toJson(d.value), "{\"domain\":\"example.com\"}");
+
+    s.dir.write("private/config/bad.ms", "config = {\n");
+    d = s.host->evaluate(*folder.value().configDir().value().read("bad.ms").value(), "config");
+    REQUIRE(d.error);
+    CHECK_EQ(d.error->file, "private/config/bad.ms");
+}
+
+TEST_CASE("DataEvaluator: a restricted VM") {
+    Scripts s;
+    auto check = [&](const std::string& source, const std::string& expected) {
+        CAPTURE(source);
+        s.write("t.ms", source);
+        EvaluatedData d = s.host->evaluate(codeFile(s, "t.ms"), "x");
+        REQUIRE(d.error);
+        CHECK_MESSAGE(contains(d.error->message, expected), d.error->message);
+    };
+    check("x = data.get(\"secrets\")\n", "can't be used");
+    check("x = file.readLines(\"a.txt\")\n", "can't be used");
+    check("dropbox.write \"a\", \"b\"\nx = 1\n", "can't be used");
+    check("users.grant \"u\", \"admin\"\nx = 1\n", "can't be used");
+    check("import \"util\"\nx = 1\n", "import can't be used");
+    check("wait 1\nx = 1\n", "can't be used");
+    check("x = 1\nwhile true\n  x = x + 1\nend while\n", "budget");
+    check("x = @print\n", "function");
+    check("x = new RawData\n", "RawData");
+    check("x = undefinedThing\n", "Undefined");
+    // get and post aren't there: it isn't a page.
+    check("x = get\n", "Undefined");
+}
+
+TEST_CASE("ScriptHost: access = is read at compile time") {
+    {
+        Scripts s;
+        s.write("pages/a.ms", "access = \"login\"\nget.x = function\n  return \"x\"\nend function\n");
+        s.write("pages/b.ms", "access = [\"admin\", \"moderator\"]\nget.x = function\n  return access\nend function\n");
+        s.write("pages/c.ms", "get.x = function\n  return \"x\"\nend function\n");
+        s.compile();
+        REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
+        const auto& pages = s.compiled.pages;
+        REQUIRE(pages.at(RelPath::parse("pages/a.ms").value()).access);
+        CHECK_EQ(toJson(*pages.at(RelPath::parse("pages/a.ms").value()).access), "\"login\"");
+        CHECK_EQ(toJson(*pages.at(RelPath::parse("pages/b.ms").value()).access), "[\"admin\",\"moderator\"]");
+        CHECK_FALSE(pages.at(RelPath::parse("pages/c.ms").value()).access);
+    }
+    Scripts t;
+    t.write("pages/bad.ms", "access = @print\n");
+    t.compile();
+    CHECK_FALSE(t.compiled.bundle);
+    CHECK(contains(t.diagnostics(), "access must be"));
+}
+
+TEST_CASE("ScriptHost: req.user") {
+    Scripts s;
+    s.write("pages/u.ms",
+            "get.who = function(req)\n"
+            "  if req.user == null then return \"nobody\"\n"
+            "  return req.user.name + \" \" + req.user.email + \" \" + req.user.roles.join(\",\")\n"
+            "end function\n"
+            "get.change = function(req)\n  req.user.roles.push \"admin\"\n  return \"changed\"\nend function\n");
+    s.compile();
+    REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
+    HandlerOutcome o = s.call("pages/u.ms", "get.who");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Text, describe(o));
+    CHECK_EQ(o.body, "nobody");
+
+    RequestFacts r;
+    r.user = UserFacts{"u1", "Ann", "ann@example.com", {"admin", "editor"}};
+    o = s.call("pages/u.ms", "get.who", r);
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Text, describe(o));
+    CHECK_EQ(o.body, "Ann ann@example.com admin,editor");
+    o = s.call("pages/u.ms", "get.change", r);
+    REQUIRE(o.kind == HandlerOutcome::Kind::Error);
+    CHECK(contains(o.error.message, "frozen"));
+}
+
+TEST_CASE("ScriptHost: the users module") {
+    Scripts s;
+    MemoryUsers users;
+    users.users["u1"] = UserFacts{"u1", "Ann", "ann@example.com", {}};
+    s.write("pages/u.ms",
+            "get.grant = function\n"
+            "  users.grant \"u1\", \"moderator\"\n"
+            "  u = users.find(\"ann@example.com\")\n"
+            "  return u.id + \":\" + u.roles.join(\",\")\n"
+            "end function\n"
+            "get.revoke = function\n"
+            "  users.revoke \"u1\", \"moderator\"\n"
+            "  return users.get(\"u1\").roles.len + \" \" + (users.get(\"nobody\") == null)\n"
+            "end function\n"
+            "get.badRole = function\n  return users.grant(\"u1\", \"login\")\nend function\n"
+            "get.noUser = function\n  return users.grant(\"nobody\", \"x\")\nend function\n");
+    s.compile();
+    REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
+
+    HandlerOutcome o = s.call("pages/u.ms", "get.grant");
+    CHECK_MESSAGE(o.kind == HandlerOutcome::Kind::Error, describe(o));   // no directory given
+    CHECK(contains(o.error.message, "isn't available"));
+
+    s.users = &users;
+    o = s.call("pages/u.ms", "get.grant");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Text, describe(o));
+    CHECK_EQ(o.body, "u1:moderator");
+    o = s.call("pages/u.ms", "get.revoke");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Text, describe(o));
+    CHECK_EQ(o.body, "0 1");
+    o = s.call("pages/u.ms", "get.badRole");
+    REQUIRE(o.kind == HandlerOutcome::Kind::Error);
+    CHECK(contains(o.error.message, "role name"));
+    o = s.call("pages/u.ms", "get.noUser");
+    REQUIRE(o.kind == HandlerOutcome::Kind::Error);
+    CHECK(contains(o.error.message, "no such user"));
 }

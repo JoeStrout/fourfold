@@ -77,8 +77,20 @@ void AppInstance::schedulePoll() {
     loop_->addTimer(options_.pollInterval, [this] { poll(); });
 }
 
+void AppInstance::pollConfig() {
+    if (!options_.config || !options_.config->sources.dir || !scripts_) return;
+    ConfigWatch& watch = *options_.config;
+    std::string stamp = configStamp(*watch.sources.dir);
+    if (stamp == watch.stamp) return;
+    watch.stamp = stamp;
+    ConfigLoad load = loadConfig(watch.sources, *scripts_);
+    if (load.ok()) engine_.setConfig(load.config);
+    if (watch.loaded) watch.loaded(load);
+}
+
 void AppInstance::poll() {
     schedulePoll();
+    pollConfig();
 
     std::optional<int64_t> trigger = code_.deployTrigger();
     if (trigger && trigger != deployTrigger_) {
@@ -135,6 +147,7 @@ CompileReport AppInstance::compileNow(const Snapshot& snapshot) {
     CompileOptions options;
     options.generation = nextGeneration_;
     options.scripts = scripts_;
+    options.evaluator = scripts_;
     CompileOutput out = compile(code_, options);
     report.ok = out.ok();
     report.diagnostics = std::move(out.diagnostics);

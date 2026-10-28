@@ -1,0 +1,8 @@
+body { margin: 0; font: 16px/1.5 system-ui, sans-serif; background: #faf8f3; color: #222; }
+nav { padding: .75rem 1.25rem; background: #2d4a3e; color: #eee; }
+nav a { color: #fff; }
+nav .who { float: right; }
+form.inline { display: inline; }
+main { max-width: 42rem; margin: 2rem auto; padding: 0 1.25rem; }
+main.card { background: #fff; padding: 2rem; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,.15); max-width: 26rem; }
+.flash { background: #e6f3e6; padding: .5rem 1rem; border-radius: 4px; }

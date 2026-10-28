@@ -1,0 +1,23 @@
+routes:
+  /  page  pages/index.html  fields: nav greeting  render in pages/index.ms
+  /about  markdown  pages/about.md  title: About the Clubhouse
+  /admin/  page  pages/admin/index.html  fields: nav flash  render in pages/admin/index.ms  session  access: admin (code/access.ms: /admin; code/pages/admin/index.ms)
+  /admin/grant  handler  pages/admin/index.ms  post.grant in pages/admin/index.ms  session  access: admin (code/access.ms: /admin; code/pages/admin/index.ms)
+  /admin/revoke  handler  pages/admin/index.ms  post.revoke in pages/admin/index.ms  session  access: admin (code/access.ms: /admin; code/pages/admin/index.ms)
+  /board  page  pages/board.html  fields: nav flash posts form  render in pages/board.ms  session
+  /board/post  handler  pages/board.ms  post.post in pages/board.ms  session  access: login (code/access.ms: /board/post)
+  /members/  page  pages/members/index.html  fields: nav name email  render in pages/members/index.ms  access: login (code/access.ms: /members)
+  /members/badge.svg  static  pages/members/badge.svg  image/svg+xml  access: login (code/access.ms: /members)
+  /members/handbook  markdown  pages/members/handbook.md  title: The members' handbook  access: login (code/access.ms: /members)
+  /mod/  page  pages/mod/index.html  access: admin or moderator (code/access.ms: /mod)
+  /style.css  static  pages/style.css  text/css; charset=utf-8
+fragments:
+  board/form  frags/board/form.html  fields: name
+  board/post  frags/board/post.html  fields: name text
+  board/signin  frags/board/signin.html
+  nav/in  frags/nav/in.html  fields: name roles
+  nav/out  frags/nav/out.html  fields: next
+sign-in layout: frags/auth/layout.html
+not found page: (none)
+error page: (none)
+diagnostics:

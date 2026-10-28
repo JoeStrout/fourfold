@@ -114,3 +114,55 @@ TEST_CASE("AppFolder: partitions may not overlap") {
         CHECK(app.error().code == ErrorCode::Invalid);
     }
 }
+
+TEST_CASE("AppFolder: a new private/config/ gets templates; an existing one is left alone") {
+    TempDir dir;
+    auto app = AppFolder::open(dir.at("new"), AppFolder::Missing::Create);
+    REQUIRE(app.ok());
+    auto config = app.value().configDir();
+    REQUIRE(config.ok());
+    auto appMs = config.value().read("app.ms");
+    REQUIRE(appMs.ok());
+    REQUIRE(appMs.value().has_value());
+    CHECK(appMs.value()->contents().find("config = {}") != std::string::npos);
+    CHECK_EQ(appMs.value()->name(), "private/config/app.ms");
+    auto secrets = config.value().read("secrets.ms");
+    REQUIRE(secrets.ok());
+    REQUIRE(secrets.value().has_value());
+    CHECK(secrets.value()->contents().find("hosts") != std::string::npos);
+
+    dir.makeDir("old/private/config");
+    auto old = AppFolder::open(dir.at("old"), AppFolder::Missing::Create);
+    REQUIRE(old.ok());
+    auto none = old.value().configDir().value().read("app.ms");
+    REQUIRE(none.ok());
+    CHECK_FALSE(none.value().has_value());
+}
+
+TEST_CASE("ConfigDir: reads plain files only, and stamps them") {
+    TempDir dir;
+    dir.write("app/private/config/app.ms", "config = {}\n");
+    dir.write("elsewhere.ms", "config = {\"x\": 1}\n");
+    dir.symlink(dir.at("elsewhere.ms"), "app/private/config/secrets.ms");
+    auto app = AppFolder::open(dir.at("app"), AppFolder::Missing::Create);
+    REQUIRE(app.ok());
+    auto config = app.value().configDir().value();
+
+    CHECK_EQ(config.read("app.ms").value()->contents(), "config = {}\n");
+    auto link = config.read("secrets.ms");
+    REQUIRE_FALSE(link.ok());
+    CHECK(link.error().code == ErrorCode::NotFound);
+    CHECK_FALSE(config.read("../x.ms").ok());
+    CHECK_FALSE(config.read("sub/app.ms").ok());
+
+    std::string before = config.stamp("app.ms");
+    CHECK_FALSE(before.empty());
+    CHECK(config.stamp("missing.ms").empty());
+    dir.write("app/private/config/app.ms", "config = {\"domain\": \"example.com\"}\n");
+    CHECK(config.stamp("app.ms") != before);
+
+    auto server = ConfigDir::readServerConfig(dir.at("elsewhere.ms"));
+    REQUIRE(server.ok());
+    CHECK_EQ(server.value().name(), dir.at("elsewhere.ms"));
+    CHECK_FALSE(ConfigDir::readServerConfig(dir.at("nope.ms")).ok());
+}

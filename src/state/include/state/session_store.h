@@ -6,8 +6,8 @@
 // a disk image) gives no IDs that could take over a live session.
 //
 // Each record has two parts, both as canonical JSON bytes: the engine's
-// (empty for now; from M6, the signed-in user) and the app's (the
-// `session` map). The store doesn't look inside either.
+// (empty for now) and the app's (the `session` map). The store doesn't look
+// inside either. A signed-in session also has its user's id.
 //
 // Every method blocks on SQLite, so it's for worker threads; the store
 // serializes its own calls, and may be shared between them.
@@ -47,7 +47,7 @@ struct SessionConfig {
 
 struct SessionRecord {
     std::string idHash;                  // hashBytes(ID): 32 raw bytes
-    std::optional<std::string> userId;   // signed in, if set (M6)
+    std::optional<std::string> userId;   // signed in, if set
     int64_t createdAt = 0;               // ms since the epoch
     int64_t lastUsedAt = 0;
     std::string engine;                  // canonical JSON (a map)
@@ -61,7 +61,9 @@ public:
     static Result<std::unique_ptr<SessionStore>> open(const std::string& path, SessionConfig config,
                                                       const Clock& clock = systemClock());
 
-    const SessionConfig& config() const { return config_; }
+    SessionConfig config() const;
+    // A changed config (overview §10: config reloads), for calls from now on.
+    void setConfig(SessionConfig config);
 
     // A new random ID, for a cookie: base64url of 32 bytes.
     static std::string newId();
@@ -92,8 +94,17 @@ public:
     // time. `lastUsedAt` is the record's, as loaded.
     Status touch(const std::string& idHash, int64_t lastUsedAt);
 
+    // Signs a visitor in (overview §5, Sessions and cookies): a new session
+    // for `newId` (from newId), belonging to `userId`, holding `app` (the
+    // anonymous session's map, carried over). The old session, if any, is
+    // removed in the same transaction, so its ID stops working: the ID
+    // rotates, and a fixed one can't be used to take over the signed-in
+    // session.
+    Status signIn(const std::optional<std::string>& oldIdHash, const std::string& newId, const std::string& userId,
+                  const std::string& addressGroup, const std::string& app);
+
     Status remove(const std::string& idHash);
-    // Every session of this user ("sign out everywhere"; M6).
+    // Every session of this user ("sign out everywhere").
     Status removeForUser(const std::string& userId);
 
     // Removes expired sessions; returns how many.
@@ -109,9 +120,9 @@ private:
     bool expired(const SessionRecord& r, int64_t now) const;
     Status evictAnonymous(const std::string& addressGroup);
 
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::unique_ptr<Sqlite> db_;
-    SessionConfig config_;
+    SessionConfig config_;   // guarded by mutex_
     const Clock& clock_;
 };
 

@@ -1,6 +1,7 @@
 // The scripts pass: .ms files in code/pages/ are page code (render and
 // handlers); .ms files directly in code/lib/ are modules for `import`.
 // Compiling them is the script component's job; this pass picks the files.
+// (code/access.ms is a declaration file, which the access pass reads.)
 
 #include "passes.h"
 
@@ -14,6 +15,7 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
 
     for (const CodeEntry& entry : listing.files) {
         if (entry.path.extension() != ".ms") continue;
+        if (entry.path.str() == "access.ms") continue;
         std::string name = codeFileName(entry.path);
         std::vector<CodeFile>* into = nullptr;
         if (entry.path.isWithin(pages)) {

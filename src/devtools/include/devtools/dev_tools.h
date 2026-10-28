@@ -12,12 +12,17 @@
 // - Template warnings (a field with no value, a value with no field) show
 //   in a small panel on open pages, once per app generation.
 //
+// - /__dev/access (M6): the access report, every URL the app serves with its
+//   effective access level and the rules that produced it, and the access
+//   warnings; /__dev/access.json has the same as data.
+//
 // It's an Observer (compile events come in) and the engine's EngineHooks
 // (requests for /__dev/ and HTML responses go through it). The core never
 // depends on it; production doesn't create one.
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -37,6 +42,12 @@ public:
     // `loop` is the transport's loop, where the event streams live; it must
     // outlive this object. `code` is read for the code around errors.
     DevTools(EventLoop& loop, CodeTree code);
+
+    // Where the access report finds the app serving now. Set before serving.
+    void setAppSource(std::function<std::shared_ptr<const CompiledApp>()> current) { currentApp_ = std::move(current); }
+
+    // The access report's data: [{url, kind, access, sources}], and warnings.
+    static Datum accessReport(const CompiledApp& app);
     ~DevTools() override;
 
     DevTools(const DevTools&) = delete;
@@ -62,7 +73,8 @@ private:
     Datum describeErrors(const std::vector<Diagnostic>& diagnostics) const;
 
     CodeTree code_;
-    std::shared_ptr<Hub> hub_;   // shared with tasks posted to the loop
+    std::shared_ptr<Hub> hub_;
+    std::function<std::shared_ptr<const CompiledApp>()> currentApp_;   // shared with tasks posted to the loop
 };
 
 // The client script served at /__dev/client.js.
