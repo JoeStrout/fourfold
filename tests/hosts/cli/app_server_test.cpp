@@ -354,19 +354,26 @@ TEST_CASE("AppServer: the guestbook example, with HTMX") {
     CHECK(contains(page, "<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">"));
     CHECK(contains(page, "{\"entries\":4,\"names\":4}"));
 
-    // Signing with HTMX gets just the new entry, escaped.
-    std::string body = "who=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E&msg=**hi**";
-    std::string csrf = csrfHeaders(port, "/");
+    // Signing with HTMX gets just the new entry, escaped. (The form's
+    // timing token says when it was shown; code/limits.ms wants 2 seconds.)
+    std::string form = get(port, "/");
+    std::string csrf = "Cookie: ff_csrf=" + between(form, "Set-Cookie: ff_csrf=", ";") +
+                       "\r\nX-CSRF-Token: " + between(form, "name=\"_csrf\" value=\"", "\"") + "\r\n";
+    std::string shown = "_t=" + between(form, "name=\"_t\" value=\"", "\"") + "&";
+    std::this_thread::sleep_for(std::chrono::milliseconds(2100));
+    std::string body = shown + "who=%3Cimg+src%3Dx+onerror%3Dalert(1)%3E&msg=**hi**";
     std::string signed_ = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nHX-Request: true\r\n" +
                                       csrf + "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
                                           std::to_string(body.size()) + "\r\n\r\n" + body);
     CHECK(contains(signed_, "HTTP/1.1 200 OK\r\n"));
-    CHECK(contains(signed_, "<li><b>&lt;img src=x onerror=alert(1)&gt;</b>: <div class=\"markdown limited\">\n"
-                            "<p><strong>hi</strong></p>\n</div>\n</li>"));
+    CHECK(contains(signed_, "<li><b>&lt;img src=x onerror=alert(1)&gt;</b> <span class=\"mood\"></span>: "
+                            "<div class=\"markdown limited\">\n<p><strong>hi</strong></p>\n</div>\n</li>"));
     CHECK_FALSE(contains(signed_, "/__dev/client.js"));   // a fragment, not a page
     // Without HTMX, a redirect back.
+    std::string plainBody = shown + "who=a&msg=b";
     std::string plain = fetch(port, "POST /sign HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n" + csrf +
-                                    "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: 11\r\n\r\nwho=a&msg=b");
+                                    "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
+                                    std::to_string(plainBody.size()) + "\r\n\r\n" + plainBody);
     CHECK(contains(plain, "HTTP/1.1 303 See Other\r\n"));
     CHECK(contains(plain, "Location: /\r\n"));
 

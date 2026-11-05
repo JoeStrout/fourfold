@@ -57,4 +57,35 @@ std::optional<HttpResponse> admit(const HttpRequest& request, const EngineOption
     return std::nullopt;
 }
 
+std::string clientAddress(const HttpRequest& request, const std::vector<AddressRange>& trustedProxies) {
+    auto trusted = [&](const std::string& address) {
+        for (const AddressRange& r : trustedProxies) {
+            if (r.contains(address)) return true;
+        }
+        return false;
+    };
+    std::string address = request.peerAddress;
+    if (trustedProxies.empty() || !trusted(address)) return address;
+    // Every X-Forwarded-For field, in order, as one list.
+    std::vector<std::string> hops;
+    for (const Headers::Field& f : request.headers) {
+        if (!equalsIgnoreCase(f.name, "X-Forwarded-For")) continue;
+        size_t start = 0;
+        while (start <= f.value.size()) {
+            size_t comma = f.value.find(',', start);
+            if (comma == std::string::npos) comma = f.value.size();
+            std::string hop = f.value.substr(start, comma - start);
+            size_t a = hop.find_first_not_of(" \t"), b = hop.find_last_not_of(" \t");
+            hops.push_back(a == std::string::npos ? "" : hop.substr(a, b - a + 1));
+            start = comma + 1;
+        }
+    }
+    for (auto it = hops.rbegin(); it != hops.rend(); ++it) {
+        if (!parseAddress(*it)) return address;   // garbage: stop at the last address we could trust
+        address = *it;
+        if (!trusted(address)) return address;
+    }
+    return address;
+}
+
 }  // namespace fourfold

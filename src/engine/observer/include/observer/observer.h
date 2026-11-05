@@ -8,6 +8,8 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "compiledapp/compiled_app.h"
@@ -44,6 +46,11 @@ public:
     // with no field (overview §4, "Missing and extra fields"). `generation`
     // is the app generation that rendered them.
     virtual void renderWarnings(uint64_t /*generation*/, const std::vector<RenderWarning>&) {}
+    // A request ("POST /guestbook/sign") was counted against rate limits:
+    // each limit, described, with its count after the request (overview §5,
+    // Dev mode: the request inspector).
+    virtual void limitsCounted(const std::string& /*request*/,
+                               const std::vector<std::pair<std::string, double>>& /*counts*/) {}
 };
 
 // Passes each event on to several observers, in order.
@@ -56,6 +63,7 @@ public:
     void compileFinished(const CompileReport& report) override;
     void scriptError(const ScriptError& error) override;
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
+    void limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) override;
 
 private:
     std::vector<Observer*> observers_;   // fixed once events start

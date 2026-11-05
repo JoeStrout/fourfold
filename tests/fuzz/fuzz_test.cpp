@@ -12,6 +12,9 @@
 // - Mutated Markdown templates must parse or be refused without crashing,
 //   and when filled with hostile values, their Markdown output must keep the
 //   values out of HTML and URLs.
+// - Mutated form bodies (M7), url-encoded and multipart, must be read or
+//   refused without crashing, within the limits, in linear time, and checked
+//   against a declaration without crashing.
 
 #include <cctype>
 #include <chrono>
@@ -23,8 +26,10 @@
 #include <vector>
 
 #include "../template/helpers.h"
+#include "base/utf8.h"
 #include "doctest.h"
 #include "markdown/markdown.h"
+#include "pipeline/forms.h"
 #include "md4c.h"
 
 using namespace fourfold;
@@ -499,4 +504,80 @@ TEST_CASE("fuzz: the Markdown writer and Markdown templates are linear") {
     checkLinear("template link lines", [](size_t k) { return "x" + repeat(" ", k) + "](/{{a}})"; }, parse, n);
     checkLinear("template runs", [](size_t k) { return repeat("{{a}}x", k); }, parse, n / 4);
     checkLinear("template blocks", [](size_t k) { return repeat("{{a}}\n\n", k); }, parse, n);
+}
+
+TEST_CASE("fuzz: form bodies are read or refused, within limits, in linear time") {
+    Rng rng{0x464F524D53ull};
+    const std::vector<std::string> tokens = {
+        "--B", "--B--", "\r\n", "\r\n\r\n", "Content-Disposition: form-data; name=\"", "\"; filename=\"",
+        "\"", ";", "=", "%", "%2", "%FF", "&", "+", "_csrf", "_t", "_pow", "\xC3", "\xFF", std::string(1, '\0'),
+        "a", "who", "\\", "%22", "%0A", "name=", "filename*=", "--", "\x89PNG\r\n\x1a\n"};
+    const std::string seed =
+        "--B\r\nContent-Disposition: form-data; name=\"who\"\r\n\r\nAda\r\n"
+        "--B\r\nContent-Disposition: form-data; name=\"pic\"; filename=\"a.png\"\r\nContent-Type: image/png\r\n\r\n"
+        "\x89PNG\r\n\x1a\nxx\r\n--B--\r\n";
+    FormSpec spec;
+    spec.name = "f";
+    FormField who;
+    who.name = "who";
+    who.required = true;
+    who.max = 5;
+    FormField pic;
+    pic.name = "pic";
+    pic.type = FormFieldType::File;
+    pic.maxKB = 1;
+    pic.types = {"image/png"};
+    FormField pick;
+    pick.name = "a";
+    pick.type = FormFieldType::Choices;
+    pick.options = {"x", "y"};
+    spec.fields = {who, pic, pick};
+    SubmissionLimits limits;
+    limits.maxParts = 20;
+    limits.maxFields = 50;
+    limits.maxFormBytes = 4096;
+    for (int i = 0; i < 4000; i++) {
+        HttpRequest r;
+        r.method = "POST";
+        bool multipart = i % 2 == 0;
+        r.headers.add("Content-Type", multipart ? "multipart/form-data; boundary=B" : "application/x-www-form-urlencoded");
+        r.body = mutate(multipart ? seed : "who=Ada&a=x&_csrf=C", rng, tokens);
+        SubmissionError error;
+        std::optional<Submission> s = readSubmission(r, limits, error);
+        if (!s) {
+            CHECK((error.status == 400 || error.status == 413));
+            continue;
+        }
+        CHECK_LE(s->fields.size(), multipart ? limits.maxParts : limits.maxFields);
+        for (const auto& [name, value] : s->fields) {
+            CHECK(isValidUtf8(name));
+            CHECK(isValidUtf8(value));
+        }
+        CheckedForm c = checkForm(spec, *s);
+        CHECK(c.form.kind() == Datum::Kind::Map);
+    }
+
+    // Linear time: many tiny parts, and a body of nothing but delimiters.
+    auto timed = [&](const std::string& body, const char* type) {
+        HttpRequest r;
+        r.method = "POST";
+        r.headers.add("Content-Type", type);
+        r.body = body;
+        SubmissionLimits big;
+        big.maxParts = 1u << 20;
+        big.maxFields = 1u << 20;
+        big.maxFormBytes = 64u << 20;
+        auto start = std::chrono::steady_clock::now();
+        SubmissionError error;
+        (void)readSubmission(r, big, error);
+        return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    };
+    std::string parts, delimiters, pairs;
+    for (int i = 0; i < 20000; i++) parts += "--B\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\nx\r\n";
+    parts += "--B--\r\n";
+    for (int i = 0; i < 200000; i++) delimiters += "--B";
+    for (int i = 0; i < 100000; i++) pairs += "a=b&";
+    CHECK_LT(timed(parts, "multipart/form-data; boundary=B"), 2.0);
+    CHECK_LT(timed(delimiters, "multipart/form-data; boundary=B"), 2.0);
+    CHECK_LT(timed(pairs, "application/x-www-form-urlencoded"), 2.0);
 }

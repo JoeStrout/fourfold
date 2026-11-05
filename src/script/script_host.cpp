@@ -94,6 +94,7 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
                 return;
             }
             r->interp.SetGlobalValue("session", toValue(shared->value().app));
+            r->engineSession = shared->value().engine;
             resume(id);
         });
     });
@@ -163,7 +164,12 @@ bool ScriptHost::Impl::slice(Run& run) {
             // The top level has defined the page's functions; now call the
             // handler, in the same namespace, through its stub.
             run.phase = Run::Phase::Handler;
-            run.interp.SetGlobalValue("_ff_req", makeRequestValue(run.context.request));
+            MiniScript::Value req = makeRequestValue(run);
+            if (req.IsError()) {
+                finish(run, errorOutcome(toStdString(req.Message()), run.fileName));
+                return false;
+            }
+            run.interp.SetGlobalValue("_ff_req", req);
             vm.Reset(run.stub->functions, run.interp.GetGlobals());
             return true;
         }

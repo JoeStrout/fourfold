@@ -24,6 +24,7 @@
 #include "compiledapp/compiled_app.h"
 #include "mail/mailer.h"
 #include "partition/config_dir.h"
+#include "platform/address.h"
 #include "script/script_host.h"
 #include "state/auth_store.h"
 #include "state/session_store.h"
@@ -55,6 +56,26 @@ struct MailConfig {
     std::string from;   // the sender, "Name <noreply@example.com>"
 };
 
+// Rate limits and spam checks (overview §5, Rate limits and spam): the
+// engine's own; a route's come from code/limits.ms.
+struct LimitsConfig {
+    // Counted for every request but GET, HEAD and OPTIONS: per address
+    // group for anonymous visitors, per user for signed-in ones. Each rule's
+    // key is "default".
+    std::vector<RateRule> anonymous;
+    std::vector<RateRule> signedIn;
+    // A proof-of-work puzzle's difficulty, in leading zero bits: 16 takes
+    // well under a second on a phone. Low in dev, so testing isn't slowed.
+    int challengeBits = 16;
+};
+
+// A reverse proxy in front of the engine (overview §8, Trusting the
+// client's address): connections from these addresses may say who the
+// visitor is, in X-Forwarded-For. Empty: no one may.
+struct ProxyConfig {
+    std::vector<AddressRange> trust;
+};
+
 // The secrets from secrets.ms (overview §10, "Secrets: a separate file").
 // A secret with no hosts is engine-only (SMTP passwords and the like); one
 // with hosts will be usable by app code, only toward those hosts (M9).
@@ -70,6 +91,8 @@ struct AppConfig {
     SessionConfig session;
     AuthConfig auth;
     MailConfig mail;
+    LimitsConfig limits;
+    ProxyConfig proxy;
     // Sends mail as configured; null if the transport is None. Thread-safe.
     std::shared_ptr<Mailer> mailer;
     // By name. Only `config` reads the values.

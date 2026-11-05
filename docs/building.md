@@ -23,7 +23,7 @@ To run a sample app:
 ```sh
 ./build/dev/bin/fourfold dev examples/static-site     # then open http://localhost:8090/
 ./build/dev/bin/fourfold dev examples/scripts         # pages with MiniScript (M2)
-./build/dev/bin/fourfold dev examples/guestbook       # templates, fragments, Markdown and HTMX (M4)
+./build/dev/bin/fourfold dev examples/guestbook       # templates, fragments, Markdown, HTMX (M4); forms, uploads, spam rules (M7)
 ./build/dev/bin/fourfold dev examples/markdown-site   # a site made only of .md files, with code (M4, M6.1)
 ./build/dev/bin/fourfold dev examples/clubhouse       # sign-in and access rules (M6)
 ```

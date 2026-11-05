@@ -224,14 +224,14 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 - parses templates and Markdown (via `template` and `markdown`);
 - compiles `.ms` files into bytecode (via `script`'s `ScriptCompiler`, which takes `CodeFile`s);
 - evaluates declaration files (`access.ms`, `limits.ms`, `outbound.ms`, `schedule.ms`, routes) and per-file declarations (`access =`, `form.x`) in a restricted VM, getting back `Datum`s (via `script`'s `DataEvaluator`);
-- builds the route table and computes each route's effective access, limits, and form spec;
-- runs the cross-checks: route collisions, unmatched access rules, forms against templates, local links in templates and between `.md` files, jobs named by the schedule, migration numbering and checksums.
+- builds the route table and computes each route's effective access, limits, and form spec (M7: `pass_limits.cpp`, `pass_forms.cpp`);
+- runs the cross-checks: route collisions, unmatched access rules, forms against templates (M7: through `CompiledTemplate::forms()`, adding validation attributes with `annotateForms`), local links in templates and between `.md` files, jobs named by the schedule, migration numbering and checksums.
 
 The compiler is, apart from its use of `script`, **a pure function from files to a compiled app**. It touches no stores and no network. That makes it the natural place for golden tests ("this app folder compiles to this route-table dump, with these diagnostics"), and the access report is just a printout of its output.
 
 Internally it's a set of passes over a shared in-progress model, so each feature (forms, Markdown, migrations) adds a pass without disturbing the others.
 
-**`config`.** Reads `private/config/app.ms`, `secrets.ms`, and the optional server config (via `DataEvaluator`), applies defaults, and clamps app values to the server's ceilings. The result is an immutable `AppConfig` struct, made of one sub-struct per area (`SessionConfig`, `BudgetConfig`, `OutboundConfig`, …). **Each component receives only its own sub-struct**, so adding a setting touches `config` and the one component that uses it. Secret values go into a `SecretVault`, which is handed only to `outbound`, `mail`, and `appdata`, and never to `script`. *As built in M6* (`config/app_config.h`): `loadConfig` returns an `AppConfig` with `SiteConfig`, `ScriptBudget`, `SessionConfig`, `AuthConfig` and `MailConfig`, and builds the `Mailer` itself, so engine-only secrets never leave `config` except inside it; the vault proper comes with `outbound` (M9). `lifecycle` reloads the config when `private/config/` changes.
+**`config`.** Reads `private/config/app.ms`, `secrets.ms`, and the optional server config (via `DataEvaluator`), applies defaults, and clamps app values to the server's ceilings. The result is an immutable `AppConfig` struct, made of one sub-struct per area (`SessionConfig`, `BudgetConfig`, `OutboundConfig`, …). **Each component receives only its own sub-struct**, so adding a setting touches `config` and the one component that uses it. Secret values go into a `SecretVault`, which is handed only to `outbound`, `mail`, and `appdata`, and never to `script`. *As built in M6* (`config/app_config.h`): `loadConfig` returns an `AppConfig` with `SiteConfig`, `ScriptBudget`, `SessionConfig`, `AuthConfig` and `MailConfig`, and builds the `Mailer` itself, so engine-only secrets never leave `config` except inside it; the vault proper comes with `outbound` (M9). M7 added `LimitsConfig` (the default rate limits and puzzle difficulty, for the gate) and `ProxyConfig` (trusted proxy addresses, for Admit). `lifecycle` reloads the config when `private/config/` changes.
 
 **`script`.** Everything that knows about MiniScript. Its public face is small:
 
@@ -270,7 +270,7 @@ Return values from handlers are converted into an engine-side `HandlerOutcome` (
 |---|---|
 | `SessionStore` | session records (hashed IDs, engine part, app part as bytes), user→sessions index |
 | `AuthStore` | users, roles, magic-link tokens |
-| `RateStore` | rate-limit counters, used challenges |
+| `RateStore` | rate-limit counters, used challenges (M7: sliding windows estimated from two fixed ones, in `state.db`) |
 | `JobQueue` | pending, running, and dead jobs; schedule state |
 | `LockService` | session locks and the schema lock (in memory in standalone mode, file locks in CGI mode); `DataFiles` uses the file kind for its locks |
 | `EngineLog` | the engine's log, `private/state/logs/` (M5) |
@@ -296,14 +296,14 @@ Each store's interface deals in `Datum`, bytes, and plain structs. Redis or Post
 2. **Route:** pin the current `CompiledApp` and `AppConfig` (`shared_ptr<const …>`), take the schema lock shared, and look the route up. Not found → 404.
 3. **Identify:** read the session cookie, hash the ID, look up the user in `AuthStore`. The session's app part isn't loaded yet.
 4. **Gate:** `policy` decides allow or deny.
-5. **Parse:** parse the body under limits, then normalize and validate it against the route's `FormSpec`, giving `req.form`, `req.errors`, and `req.files`.
+5. **Parse:** parse the body under limits, then normalize and validate it against the route's `FormSpec`, giving `req.form`, `req.errors`, and `req.files`. *As built in M7* (`pipeline/forms.h`): the body is read before the Gate, since the CSRF token, timing token and puzzle answer may be in it; it's checked against the `FormSpec` after.
 6. **Dispatch:** a static file is streamed from `CodeTree` or `DataDir`; a template with no code is rendered directly; a handler goes to `ScriptHost`.
 7. **Respond:** turn the `HandlerOutcome` into an `HttpResponse`: headers (§8 security headers, CSP nonce, cache rules for restricted routes), cookies, HTMX headers, error pages.
 8. **Commit:** save the session if it changed, commit enqueued jobs, release locks; or, on error, discard all of these.
 
 Reserved prefixes (`/__auth/`, `/__fourfold/`, `/__dev/`) are routed to their owners before step 2.
 
-**`policy`.** `PolicyGate::check(RouteEntry, RequestFacts, stores) → Decision`. Access level, CSRF token and `Origin`, rate limits, timing tokens, and challenges. Each check is a separate function that can only add a denial, which mirrors the overview's "rules can only tighten". Table-driven tests cover it thoroughly; it's the piece most worth over-testing.
+**`policy`.** `PolicyGate::check(RouteEntry, RequestFacts, stores) → Decision`. Access level, CSRF token and `Origin`, rate limits, timing tokens, and challenges. Each check is a separate function that can only add a denial, which mirrors the overview's "rules can only tighten". Table-driven tests cover it thoroughly; it's the piece most worth over-testing. *As built in M7:* `check(route, GateFacts, RateStore*)`, in the order access, CSRF, rates, timing, challenge; it blocks on the `RateStore` only when `needsStore` says it counts something, and the engine then calls it on a worker. It also makes the timing tokens and puzzles that `render` writes into forms.
 
 **`authflow`.** The engine's own pages and flows (§5): magic-link request and redemption, sign-out (one device, or everywhere), fake login in dev. It uses `AuthStore`, `SessionStore`, `Mailer`, and `template` (wrapping the engine-rendered form in the app's `frags/auth/` template). It's routes plus logic, and never runs app code. *As built in M6:* it implements `AuthRoutes`, an interface in `pipeline` (like `EngineHooks`), so `pipeline` doesn't depend on it; the pipeline runs Identify and the CSRF check before handing it a request. The wrapper is `frags/auth/layout.html`.
 

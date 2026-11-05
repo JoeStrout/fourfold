@@ -18,14 +18,8 @@
     <ul id="entries">{{entries}}</ul>
 
     <!-- Works with HTMX (the new entry is appended in place) and without it
-         (the form posts, and the handler redirects back here). -->
-    <form method="post" action="/sign"
-          hx-post="/sign" hx-target="#entries" hx-swap="beforeend">
-      <input name="who" placeholder="Your name" required>
-      <textarea name="msg" placeholder="Say something (Markdown works)" required></textarea>
-      <label><input type="checkbox" name="shout" checked="{{shoutByDefault}}"> Shout</label>
-      <button>Sign</button>
-    </form>
+         (the form posts, and the handler redirects back). -->
+    {{signForm}}
     <p class="note">Entries are kept in <code>data/guestbook.jsonl</code>; delete it (and
       <code>data/seeded.json</code>) to start over.</p>
   </main>

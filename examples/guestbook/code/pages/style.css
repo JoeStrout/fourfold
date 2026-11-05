@@ -10,3 +10,10 @@ textarea { min-height: 4em; }
 .note { color: #777; font-size: 0.9em; }
 .flash { background: #eef7ee; border-left: 4px solid #5a5; padding: 0.4em 0.8em; }
 .flash:empty { display: none; }
+.error { color: #b00; font-size: 0.9em; }
+.error:empty { display: none; }
+fieldset { border: none; padding: 0; display: flex; gap: 1em; }
+.mood { color: #888; font-size: 0.85em; }
+.mood:empty { display: none; }
+.photos { list-style: none; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5em; }
+.ff-needs-js { color: #b00; }

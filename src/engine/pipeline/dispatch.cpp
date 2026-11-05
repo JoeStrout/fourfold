@@ -65,6 +65,7 @@ RenderOptions renderOptionsFor(const CompiledApp& app, std::string nonce) {
     RenderOptions o;
     o.nonce = std::move(nonce);
     o.markdownCss = app.hasMarkdownCss ? "/markdown.css" : kBuiltinMarkdownCssUrl;
+    o.challengeScript = kChallengeScriptUrl;
     return o;
 }
 

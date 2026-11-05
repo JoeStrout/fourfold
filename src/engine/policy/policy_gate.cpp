@@ -1,6 +1,8 @@
 #include "policy/policy_gate.h"
 
+#include <algorithm>
 #include <cctype>
+#include <cmath>
 
 #include "base/crypto.h"
 #include "platform/random.h"
@@ -88,11 +90,139 @@ void PolicyGate::checkCsrf(const GateFacts& facts, GateDecision& d) const {
     }
 }
 
-GateDecision PolicyGate::check(const RouteEntry& route, const GateFacts& facts) const {
+std::string PolicyGate::mac(const std::string& message) const {
+    return toBase64Url(keyedHash(key_, message).substr(0, 16));
+}
+
+std::string PolicyGate::formTimeToken(const std::string& cookie, int64_t nowMs) const {
+    std::string ms = std::to_string(nowMs);
+    return ms + "." + mac("t:" + ms + ":" + cookie);
+}
+
+std::string PolicyGate::newChallenge(const std::string& cookie, int64_t nowMs, int bits) const {
+    std::string body = toBase64Url(randomBytes(12)) + "." + std::to_string(nowMs) + "." + std::to_string(bits);
+    return body + "." + mac("pow:" + body + ":" + cookie);
+}
+
+namespace {
+
+// "123" → 123; nullopt if it isn't a plain non-negative decimal.
+std::optional<int64_t> parseDecimal(const std::string& s, size_t maxDigits = 15) {
+    if (s.empty() || s.size() > maxDigits) return std::nullopt;
+    int64_t n = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return std::nullopt;
+        n = n * 10 + (c - '0');
+    }
+    return n;
+}
+
+std::vector<std::string> split(const std::string& s, char sep) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    for (;;) {
+        size_t at = s.find(sep, start);
+        out.push_back(s.substr(start, at == std::string::npos ? std::string::npos : at - start));
+        if (at == std::string::npos) return out;
+        start = at + 1;
+    }
+}
+
+std::string subjectFor(const RateRule& rule, const GateFacts& facts) {
+    if (rule.per == RateRule::Per::User && facts.userId) return "user:" + *facts.userId;
+    if (rule.per == RateRule::Per::Session && facts.sessionHash) return "session:" + toHex(*facts.sessionHash);
+    return "ip:" + facts.addressGroup;
+}
+
+}  // namespace
+
+bool PolicyGate::needsStore(const RouteEntry& route, const std::string& method) {
+    return !route.limits.empty() || !isSafeMethod(method);
+}
+
+void PolicyGate::checkRates(const RouteEntry& route, const GateFacts& facts, RateStore* rates, GateDecision& d) {
+    std::vector<const RateRule*> rules;
+    for (const RateRule& r : route.limits) rules.push_back(&r);
+    if (!isSafeMethod(facts.method)) {
+        for (const RateRule& r : facts.defaultLimits) rules.push_back(&r);
+    }
+    if (rules.empty() || !rates) return;
+    std::vector<RateCheck> checks;
+    for (const RateRule* r : rules) checks.push_back({r->key + "|" + subjectFor(*r, facts), r->count, r->seconds});
+    auto result = rates->hit(checks);
+    if (!result) return;   // a store failure doesn't refuse the request (the error is the operator's)
+    for (size_t i = 0; i < result.value().counts.size() && i < rules.size(); i++) {
+        d.counted.emplace_back(rules[i]->describe() + " (" + rules[i]->key + ")", result.value().counts[i]);
+    }
+    if (!result.value().allowed) {
+        const RateRule& r = *rules[result.value().refusedIndex];
+        deny(d, GateDecision::Denial::RateLimited, 429, "over the limit of " + r.describe() + " (" + r.key + ")");
+        d.retryAfterSeconds = result.value().retryAfterSeconds;
+    }
+}
+
+void PolicyGate::checkTiming(const RouteEntry& route, const GateFacts& facts, GateDecision& d) const {
+    if (isSafeMethod(facts.method) || route.minSeconds <= 0) return;
+    auto refuse = [&](std::string reason) { deny(d, GateDecision::Denial::Timing, 403, std::move(reason)); };
+    if (!facts.formTime || !facts.csrfCookie) {
+        return refuse("no timing token (_t): this route has minSeconds, so the form must come from a page the "
+                      "engine rendered");
+    }
+    std::vector<std::string> parts = split(*facts.formTime, '.');
+    std::optional<int64_t> ms = parts.size() == 2 ? parseDecimal(parts[0]) : std::nullopt;
+    if (!ms || !constantTimeEqual(parts[1], mac("t:" + parts[0] + ":" + *facts.csrfCookie))) {
+        return refuse("the timing token (_t) isn't valid");
+    }
+    double age = static_cast<double>(facts.nowMs - *ms) / 1000.0;
+    if (age < route.minSeconds) {
+        deny(d, GateDecision::Denial::TooFast, 429,
+             "sent " + std::to_string(static_cast<int64_t>(age * 1000)) + " ms after the form was rendered; "
+             "this route needs at least " + std::to_string(static_cast<int64_t>(route.minSeconds)) + " s");
+        d.retryAfterSeconds = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(route.minSeconds - age)));
+        return;
+    }
+    if (route.maxAgeSeconds > 0 && age > route.maxAgeSeconds) {
+        return refuse("the form is older than this route's maxAgeMinutes; reload it");
+    }
+}
+
+void PolicyGate::checkChallenge(const RouteEntry& route, const GateFacts& facts, RateStore* rates,
+                                GateDecision& d) const {
+    if (isSafeMethod(facts.method) || !route.challenge) return;
+    auto refuse = [&](std::string reason) { deny(d, GateDecision::Denial::Challenge, 403, std::move(reason)); };
+    if (!facts.challengeAnswer || facts.challengeAnswer->empty() || !facts.csrfCookie) {
+        return refuse("no proof of work (_pow): this form needs JavaScript to solve its puzzle before it's sent");
+    }
+    size_t tilde = facts.challengeAnswer->rfind('~');
+    if (tilde == std::string::npos) return refuse("the proof of work (_pow) is malformed");
+    std::string puzzle = facts.challengeAnswer->substr(0, tilde);
+    std::string answer = facts.challengeAnswer->substr(tilde + 1);
+    std::vector<std::string> parts = split(puzzle, '.');
+    if (parts.size() != 4 || !parseDecimal(answer)) return refuse("the proof of work (_pow) is malformed");
+    std::string body = parts[0] + "." + parts[1] + "." + parts[2];
+    std::optional<int64_t> issued = parseDecimal(parts[1]);
+    std::optional<int64_t> bits = parseDecimal(parts[2], 3);
+    if (!issued || !bits || !constantTimeEqual(parts[3], mac("pow:" + body + ":" + *facts.csrfCookie))) {
+        return refuse("the proof of work's puzzle isn't one the engine made for this visitor");
+    }
+    if (facts.nowMs - *issued > kChallengeLifetimeMs) return refuse("the puzzle has expired; reload the form");
+    if (*bits < facts.challengeBits) return refuse("the puzzle is easier than this site now asks for; reload the form");
+    if (leadingZeroBits(sha256(*facts.challengeAnswer)) < *bits) return refuse("the puzzle's answer is wrong");
+    if (rates) {
+        auto fresh = rates->useOnce(parts[0], *issued + kChallengeLifetimeMs);
+        if (fresh && !fresh.value()) return refuse("this puzzle has been used already; reload the form");
+    }
+}
+
+GateDecision PolicyGate::check(const RouteEntry& route, const GateFacts& facts, RateStore* rates) const {
     GateDecision d;
+    auto open = [&] { return d.denial == GateDecision::Denial::None; };
     checkAccess(route, facts, d);
-    if (d.denial == GateDecision::Denial::None) checkCsrf(facts, d);
-    if (d.denial == GateDecision::Denial::None) d.approval = GateApproval();
+    if (open()) checkCsrf(facts, d);
+    if (open()) checkRates(route, facts, rates, d);
+    if (open()) checkTiming(route, facts, d);
+    if (open()) checkChallenge(route, facts, rates, d);
+    if (open()) d.approval = GateApproval();
     return d;
 }
 

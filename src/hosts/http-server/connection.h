@@ -66,6 +66,7 @@ private:
     HttpServer& server_;
     EventLoop& loop_;
     const HttpServerLimits& limits_;
+    size_t bodyLimit_ = 0;   // this request's: maxBodyBytes, or maxUploadBodyBytes for multipart
     Fd fd_;
     std::string peerAddress_;
     State state_ = State::Reading;

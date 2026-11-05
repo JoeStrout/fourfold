@@ -48,6 +48,9 @@ public:
     bool hasScript() const { return hasScript_; }
     // Contains rendered Markdown, so a page holding it links markdown.css.
     bool hasMarkdown() const { return hasMarkdown_; }
+    // Contains a form with a proof-of-work puzzle, so a page holding it
+    // links the solver.
+    bool hasChallenge() const { return hasChallenge_; }
     // It is Markdown (an .md fragment, or markdown()), so it can go in a
     // Markdown template. An HTML fragment, or HTML holding a Markdown value,
     // isn't.
@@ -68,6 +71,7 @@ private:
     std::string markup_;
     bool hasScript_ = false;
     bool hasMarkdown_ = false;
+    bool hasChallenge_ = false;
     std::shared_ptr<const MarkdownForm> markdown_;
 };
 
@@ -85,6 +89,10 @@ struct HtmlAccess {
     static Html make(std::string markup, bool hasScript, bool hasMarkdown,
                      std::shared_ptr<const MarkdownForm> markdown = nullptr) {
         return Html(std::move(markup), hasScript, hasMarkdown, std::move(markdown));
+    }
+    static Html withChallenge(Html html, bool hasChallenge) {
+        html.hasChallenge_ = hasChallenge;
+        return html;
     }
 };
 

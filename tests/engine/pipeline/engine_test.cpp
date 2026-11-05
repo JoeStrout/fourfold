@@ -1,4 +1,5 @@
 #include "pipeline/engine.h"
+#include "pipeline/forms.h"
 
 #include <future>
 #include <mutex>
@@ -796,7 +797,10 @@ TEST_CASE("requestFacts: the engine's cookies and the CSRF token never reach req
     AdmittedRequest admitted;
     REQUIRE_FALSE(admit(r, options, admitted));
     std::optional<std::string> token;
-    RequestFacts facts = requestFacts(r, admitted, &token);
+    SubmissionError bodyError;
+    std::optional<Submission> body = readSubmission(r, {}, bodyError);
+    REQUIRE(body);
+    RequestFacts facts = requestFacts(r, admitted, &*body, &token);
     CHECK_EQ(token.value_or(""), "T1");   // the header first
     for (const auto& [name, value] : facts.headers) {
         CHECK_NE(name, "x-csrf-token");
@@ -813,7 +817,9 @@ TEST_CASE("requestFacts: the engine's cookies and the CSRF token never reach req
     f.body = "_csrf=T2";
     REQUIRE_FALSE(admit(f, options, admitted));
     token.reset();
-    facts = requestFacts(f, admitted, &token);
+    body = readSubmission(f, {}, bodyError);
+    REQUIRE(body);
+    facts = requestFacts(f, admitted, &*body, &token);
     CHECK_EQ(token.value_or(""), "T2");
     for (const auto& [name, value] : facts.headers) CHECK_NE(name, "cookie");   // nothing left of it
     CHECK(facts.form.empty());

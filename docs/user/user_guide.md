@@ -6,9 +6,9 @@ assumes Fourfold is already installed and serving your app with
 `fourfold serve`; setting that up is covered in the
 [admin guide](../admin/admin_guide.md).
 
-*Status: covers what works as of Milestone 6.1. Features still to come (form
-validation, rate limits, uploads, databases, background jobs and more) will be
-added here as they arrive.*
+*Status: covers what works as of Milestone 7. Features still to come
+(databases, background jobs, outbound HTTP and more) will be added here as
+they arrive.*
 
 Markdown has its own reference, [FourFold Flavored Markdown](MARKDOWN.md),
 which this guide links to rather than repeats.
@@ -38,13 +38,16 @@ for the language. This guide covers what Fourfold adds to it.
 16. [Users and roles: users](#users-and-roles-users)
 17. [Configuration: private/config](#configuration-privateconfig)
 18. [Forms and CSRF protection](#forms-and-csrf-protection)
-19. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
-20. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
-21. [Output: print and the dropbox](#output-print-and-the-dropbox)
-22. [Errors and limits](#errors-and-limits)
-23. [Deploying changes](#deploying-changes)
-24. [Developing on your own machine](#developing-on-your-own-machine)
-25. [Quick reference](#quick-reference)
+19. [Declaring a form: form.x](#declaring-a-form-formx)
+20. [File uploads](#file-uploads)
+21. [Spam and rate limits: code/limits.ms](#spam-and-rate-limits-codelimitsms)
+22. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
+23. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
+24. [Output: print and the dropbox](#output-print-and-the-dropbox)
+25. [Errors and limits](#errors-and-limits)
+26. [Deploying changes](#deploying-changes)
+27. [Developing on your own machine](#developing-on-your-own-machine)
+28. [Quick reference](#quick-reference)
 
 ---
 
@@ -505,7 +508,10 @@ is **frozen**: you can read it but not change it.
 | `req.method` | `"GET"`, `"POST"`, ... |
 | `req.path` | `"/guestbook/sign"` |
 | `req.query` | the URL's query parameters, as a map of strings: `?page=2` gives `{"page": "2"}` |
-| `req.form` | a submitted form's fields, as a map of strings |
+| `req.form` | a submitted form's fields: as a map of strings, or, with a [form declaration](#declaring-a-form-formx), the declared fields only, checked and typed |
+| `req.errors` | with a form declaration: `null` if the form passed its rules, else a map of messages by field name |
+| `req.files` | with a form declaration: [uploaded files](#file-uploads), by field name |
+| `req.ip` | the visitor's address (from your proxy, if your admin [trusts it](../admin/admin_guide.md#behind-a-reverse-proxy)) |
 | `req.headers` | the request headers, with **lowercase** names: `req.headers["user-agent"]` |
 | `req.htmx` | 1 if HTMX sent the request, else 0 |
 | `req.user` | the [signed-in visitor](#signing-in-requser), or `null` |
@@ -520,12 +526,14 @@ Things to know:
   `if req.form.hasIndex("who") then who = req.form.who`.
 - If a name appears more than once (`?tag=a&tag=b`), the first one wins.
 - `req.form` is filled from ordinary form posts
-  (`application/x-www-form-urlencoded`, what a `<form method="post">` sends).
-  File-upload forms (`multipart/form-data`) aren't supported yet.
+  (`application/x-www-form-urlencoded`) and file-upload forms
+  (`multipart/form-data`). Files reach your code only through a
+  [form declaration](#file-uploads).
 - Fourfold's own cookies, and its CSRF token, are removed before your code
   sees the request, so logging `req.headers` can never leak a visitor's
   session.
-- The request body may be at most 1 MB.
+- The request body may be at most 1 MB, plus whatever a form declares for its
+  uploads.
 
 ---
 
@@ -540,6 +548,8 @@ Things to know:
 | `redirect(url)` | a redirect (303) to `url` |
 | `json(value)` | `value` as JSON (`application/json`) |
 | `status(code, body)` | any status from 200 to 599, with an optional body |
+| `reshow(fragName, extraErrors)` | a [declared form](#showing-errors-and-keeping-input) again, with its errors |
+| `file.send(path, downloadName)` | a file from `data/` ([safely](#sending-files-back-filesend)) |
 | `null` (or no `return`) | 204 No Content |
 | an error value | an error (500); see [Errors and limits](#errors-and-limits) |
 
@@ -1206,6 +1216,10 @@ on a server is covered in the [admin guide](../admin/admin_guide.md#mail-for-sig
 | `session.anonIdleHours`, `anonMaxDays` | 24; 7 | when an anonymous session ends |
 | `session.userIdleDays`, `userMaxDays` | 14; 30 | when a signed-in session ends |
 | `session.anonPerAddress`, `anonTotal` | 1,000; 100,000 | the most anonymous sessions per visitor address, and in all |
+| `limits.anonymous` | `"60/minute"` | requests other than GET per visitor address, for visitors not signed in (a rate or a list) |
+| `limits.signedIn` | `"300/minute"` | the same per user, for signed-in visitors |
+| `limits.challengeBits` | 16 (4 in dev) | how hard a proof-of-work puzzle is; each bit doubles the work |
+| `proxy.trust` | `[]` | addresses (or ranges, `"10.0.0.0/8"`) of a reverse proxy whose `X-Forwarded-For` is believed; see the [admin guide](../admin/admin_guide.md#behind-a-reverse-proxy) |
 
 **Secrets** (passwords and API keys) go in `private/config/secrets.ms`, so
 `app.ms` can be shared or kept in version control while `secrets.ms` isn't:
@@ -1263,7 +1277,9 @@ forgery** (another site tricking a visitor's browser into posting to yours):
 - Every request other than GET, HEAD and OPTIONS must carry a matching token,
   and must not come from another site; otherwise, it's refused with a 403
   ("This form has expired") **before your handler runs**.
-- `_csrf` is removed from `req.form`, so your handlers never see it.
+- `_csrf` is removed from `req.form`, so your handlers never see it. So are
+  the timing token (`_t`) and puzzle answer (`_pow`) described in
+  [Spam and rate limits](#spam-and-rate-limits-codelimitsms).
 
 What this means for you:
 
@@ -1293,6 +1309,299 @@ fetch("/guestbook/sign", {
 
 Don't write an `hx-headers` attribute on `<body>` yourself; that's a compile
 error, since Fourfold puts its own there.
+
+---
+
+## Declaring a form: `form.x`
+
+Everything in a submitted form is untrusted. Rather than check each field by
+hand, declare the fields a handler accepts, and Fourfold checks them before
+the handler runs. `form.sign` describes what `post.sign` accepts:
+
+```
+// code/pages/guestbook.ms
+form.sign = {
+    "who":   {"type": "text", "required": true, "max": 40,
+              "messages": {"required": "Please sign your name."}},
+    "msg":   {"type": "multiline", "required": true, "max": 2000, "maxLinks": 2},
+    "mood":  {"type": "choice", "options": ["happy", "meh", "grumpy"]},
+    "shout": {"type": "bool"},
+}
+
+post.sign = function(req)
+    if req.errors then return reshow("signForm")
+    data.append "guestbook", {"who": req.form.who, "msg": req.form.msg}
+    return redirect("/guestbook")
+end function
+```
+
+Like `access =`, a form declaration is read **when the app compiles**, so it
+must be plain data, and a mistake in it (an unknown type, a misspelled rule)
+is a compile error. `form.x` must go with a `post.x` in the same file.
+
+| Type | Accepts | In `req.form` |
+|---|---|---|
+| `text` | one line (a newline is an error) | a string |
+| `multiline` | any text; line endings become `\n` | a string |
+| `email` | an email address | a string |
+| `url` | an `http://` or `https://` address | a string |
+| `number` | a decimal number; no `Infinity`, `NaN` or `1e400` | a number, or null |
+| `int` | a whole number | a number, or null |
+| `bool` | a checkbox: there means true | 1 or 0 |
+| `choice` | one of `options` (radio buttons, a `<select>`) | a string, or null |
+| `choices` | any of `options` (several checkboxes) | a list of strings |
+| `date` | `YYYY-MM-DD`, as `<input type="date">` sends | a string, or null |
+| `file` | an upload; see [File uploads](#file-uploads) | (in `req.files`) |
+
+| Rule | For | Means |
+|---|---|---|
+| `required` | any | must be filled in (a checkbox: checked; `choices`: at least one) |
+| `min`, `max` | text types; `number`, `int` | the length, in characters; or the value |
+| `maxLinks` | text types | at most this many web addresses (a cheap spam filter) |
+| `options` | `choice`, `choices` | the allowed values |
+| `maxKB`, `types` | `file` | see [File uploads](#file-uploads) |
+| `messages` | any | your own message per rule: `{"required": "...", "max": "..."}`; `"type"` for a value of the wrong kind |
+
+What happens before your handler runs:
+
+- **Text is cleaned up:** surrounding spaces trimmed, Unicode normalized
+  (NFC, so an accented letter typed two ways compares equal), and control
+  characters removed (tabs and newlines are kept in `multiline`). A field of
+  only spaces counts as empty.
+- **Values are converted**, so `req.form.age` is a number.
+- **Undeclared fields are dropped.** A visitor who adds `isAdmin=1` to the
+  form gets nothing for it. So is a `choice` that isn't one of the options.
+- **Every declared field is there**, so you needn't use `hasIndex`. A text
+  field that's empty is `""`; a number, date or choice that's empty or
+  invalid is `null`; a field that broke a rule is `null`.
+- **The errors are in `req.errors`**: `null` if all is well, else a map from
+  field name to message. Your handler runs either way, since only it knows
+  what to show next (usually `reshow`).
+
+A handler with no declaration still gets `req.form`, as raw strings. The
+dev tools' access report marks those handlers, since a declaration is safer.
+
+### Showing errors and keeping input
+
+The form itself goes in a fragment, so it can be shown in the page and on
+its own. `formState("sign")` gives it what it needs: each field's value, and
+`errors`.
+
+```html
+<!-- code/frags/signForm.html -->
+<form id="signForm" method="post" action="/guestbook/sign"
+      hx-post="/guestbook/sign" hx-target="#entries" hx-swap="beforeend">
+  <p class="error">{{errors.form}}</p>
+  <input name="who" value="{{who}}"> <span class="error">{{errors.who}}</span>
+  <textarea name="msg">{{msg}}</textarea> <span class="error">{{errors.msg}}</span>
+  <label><input type="radio" name="mood" value="happy" checked="{{mood.happy}}"> happy</label>
+  <label><input type="checkbox" name="shout" checked="{{shout}}"> Shout</label>
+  <button>Sign</button>
+</form>
+```
+
+```
+render = function(req)
+    return {"signForm": frag("signForm", formState("sign")), ...}
+end function
+
+post.sign = function(req)
+    if req.errors then return reshow("signForm")
+    if isBanned(req.form.who) then return reshow("signForm", {"who": "Sorry, not allowed."})
+    ...
+end function
+```
+
+- **`formState(name)`** is normally empty: `""` for each text field, 0 for a
+  checkbox, and for a `choice` or `choices` a map from each option to 1 or 0,
+  so `checked="{{mood.happy}}"` and `selected="{{mood.happy}}"` re-check what
+  the visitor picked. `errors` is an empty map. Right after a failed
+  submission, it holds what the visitor typed and what went wrong.
+- **`reshow(fragName, extraErrors)`** sends the form back, either way it was
+  sent:
+  - **with HTMX**, it renders the fragment and has HTMX replace the form
+    itself (status 422). That's why the fragment's first element needs an
+    `id`.
+  - **without JavaScript**, it keeps the input and errors in the visitor's
+    session, for one showing, and redirects to the handler's page
+    (`/guestbook` for `pages/guestbook.ms`), whose `formState` picks them up.
+- `extraErrors` adds checks only your code can make: a map from field names
+  to messages, with `"form"` for an error about the whole form.
+- Values come back through ordinary fields, so they're escaped like any other.
+
+### Forms checked against your templates
+
+Since both are read when the app compiles, Fourfold matches each
+`<form>` to the declaration it posts to (by its `hx-post` or `action`):
+
+- An input whose name isn't declared (usually a typo) is a warning, as is a
+  declared field with no input.
+- The declaration's rules are added to the inputs as **browser-side
+  checks**, where you haven't written them: `required`, `maxlength`,
+  `minlength`, `min`, `max`, `step` and `accept`. Visitors get instant
+  feedback; the server still checks everything.
+
+---
+
+## File uploads
+
+Declare a `file` field, and give the form `enctype="multipart/form-data"`:
+
+```
+form.upload = {
+    "photo":   {"type": "file", "required": true, "maxKB": 512, "types": ["image/png", "image/jpeg"]},
+    "caption": {"type": "text", "max": 80},
+}
+
+post.upload = function(req)
+    if req.errors then return reshow("uploadForm")
+    photo = req.files.photo
+    ext = ".png"
+    if photo.type == "image/jpeg" then ext = ".jpg"
+    name = str(data.increment("photoCount")) + ext
+    file.makedir "photos"
+    file.saveRaw "photos/" + name, photo.data
+    return redirect("/photos")
+end function
+```
+
+```html
+<form id="uploadForm" method="post" action="/photos/upload" enctype="multipart/form-data">
+  <input type="file" name="photo"> <span class="error">{{errors.photo}}</span>
+  ...
+```
+
+- **Uploads are checked by their content**, not by their name or the type
+  the browser claims: a "PNG" must start like a PNG. The types Fourfold can
+  check are `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `image/*`
+  (any of those four), `application/pdf`, `application/zip` and `text/plain`.
+  `types` is required.
+- **`maxKB`** is the largest file, in KB (default 1024, at most 16384).
+- **`req.files.photo`** is a map: `name` (the visitor's file name, with any
+  folders and control characters removed), `type` (as the content showed
+  it), `size` in bytes, and `data`, the bytes as [`RawData`](#binary-files-rawdata).
+  A field with no file isn't in `req.files`.
+- **Saving is up to you**, with `file.saveRaw`. Prefer names you choose
+  over the visitor's: theirs may be anything.
+
+### Sending files back: `file.send`
+
+Nothing in `data/` is ever served by URL. To send a file back, a handler
+returns `file.send(path)`:
+
+```
+get.show = function(req)
+    return file.send("photos/" + req.query.name)
+end function
+```
+
+- The type comes from the file's extension, from a short list. Images
+  (`.png`, `.jpg`, `.gif`, `.webp`, `.avif`), plain text, audio and video are
+  shown in the browser; everything else (PDFs, ZIPs, CSV, ...) is
+  downloaded; and anything that could hold script, like `.html` and `.svg`,
+  is downloaded as plain bytes, never as a page. So an uploaded file can't
+  become a page on your site.
+- `file.send(path, "report.pdf")` always downloads, under that name.
+- The path is checked like any `file` path, so it can't leave `data/`.
+
+---
+
+## Spam and rate limits: `code/limits.ms`
+
+Spam is the first problem almost every public form meets. Fourfold's
+defenses, from weakest to strongest:
+
+| Defense | Default | Stops |
+|---|---|---|
+| Rate limits | on, for every request but GET | floods; a bot posting as fast as it can |
+| `maxLinks` | per form field | link spam |
+| Timing check (`minSeconds`) | off; per route | bots that post the moment they load a form |
+| Proof of work (`challenge`) | off; per route | cheap bulk posting |
+| [Requiring sign-in](#who-may-see-what-access-rules) | off; per route | nearly everything |
+
+**Requiring sign-in is the strongest by far**, and is one line in
+`code/access.ms`. Consider it first for anything beyond a toy.
+
+### Default limits
+
+Every request other than GET is counted: 60 a minute per visitor address
+for visitors who aren't signed in, 300 a minute per user for those who are.
+Over the limit, the visitor gets a 429 ("Too many requests") with a
+`Retry-After` header, using your `pages/429.html` if you have one. Change
+the defaults in `config.limits` ([Configuration](#configuration-privateconfig)).
+
+A school or office behind one address looks like one busy visitor, so the
+defaults are generous, and signed-in visitors are counted per user.
+IPv6 visitors are counted by their /64 network.
+
+### Rules per route
+
+`code/limits.ms` is read when the app compiles, like `access.ms`. A rule
+covers its path and everything below it:
+
+```
+limits = {}
+limits["/guestbook/sign"] = ["5/minute", "50/day"]
+limits["/api"]            = "100/minute per user"
+limits["/forum/post"]     = {"rate": "10/hour", "minSeconds": 3, "challenge": true}
+```
+
+- **A rate** is `count/unit`, with `second`, `minute`, `hour` or `day`, then
+  optionally `per ip` (the default), `per user` (falls back to per address
+  for visitors who aren't signed in) or `per session`. `/` and ` per ` mean
+  the same: `"100/minute/user"` works too.
+- **Every rule that applies does**: the defaults, a folder's rule, and the
+  route's own. Adding a rule only tightens. Routes under one rule share its
+  count: `"/api"` is 100 a minute for all of `/api` together.
+- A route's own rules count **every** request to it, GET included.
+- **A map** can also set the timing check and proof of work (below).
+- A rule that covers no route is a warning.
+
+### The timing check: `minSeconds`
+
+Every form Fourfold renders carries a signed timestamp. On a route with
+`minSeconds`, a submission that comes sooner after its form was shown is
+refused (429, "That was quick!"), and one with no timestamp (a bot posting
+without loading the form) is refused with a 403. A bot can't forge an
+earlier time; it has to wait, on every post.
+
+It's best for forms where people type something; a one-button form would
+trip it. Old forms aren't refused, since people leave tabs open, unless you
+add `"maxAgeMinutes"`.
+
+### Proof of work: `challenge`
+
+On a route with `"challenge": true`, each form posting to it carries a small
+puzzle, which the page's JavaScript solves while the visitor fills the form
+in, normally before they click. Each puzzle works once. People don't notice
+it; a bot posting in bulk pays for every post.
+
+- It **needs JavaScript**: without it, the form shows "This form needs
+  JavaScript to send", and a submission is refused. That's why it's opt-in.
+- Fourfold adds the puzzle to forms whose `action` or `hx-post` names the
+  route, and links its solver into the page. Pages that load
+  `/__fourfold/htmx.js` have the solver already.
+- A spammer with plenty of computing power can still pay; it reduces bulk
+  spam rather than ending it.
+
+### Limits from code: `ratelimit`
+
+For limits only your app knows the key for:
+
+```
+if not ratelimit("comment:" + postId, "20/hour") then return status(429, "Slow down, please.")
+```
+
+`ratelimit(key, rate)` counts this request and returns 1 if it's within the
+rate, else 0. A rate's `per user`, `per ip` or `per session` counts each
+visitor separately.
+
+### In dev mode
+
+The [access report](#developing-on-your-own-machine) shows each route's
+limits, timing check, puzzle and form; `/__dev/limits` shows the counters
+and the latest requests counted or refused, and can reset them. Puzzles are
+very easy in dev, so testing isn't slowed.
 
 ---
 
@@ -1430,7 +1739,8 @@ you'll usually get an error that names it.
 | Time, including waiting | 10 seconds | error |
 | Function call depth | 256 | error |
 | One string or list | 16 million characters or items | an error value |
-| Request body | 1 MB | 413 |
+| Request body | 1 MB, plus a form's declared uploads | 413 |
+| Fields in a form; parts in an upload form | 1,000; 100 | 413 |
 | A session | 64 KB | error; the session isn't saved |
 | A data value or log, or a file | 16 MB | an error value |
 | One `RawData` | 16 MB | an error value |
@@ -1510,7 +1820,10 @@ loop:
 - **Sign-in emails are printed** in the terminal instead of sent (unless
   `config.mail` sets up a real transport), so you can follow the link.
 - **The access report**, at `/__dev/access` (also in the corner menu): every
-  URL, who may use it, and why.
+  URL, who may use it, and why; and its rate limits, spam checks and form.
+- **Rate limits**, at `/__dev/limits` (also in the corner menu): the counters,
+  the latest requests counted or refused, and a button to reset them.
+- **Proof-of-work puzzles** are very easy, so testing isn't slowed.
 
 Dev mode listens only on your own machine (`localhost`), over plain HTTP.
 It uses the app's real `data/` folder, so work on a copy if the data matters.
@@ -1527,12 +1840,13 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `code/pages/x.ms` | its code: `render`, `get.*`, `post.*` |
 | `code/pages/x.md` | a Markdown page at `/x`, and as Markdown at `/x.md` |
 | `code/pages/dir/index.html` | the page at `/dir/` |
-| `code/pages/404.html`, `500.html` | the error pages |
+| `code/pages/404.html`, `500.html`, `429.html` | the error pages |
 | `code/pages/markdown.css` | styles for rendered Markdown |
 | `code/frags/x.html`, `x.md` | the fragment `x` |
 | `code/frags/layout/markdown.html` | the page around Markdown pages |
 | `code/lib/x.ms` | the module for `import "x"` |
 | `code/access.ms` | access rules: `rules["/path"] = "login"` |
+| `code/limits.ms` | rate limits and spam checks: `limits["/path"] = "5/minute"` |
 | `code/frags/auth/layout.html` | the page around the sign-in pages |
 | `code/.deploy` | touch it to deploy |
 | `private/config/app.ms` | the configuration: `config = {}` |
@@ -1559,6 +1873,10 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `redirect(url)` | a redirect response |
 | `json(value)` | a JSON response |
 | `status(code, body=null)` | a response with any status |
+| `formState(name)` | the map for `form.name`'s fragment: values and `errors` |
+| `reshow(fragName, extraErrors=null)` | the declared form again, with its errors |
+| `ratelimit(key, rate)` | 1 if within the rate (and counted), else 0 |
+| `file.send(path, downloadName=null)` | a response sending a file from `data/` |
 | `import "name"` | runs `code/lib/name.ms`, as the map `name` |
 | `wait seconds` | null, after pausing |
 | `data.get(name, default=null)` | the stored value or log |
@@ -1593,4 +1911,5 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `access` | set in a page's `.ms` file: who may use its page and handlers |
 | `session` | this visitor's map, saved if changed; `session.flash` is removed once a page shows it |
 | `get`, `post` | maps of handlers |
+| `form` | a map of form declarations: `form.sign` for `post.sign` |
 | `render` | the page's render function, if it has one |

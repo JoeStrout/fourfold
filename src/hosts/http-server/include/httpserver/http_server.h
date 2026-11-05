@@ -33,6 +33,10 @@ struct HttpServerLimits {
     size_t maxHeaderBytes = 16 * 1024;     // request line plus headers (431, or 414 for the URL)
     size_t maxHeaderCount = 100;           // 431
     size_t maxBodyBytes = 1024 * 1024;     // 413
+    // A multipart/form-data body (a form with file uploads) may be this
+    // large instead; the engine then holds each route to its declared
+    // uploads' sizes (overview §8, Connection and request limits).
+    size_t maxUploadBodyBytes = 33 * 1024 * 1024;
     size_t maxConnections = 1024;          // more are closed at once
     // Time allowed to receive a whole request, from its first byte (408).
     std::chrono::milliseconds requestTimeout{30000};

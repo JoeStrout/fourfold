@@ -1,4 +1,5 @@
 #include "platform/socket.h"
+#include "platform/address.h"
 
 #include "doctest.h"
 
@@ -65,4 +66,26 @@ TEST_CASE("listenTcp on port 0 picks a free port") {
     auto none = acceptConnection(fd.value().get());
     REQUIRE(none.ok());
     CHECK_FALSE(none.value().has_value());   // nothing waiting
+}
+
+TEST_CASE("AddressRange: addresses and CIDR ranges, IPv4 and IPv6") {
+    auto r = fourfold::AddressRange::parse("10.0.0.0/8");
+    REQUIRE(r);
+    CHECK(r->contains("10.1.2.3"));
+    CHECK(r->contains("::ffff:10.1.2.3"));   // IPv4-mapped
+    CHECK_FALSE(r->contains("11.0.0.1"));
+    CHECK_FALSE(r->contains("garbage"));
+    auto one = fourfold::AddressRange::parse("127.0.0.1");
+    REQUIRE(one);
+    CHECK(one->contains("127.0.0.1"));
+    CHECK_FALSE(one->contains("127.0.0.2"));
+    auto v6 = fourfold::AddressRange::parse("2001:db8::/32");
+    REQUIRE(v6);
+    CHECK(v6->contains("2001:db8:1::5"));
+    CHECK_FALSE(v6->contains("2001:db9::5"));
+    CHECK(fourfold::AddressRange::parse("::1")->contains("[::1]"));
+    for (const char* bad : {"", "10.0.0.0/33", "::/129", "10.0.0/8", "x/8", "10.0.0.0/"}) {
+        CAPTURE(bad);
+        CHECK_FALSE(fourfold::AddressRange::parse(bad));
+    }
 }

@@ -1,0 +1,20 @@
+<!-- The sign form, filled from formState("sign"): what the visitor typed
+     and what was wrong, after a failed submission. reshow() replaces it in
+     place with HTMX (by its id), or brings the page back without JavaScript.
+     The engine adds required and maxlength from form.sign. -->
+<form id="signForm" method="post" action="/sign"
+      hx-post="/sign" hx-target="#entries" hx-swap="beforeend">
+  <p class="error">{{errors.form}}</p>
+  <label>Name <input name="who" value="{{who}}" placeholder="Your name"></label>
+  <span class="error">{{errors.who}}</span>
+  <textarea name="msg" placeholder="Say something (Markdown works)">{{msg}}</textarea>
+  <span class="error">{{errors.msg}}</span>
+  <fieldset>
+    <legend>Mood</legend>
+    <label><input type="radio" name="mood" value="happy" checked="{{mood.happy}}"> happy</label>
+    <label><input type="radio" name="mood" value="meh" checked="{{mood.meh}}"> meh</label>
+    <label><input type="radio" name="mood" value="grumpy" checked="{{mood.grumpy}}"> grumpy</label>
+  </fieldset>
+  <label><input type="checkbox" name="shout" checked="{{shout}}"> Shout</label>
+  <button>Sign</button>
+</form>

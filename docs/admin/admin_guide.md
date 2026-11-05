@@ -7,10 +7,9 @@ the server. The person writing the site needs the
 config file, deploying), this guide covers what the server needs and links to
 the user guide for the rest.
 
-*Status: covers what works as of Milestone 6. Fourfold isn't ready yet to
-face the internet on its own: see [Known gaps](#known-gaps). Rate limits, CGI
-and FastCGI hosting, TLS and a production server will be added here as they
-arrive.*
+*Status: covers what works as of Milestone 7. Fourfold isn't ready yet to
+face the internet on its own: see [Known gaps](#known-gaps). CGI and FastCGI
+hosting, TLS and a production server will be added here as they arrive.*
 
 ---
 
@@ -21,15 +20,16 @@ arrive.*
 3. [The app folder](#the-app-folder)
 4. [Running `fourfold serve`](#running-fourfold-serve)
 5. [Behind a reverse proxy](#behind-a-reverse-proxy)
-6. [Keeping it running](#keeping-it-running)
-7. [Mail for sign-in](#mail-for-sign-in)
-8. [The first admin](#the-first-admin)
-9. [Server limits: `--server-config`](#server-limits---server-config)
-10. [Deploying an app's changes](#deploying-an-apps-changes)
-11. [Logs](#logs)
-12. [Backups](#backups)
-13. [Known gaps](#known-gaps)
-14. [Quick reference](#quick-reference)
+6. [Rate limits](#rate-limits)
+7. [Keeping it running](#keeping-it-running)
+8. [Mail for sign-in](#mail-for-sign-in)
+9. [The first admin](#the-first-admin)
+10. [Server limits: `--server-config`](#server-limits---server-config)
+11. [Deploying an app's changes](#deploying-an-apps-changes)
+12. [Logs](#logs)
+13. [Backups](#backups)
+14. [Known gaps](#known-gaps)
+15. [Quick reference](#quick-reference)
 
 ---
 
@@ -192,7 +192,7 @@ server {
     server_name club.example.com;
     # ssl_certificate ...; ssl_certificate_key ...;
 
-    client_max_body_size 1m;
+    client_max_body_size 33m;
     location / {
         proxy_pass http://127.0.0.1:8090;
         proxy_set_header Host $host;
@@ -200,21 +200,58 @@ server {
 }
 ```
 
-Fourfold limits request bodies to 1 MB itself; the nginx setting just
-refuses bigger ones sooner.
+Fourfold limits request bodies itself: 1 MB for forms, and up to 33 MB for
+forms with file uploads, within what each form declares. The nginx setting
+just refuses bigger ones sooner.
 
-**Visitor addresses.** Fourfold doesn't yet read `X-Forwarded-For`, so behind
-a proxy every visitor seems to come from the proxy's address. That matters
-for two limits that count by visitor address:
+**Visitor addresses.** Behind a proxy, every connection comes from the
+proxy's address, so Fourfold has to be told to believe the proxy about who
+the visitor is. List the proxy's address in the app's config:
 
-- **Sign-in links:** 10 per address an hour. Behind a proxy, that's 10 an
-  hour for the whole site. (The limit of 3 an hour per email address still
-  works as meant.)
-- **Anonymous sessions:** 1,000 per address. Behind a proxy, that's 1,000 for
-  the whole site, and the oldest are ended to make room for new ones.
+```
+// private/config/app.ms
+config.proxy = {"trust": ["127.0.0.1"]}
+```
 
-A setting for a trusted proxy comes with M7 (see [Known gaps](#known-gaps));
-until then, a busy site behind a proxy will hit these limits.
+Addresses and ranges both work (`"10.0.0.0/8"`, `"::1"`). From those
+addresses only, Fourfold reads `X-Forwarded-For`, from the right: the
+rightmost address that isn't a trusted proxy is the visitor. From anywhere
+else the header is ignored, so a visitor can't claim another address to
+slip past a limit. Caddy adds the header on its own; nginx needs:
+
+```nginx
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+```
+
+Without the setting, every visitor seems to come from the proxy, and the
+limits that count by address count the whole site together: rate limits
+(see [Rate limits](#rate-limits)), sign-in links (10 per address an hour),
+and anonymous sessions (1,000 per address).
+
+**Trust only your own proxy.** If the list includes an address anyone can
+send from, anyone can choose their address.
+
+---
+
+## Rate limits
+
+Every request other than GET is counted per visitor address (60 a minute for
+visitors who aren't signed in) or per user (300 a minute for those who are).
+Over a limit, the visitor gets a 429 with `Retry-After`. The site's author
+may add stricter rules per page in `code/limits.ms`, a timing check, and a
+proof-of-work puzzle; see the user guide's
+[Spam and rate limits](../user/user_guide.md#spam-and-rate-limits-codelimitsms).
+
+The defaults are in the app's config:
+
+```
+config.limits = {"anonymous": "60/minute", "signedIn": ["300/minute", "10000/day"]}
+```
+
+Counters are kept in `private/state/state.db`, so they hold across restarts.
+Refusals are logged (`limits` and `spam` in the [engine log](#logs)). A
+school or office behind one address counts as one visitor, so raise
+`anonymous` if your visitors are like that, or have them sign in.
 
 ---
 
@@ -444,6 +481,9 @@ The word after the time says what kind of event it is:
 | `compile` | a deploy's result, and compile errors |
 | `config` | a changed config loaded, or refused (with its errors) |
 | `csrf` | a refused form post |
+| `access` | a request refused by the site's access rules |
+| `limits` | a request over a rate limit, with the limit |
+| `spam` | a form sent too soon after it was shown, without its timing token, or without a solved puzzle |
 | `session` | session problems, like one too big to save |
 | `auth` | sign-in links sent, refused, throttled or failed to send; sign-ins and sign-outs; new users |
 | `mail` | the whole message, when `mail.transport` is `"log"` |
@@ -497,11 +537,12 @@ Fourfold site behind a proxy, and expect to watch it.
   script can use as much memory as the machine has. A memory limit for the
   process from the service manager (`MemoryMax=` in systemd) at least
   protects everything else on the machine.
-- **No rate limits or spam protection** beyond the sign-in link throttle
-  (M7).
-- **Visitor addresses behind a proxy** aren't known (no `X-Forwarded-For`),
-  so per-address limits count everyone together (M7). See
-  [Behind a reverse proxy](#behind-a-reverse-proxy).
+- **Visitor addresses behind a proxy** are known only if you list the
+  proxy in `config.proxy.trust`; see
+  [Behind a reverse proxy](#behind-a-reverse-proxy). (`Forwarded`, the
+  standard header, isn't read yet; only `X-Forwarded-For`.)
+- **No limit on slow uploads** beyond the 30-second limit on a whole request
+  (M11).
 - **No graceful shutdown, and no log rotation** (M11).
 - **CGI and FastCGI hosting**, for shared web hosts, aren't ready yet (M10).
 
@@ -525,8 +566,8 @@ Fourfold site behind a proxy, and expect to watch it.
 | `code/.deploy` | touch it to load changed code |
 | `private/config/app.ms` | the app's settings (the `config` map) |
 | `private/config/secrets.ms` | passwords and tokens (the `secrets` map) |
-| `private/state/state.db` | sessions, users, roles, sign-in links |
-| `private/state/secret.key` | signs CSRF tokens; made if missing |
+| `private/state/state.db` | sessions, users, roles, sign-in links, rate-limit counters |
+| `private/state/secret.key` | signs CSRF tokens, form timestamps and puzzles; made if missing |
 | `private/state/logs/` | the engine log |
 | `dropbox/print.log` | the app's `print` output |
 | the `--server-config` file | ceilings on the app's settings (the `server` map) |
@@ -547,3 +588,5 @@ in the user guide's [Configuration](../user/user_guide.md#configuration-privatec
 | `mail.from` | | the sender address |
 | `mail.smtpHost`, `smtpPort`, `smtpSecurity`, `smtpUser`, `passwordSecret` | port 587, `"starttls"` | SMTP |
 | `mail.postmarkTokenSecret`, `postmarkStream` | `"outbound"` | Postmark |
+| `proxy.trust` | `[]` | your reverse proxy's addresses (see [Behind a reverse proxy](#behind-a-reverse-proxy)) |
+| `limits.anonymous`, `limits.signedIn` | `"60/minute"`, `"300/minute"` | default rate limits (see [Rate limits](#rate-limits)) |

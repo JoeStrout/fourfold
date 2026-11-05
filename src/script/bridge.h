@@ -5,6 +5,8 @@
 
 #include <optional>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "base/datum.h"
 #include "ms2.h"
@@ -39,6 +41,9 @@ struct OutcomeHandle {
     std::string contentType;   // Status: the body's type, if it has a body
     bool hasScript = false;    // Status: its HTML body has a <script>
     int status = 0;            // Status
+    // More response headers: reshow's HX-Retarget and HX-Reswap, and
+    // file.send's Content-Disposition.
+    std::vector<std::pair<std::string, std::string>> headers;
 };
 
 MiniScript::Value makeOutcomeHandle(OutcomeHandle outcome);

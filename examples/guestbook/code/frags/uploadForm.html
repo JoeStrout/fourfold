@@ -1,0 +1,11 @@
+<!-- No hx-post: a file upload is a plain form post. Its route has a
+     challenge (code/limits.ms), so the engine adds a puzzle, and the page
+     loads the solver. -->
+<form id="uploadForm" method="post" action="/photos/upload" enctype="multipart/form-data">
+  <p class="error">{{errors.form}}</p>
+  <label>Photo (PNG or JPEG) <input type="file" name="photo"></label>
+  <span class="error">{{errors.photo}}</span>
+  <label>Caption <input name="caption" value="{{caption}}"></label>
+  <span class="error">{{errors.caption}}</span>
+  <button>Upload</button>
+</form>

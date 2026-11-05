@@ -18,8 +18,8 @@ struct CompileOptions {
     // Compiles the .ms files (normally the ScriptHost). Required if there are
     // any; an app without code compiles without it.
     ScriptCompiler* scripts = nullptr;
-    // Evaluates code/access.ms (normally the ScriptHost too). Required if
-    // the app has one.
+    // Evaluates code/access.ms and code/limits.ms (normally the ScriptHost
+    // too). Required if the app has either.
     DataEvaluator* evaluator = nullptr;
 };
 

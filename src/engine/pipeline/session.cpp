@@ -100,6 +100,8 @@ void EngineSession::open(std::function<void(Result<SessionInput>)> ready) {
             if (record.value()) {
                 auto app = parseJson(record.value()->app);
                 if (app && app.value().kind() == Datum::Kind::Map) input.app = std::move(app).value();
+                auto engine = parseJson(record.value()->engine);
+                if (engine && engine.value().kind() == Datum::Kind::Map) input.engine = std::move(engine).value();
             }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
@@ -120,19 +122,20 @@ EngineSession::Committed EngineSession::commit(const std::optional<SessionResult
         record = record_;
     }
     if (result) {
-        // The engine's part holds nothing a run can change (yet: M6 keeps
-        // the signed-in user there), so it's saved as it was loaded.
+        // The engine's part changes only by a form's reshow() and
+        // formState() (M7).
         Status saved;
         if (record) {
-            if (result->app != record->app) {
-                saved = store_.save(record->idHash, record->engine, result->app);
+            std::string engine = result->engine ? *result->engine : record->engine;
+            if (result->app != record->app || engine != record->engine) {
+                saved = store_.save(record->idHash, engine, result->app);
             } else {
                 saved = store_.touch(record->idHash, record->lastUsedAt);
             }
-        } else if (result->app != "{}") {
+        } else if (result->app != "{}" || (result->engine && *result->engine != "{}")) {
             // Anonymous sessions begin with the first write (overview §5).
             std::string id = SessionStore::newId();
-            saved = store_.create(id, addressGroup_, "{}", result->app);
+            saved = store_.create(id, addressGroup_, result->engine ? *result->engine : "{}", result->app);
             if (saved) {
                 const SessionConfig& c = store_.config();
                 int64_t maxAge = std::chrono::duration_cast<std::chrono::seconds>(c.anonymousLimit).count();

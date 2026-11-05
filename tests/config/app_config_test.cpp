@@ -163,3 +163,40 @@ TEST_CASE("config: the server's ceilings only lower values") {
     CHECK_FALSE(bad.ok());
     CHECK(contains(all(bad), "unknown setting server.ceilings.budget.instructionz"));
 }
+
+TEST_CASE("config: limits and trusted proxies") {
+    Fixture f;
+    ConfigLoad defaults = f.load(ConfigMode::Serve);
+    REQUIRE_MESSAGE(defaults.ok(), all(defaults));
+    REQUIRE_EQ(defaults.config->limits.anonymous.size(), 1u);
+    CHECK_EQ(defaults.config->limits.anonymous[0].describe(), "60/minute per ip");
+    CHECK_EQ(defaults.config->limits.anonymous[0].key, "default");
+    CHECK_EQ(defaults.config->limits.signedIn[0].describe(), "300/minute per user");
+    CHECK_EQ(defaults.config->limits.challengeBits, 16);
+    CHECK(defaults.config->proxy.trust.empty());
+    CHECK_EQ(f.load(ConfigMode::Dev).config->limits.challengeBits, 4);   // quick to solve in dev
+
+    f.write("app.ms", "config = {}\n"
+                      "config.limits = {\"anonymous\": [\"20/minute\", \"500/day\"], \"signedIn\": \"100/minute\", "
+                      "\"challengeBits\": 18}\n"
+                      "config.proxy = {\"trust\": [\"127.0.0.1\", \"10.0.0.0/8\", \"::1\"]}\n");
+    ConfigLoad set = f.load(ConfigMode::Serve);
+    REQUIRE_MESSAGE(set.ok(), all(set));
+    REQUIRE_EQ(set.config->limits.anonymous.size(), 2u);
+    CHECK_EQ(set.config->limits.anonymous[1].describe(), "500/day per ip");
+    CHECK_EQ(set.config->limits.signedIn[0].describe(), "100/minute per user");
+    CHECK_EQ(set.config->limits.challengeBits, 18);
+    REQUIRE_EQ(set.config->proxy.trust.size(), 3u);
+    CHECK(set.config->proxy.trust[1].contains("10.20.30.40"));
+
+    for (const char* bad : {"config.limits = {\"anonymous\": \"lots\"}",
+                            "config.limits = {\"anonymous\": \"5/minute per user\"}",
+                            "config.limits = {\"challengeBits\": 99}",
+                            "config.limits = {\"burst\": 5}",
+                            "config.proxy = {\"trust\": [\"proxy.example.com\"]}",
+                            "config.proxy = {\"trust\": \"127.0.0.1\"}"}) {
+        CAPTURE(bad);
+        f.write("app.ms", std::string("config = {}\n") + bad + "\n");
+        CHECK_FALSE(f.load(ConfigMode::Serve).ok());
+    }
+}

@@ -61,6 +61,146 @@ std::string AccessLevel::describe() const {
     return out;
 }
 
+const char* formFieldTypeName(FormFieldType type) {
+    switch (type) {
+        case FormFieldType::Text: return "text";
+        case FormFieldType::Multiline: return "multiline";
+        case FormFieldType::Email: return "email";
+        case FormFieldType::Url: return "url";
+        case FormFieldType::Number: return "number";
+        case FormFieldType::Int: return "int";
+        case FormFieldType::Bool: return "bool";
+        case FormFieldType::Choice: return "choice";
+        case FormFieldType::Choices: return "choices";
+        case FormFieldType::Date: return "date";
+        case FormFieldType::File: return "file";
+    }
+    return "text";
+}
+
+std::optional<FormFieldType> formFieldTypeFrom(const std::string& name) {
+    for (FormFieldType t : {FormFieldType::Text, FormFieldType::Multiline, FormFieldType::Email, FormFieldType::Url,
+                            FormFieldType::Number, FormFieldType::Int, FormFieldType::Bool, FormFieldType::Choice,
+                            FormFieldType::Choices, FormFieldType::Date, FormFieldType::File}) {
+        if (name == formFieldTypeName(t)) return t;
+    }
+    return std::nullopt;
+}
+
+const FormField* FormSpec::find(const std::string& field) const {
+    for (const FormField& f : fields) {
+        if (f.name == field) return &f;
+    }
+    return nullptr;
+}
+
+bool FormSpec::hasFiles() const {
+    for (const FormField& f : fields) {
+        if (f.type == FormFieldType::File) return true;
+    }
+    return false;
+}
+
+size_t FormSpec::maxUploadBytes() const {
+    double total = 0;
+    for (const FormField& f : fields) {
+        if (f.type == FormFieldType::File) total += f.maxKB * 1024;
+    }
+    return static_cast<size_t>(total);
+}
+
+bool isCheckableUploadType(const std::string& type) {
+    static const char* const kTypes[] = {"image/png",       "image/jpeg",      "image/gif",  "image/webp",
+                                         "application/pdf", "application/zip", "text/plain", "image/*"};
+    for (const char* t : kTypes) {
+        if (type == t) return true;
+    }
+    return false;
+}
+
+namespace {
+
+std::string perName(RateRule::Per per) {
+    switch (per) {
+        case RateRule::Per::Ip: return "ip";
+        case RateRule::Per::User: return "user";
+        case RateRule::Per::Session: return "session";
+    }
+    return "ip";
+}
+
+}  // namespace
+
+std::string RateRule::describe() const {
+    std::string unit = seconds == 1 ? "second" : seconds == 60 ? "minute" : seconds == 3600 ? "hour"
+                                               : seconds == 86400 ? "day" : std::to_string(seconds) + " seconds";
+    return std::to_string(count) + "/" + unit + " per " + perName(per);
+}
+
+std::optional<RateRule> parseRate(const std::string& text, std::string& error) {
+    // "/" and " per " mean the same; split into words.
+    std::string spaced;
+    for (char c : text) {
+        if (c == '/') {
+            spaced += " per ";
+        } else {
+            spaced += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    std::vector<std::string> words;
+    std::string word;
+    for (char c : spaced + " ") {
+        if (c == ' ' || c == '\t') {
+            if (!word.empty()) words.push_back(word);
+            word.clear();
+        } else {
+            word += c;
+        }
+    }
+    const std::string help = "write a rate like \"5/minute\", \"100/hour per user\" or \"10/day per session\"";
+    if (words.size() != 3 && words.size() != 5) {
+        error = "\"" + text + "\" isn't a rate; " + help;
+        return std::nullopt;
+    }
+    RateRule r;
+    const std::string& n = words[0];
+    bool digits = !n.empty() && n.size() <= 9;
+    for (char c : n) digits = digits && std::isdigit(static_cast<unsigned char>(c));
+    if (!digits || std::stoll(n) < 1) {
+        error = "\"" + text + "\": the count must be a whole number from 1 up; " + help;
+        return std::nullopt;
+    }
+    r.count = std::stoll(n);
+    if (words[1] != "per") {
+        error = "\"" + text + "\" isn't a rate; " + help;
+        return std::nullopt;
+    }
+    std::string unit = words[2];
+    if (unit.size() > 1 && unit.back() == 's') unit.pop_back();
+    if (unit == "second") r.seconds = 1;
+    else if (unit == "minute") r.seconds = 60;
+    else if (unit == "hour") r.seconds = 3600;
+    else if (unit == "day") r.seconds = 86400;
+    else {
+        error = "\"" + text + "\": the unit must be second, minute, hour or day";
+        return std::nullopt;
+    }
+    if (words.size() == 5) {
+        if (words[3] != "per") {
+            error = "\"" + text + "\" isn't a rate; " + help;
+            return std::nullopt;
+        }
+        if (words[4] == "ip") r.per = RateRule::Per::Ip;
+        else if (words[4] == "user") r.per = RateRule::Per::User;
+        else if (words[4] == "session") r.per = RateRule::Per::Session;
+        else {
+            error = "\"" + text + "\": counted per ip, user or session, not \"" + words[4] + "\"";
+            return std::nullopt;
+        }
+    }
+    return r;
+}
+
 bool isValidRoleName(const std::string& role) {
     if (role.empty() || role.size() > 64 || !std::isalpha(static_cast<unsigned char>(role[0]))) return false;
     for (char c : role) {
@@ -146,6 +286,11 @@ const CompiledTemplate* TemplateSet::find(const RelPath& source) const {
     return it == templates_.end() ? nullptr : &it->second;
 }
 
+CompiledTemplate* TemplateSet::findForUpdate(const RelPath& source) {
+    auto it = templates_.find(source);
+    return it == templates_.end() ? nullptr : &it->second;
+}
+
 const CompiledTemplate* TemplateSet::fragment(const std::string& name) const {
     auto it = fragments_.find(name);
     return it == fragments_.end() ? nullptr : &it->second;
@@ -182,6 +327,20 @@ std::string describe(const CompiledApp& app) {
             for (size_t i = 0; i < entry.accessSources.size(); i++) s += (i ? "; " : "") + entry.accessSources[i];
             s += ")";
         }
+        if (!entry.limits.empty()) {
+            s += "  limits:";
+            for (const RateRule& r : entry.limits) s += " " + r.describe() + ";";
+            s.pop_back();
+        }
+        if (entry.minSeconds > 0) s += "  minSeconds: " + std::to_string(static_cast<int64_t>(entry.minSeconds));
+        if (entry.challenge) s += "  challenge";
+        if (entry.form) {
+            s += "  " + entry.form->label() + ":";
+            for (const FormField& f : entry.form->fields) {
+                s += " " + f.name + "(" + formFieldTypeName(f.type) + (f.required ? ", required" : "") + ")";
+            }
+        }
+        if (!entry.pageUrl.empty() && entry.form) s += "  page: " + entry.pageUrl;
         s += "\n";
     }
     if (!app.templates.fragments().empty()) {
@@ -199,6 +358,7 @@ std::string describe(const CompiledApp& app) {
     if (app.authLayout) s += "sign-in layout: " + app.authLayout->source().str() + "\n";
     s += "not found page: " + (app.notFoundPage ? app.notFoundPage->str() : std::string("(none)")) + "\n";
     s += "error page: " + (app.errorPage ? app.errorPage->str() : std::string("(none)")) + "\n";
+    if (app.tooManyPage) s += "too many requests page: " + app.tooManyPage->str() + "\n";
     s += "diagnostics:\n";
     for (const Diagnostic& d : app.diagnostics) s += "  " + d.toString() + "\n";
     return s;

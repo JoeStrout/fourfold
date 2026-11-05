@@ -1,5 +1,7 @@
 #include "devtools/dev_tools.h"
 
+#include <cstdio>
+
 #include <algorithm>
 #include <cctype>
 #include <vector>
@@ -88,6 +90,7 @@ const char* const kReportStyle = R"css(
 body { margin: 0; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #fafafa; color: #222; }
 main { max-width: 64rem; margin: 0 auto; padding: 2rem 1.25rem; }
 h1 { font-size: 1.3rem; }
+h2 { font-size: 1.1rem; margin-top: 1.5rem; }
 table { border-collapse: collapse; width: 100%; background: #fff; }
 th, td { text-align: left; padding: .35rem .6rem; border-bottom: 1px solid #e3e3e3; vertical-align: top; }
 td:first-child { font-family: ui-monospace, Menlo, monospace; }
@@ -128,6 +131,9 @@ struct DevTools::Hub : std::enable_shared_from_this<Hub> {
     Datum hello = Datum::map({{"generation", num(0)}, {"diagnostics", Datum::list({})}});
     uint64_t warningsGeneration = 0;
     std::vector<RenderWarning> warnings;
+    // The latest requests counted against rate limits, and refusals, newest
+    // last (for /__dev/limits).
+    std::vector<std::string> recentLimits;
 
     Datum warningList() const {
         Datum::ListItems list;
@@ -227,6 +233,59 @@ void DevTools::compileFinished(const CompileReport& report) {
     hub->loop.post([hub, event] { hub->broadcast(event); });
 }
 
+namespace {
+
+constexpr size_t kRecentLimits = 50;
+
+// A route's limits and spam checks, as the report shows them.
+Datum::ListItems limitsOf(const RouteEntry& entry) {
+    Datum::ListItems out;
+    for (const RateRule& r : entry.limits) out.push_back(str(r.describe() + " (" + r.key + ")"));
+    if (entry.minSeconds > 0) {
+        std::string t = "minSeconds " + std::to_string(static_cast<int64_t>(entry.minSeconds));
+        if (entry.maxAgeSeconds > 0) t += ", maxAgeMinutes " + std::to_string(static_cast<int64_t>(entry.maxAgeSeconds / 60));
+        out.push_back(str(t));
+    }
+    if (entry.challenge) out.push_back(str("challenge (proof of work)"));
+    return out;
+}
+
+// A post handler's form: its fields, or a note that it reads req.form
+// undeclared.
+std::string formOf(const RouteEntry& entry) {
+    if (!entry.post) return "";
+    if (!entry.form) return "none declared: req.form is raw strings";
+    std::string out = entry.form->label() + ":";
+    for (const FormField& f : entry.form->fields) {
+        out += " " + f.name + " (" + formFieldTypeName(f.type) + (f.required ? ", required" : "") + ")";
+    }
+    return out;
+}
+
+}  // namespace
+
+void DevTools::scriptError(const ScriptError& error) {
+    // A refusal by the gate (rate limit, timing, puzzle) goes in the limits
+    // page's list too.
+    if (error.message.compare(0, 17, "request refused: ") != 0) return;
+    std::lock_guard<std::mutex> lock(hub_->mutex);
+    hub_->recentLimits.push_back(error.message);
+    if (hub_->recentLimits.size() > kRecentLimits) hub_->recentLimits.erase(hub_->recentLimits.begin());
+}
+
+void DevTools::limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) {
+    std::string line = request + ":";
+    for (const auto& [limit, count] : counts) {
+        char n[32];
+        std::snprintf(n, sizeof n, "%.1f", count);
+        line += " " + limit + " = " + n + ";";
+    }
+    line.pop_back();
+    std::lock_guard<std::mutex> lock(hub_->mutex);
+    hub_->recentLimits.push_back(line);
+    if (hub_->recentLimits.size() > kRecentLimits) hub_->recentLimits.erase(hub_->recentLimits.begin());
+}
+
 Datum DevTools::accessReport(const CompiledApp& app) {
     Datum::ListItems routes;
     for (const auto& [url, entry] : app.routes) {
@@ -235,19 +294,27 @@ Datum DevTools::accessReport(const CompiledApp& app) {
         Datum row = Datum::map({{"url", str(url + (entry.trailingSlash && url != "/" ? "/" : ""))},
                                 {"kind", str(routeKindName(entry.kind))},
                                 {"access", str(entry.access.describe())},
-                                {"sources", Datum::list(sources)}});
+                                {"sources", Datum::list(sources)},
+                                {"limits", Datum::list(limitsOf(entry))},
+                                {"form", str(formOf(entry))}});
         routes.push_back(std::move(row));
         // A Markdown page's Markdown URL: the same route, so the same access.
         if (entry.kind == RouteKind::Markdown) {
             routes.push_back(Datum::map({{"url", str(markdownUrlFor(url, entry.trailingSlash))},
                                          {"kind", str("markdown (as Markdown)")},
                                          {"access", str(entry.access.describe())},
-                                         {"sources", Datum::list(std::move(sources))}}));
+                                         {"sources", Datum::list(std::move(sources))},
+                                         {"limits", Datum::list(limitsOf(entry))},
+                                         {"form", str("")}}));
         }
     }
     Datum::ListItems warnings;
     for (const Diagnostic& d : app.diagnostics) {
-        if (d.file == "code/access.ms" || d.message.compare(0, 7, "access:") == 0) warnings.push_back(str(d.toString()));
+        bool forms = d.message.find(" posts to ") != std::string::npos || d.message.find("this form posts") == 0;
+        if (d.file == "code/access.ms" || d.file == "code/limits.ms" || d.message.compare(0, 7, "access:") == 0 ||
+            forms) {
+            warnings.push_back(str(d.toString()));
+        }
     }
     return Datum::map({{"generation", num(static_cast<double>(app.generation))},
                        {"routes", Datum::list(std::move(routes))},
@@ -255,8 +322,58 @@ Datum DevTools::accessReport(const CompiledApp& app) {
 }
 
 std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const AdmittedRequest& admitted) {
-    if (request.method != "GET" && request.method != "HEAD") return std::nullopt;
     const std::string& path = admitted.path.path;
+    if (path == "/__dev/limits/reset" && request.method == "POST") {
+        // Only from the dev tools' own page: a page on another site can't
+        // reset the counters (the dev server answers only to localhost, but
+        // a browser would still send another site's form here).
+        const std::string* origin = request.headers.get("Origin");
+        const std::string* host = request.headers.get("Host");
+        if (!origin || !host || *origin != "http://" + *host) return HttpResponse::text(403, "Forbidden\n");
+        if (rates_) (void)rates_->resetCounters();
+        {
+            std::lock_guard<std::mutex> lock(hub_->mutex);
+            hub_->recentLimits.push_back("(counters reset)");
+        }
+        HttpResponse r;
+        r.status = 303;
+        r.headers.set("Location", "/__dev/limits");
+        return r;
+    }
+    if (request.method != "GET" && request.method != "HEAD") return std::nullopt;
+    if (path == "/__dev/limits") {
+        HttpResponse r;
+        r.headers.set("Cache-Control", "no-store");
+        r.headers.set("Content-Type", "text/html; charset=utf-8");
+        std::string html = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Rate limits</title><style>";
+        html += kReportStyle;
+        html += "</style></head>\n<body><main>\n<h1>Rate limits</h1>\n<p class=\"note\">The counters in "
+                "private/state/state.db, each limit's current count (a sliding window), and the latest requests "
+                "counted or refused. Each route's limits are in the <a href=\"/__dev/access\">access report</a>. "
+                "Dev mode only.</p>\n"
+                "<form method=\"post\" action=\"/__dev/limits/reset\"><button>Reset all counters</button></form>\n"
+                "<h2>Counters</h2>\n<table>\n<tr><th>Key</th><th>Window</th><th>Count</th></tr>\n";
+        if (rates_) {
+            if (auto counters = rates_->counters()) {
+                for (const RateStore::Counter& c : counters.value()) {
+                    char n[32];
+                    std::snprintf(n, sizeof n, "%.1f", c.count);
+                    html += "<tr><td>" + escapeHtml(c.key) + "</td><td>" + std::to_string(c.seconds) + " s</td><td>" +
+                            n + "</td></tr>\n";
+                }
+            }
+        }
+        html += "</table>\n<h2>Latest</h2>\n<ul>\n";
+        std::vector<std::string> recent;
+        {
+            std::lock_guard<std::mutex> lock(hub_->mutex);
+            recent = hub_->recentLimits;
+        }
+        for (auto it = recent.rbegin(); it != recent.rend(); ++it) html += "<li>" + escapeHtml(*it) + "</li>\n";
+        html += "</ul>\n</main></body></html>\n";
+        r.body = std::move(html);
+        return r;
+    }
     if (path == "/__dev/access" || path == "/__dev/access.json") {
         std::shared_ptr<const CompiledApp> app = currentApp_ ? currentApp_() : nullptr;
         if (!app) return HttpResponse::text(503, "The app hasn't compiled yet.\n");
@@ -277,15 +394,19 @@ std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const
         for (const Datum& w : report.asMap().at("warnings").asList()) {
             html += "<p class=\"warning\">" + escapeHtml(w.asString()) + "</p>\n";
         }
-        html += "<table>\n<tr><th>URL</th><th>Kind</th><th>Access</th><th>From</th></tr>\n";
+        html += "<p class=\"note\">Every request but GET is also counted against the engine's default limits "
+                "(<code>config.limits</code>). <a href=\"/__dev/limits\">Counters</a></p>\n";
+        html += "<table>\n<tr><th>URL</th><th>Kind</th><th>Access</th><th>From</th><th>Limits</th><th>Form</th></tr>\n";
         for (const Datum& route : report.asMap().at("routes").asList()) {
             const auto& m = route.asMap();
             std::string access = m.at("access").asString();
-            std::string sources;
+            std::string sources, limits;
             for (const Datum& s : m.at("sources").asList()) sources += (sources.empty() ? "" : "<br>") + escapeHtml(s.asString());
+            for (const Datum& s : m.at("limits").asList()) limits += (limits.empty() ? "" : "<br>") + escapeHtml(s.asString());
             html += "<tr" + std::string(access == "public" ? "" : " class=\"restricted\"") + "><td>" +
                     escapeHtml(m.at("url").asString()) + "</td><td>" + escapeHtml(m.at("kind").asString()) +
-                    "</td><td>" + escapeHtml(access) + "</td><td>" + sources + "</td></tr>\n";
+                    "</td><td>" + escapeHtml(access) + "</td><td>" + sources + "</td><td>" + limits + "</td><td>" +
+                    escapeHtml(m.at("form").asString()) + "</td></tr>\n";
         }
         html += "</table>\n</main></body></html>\n";
         r.body = std::move(html);

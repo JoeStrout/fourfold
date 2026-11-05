@@ -9,6 +9,7 @@
 #include "config/app_config.h"
 #include "http/message.h"
 #include "partition/code_tree.h"
+#include "pipeline/forms.h"
 #include "pipeline/stages.h"
 #include "policy/policy_gate.h"
 #include "script/script_host.h"
@@ -47,12 +48,15 @@ private:
     void identify(std::shared_ptr<Flow> flow, std::function<void(std::shared_ptr<Flow>)> next) const;
     void serveAuth(std::shared_ptr<Flow> flow) const;
     void serveRoute(std::shared_ptr<Flow> flow) const;
+    // The rest of serveRoute, once the gate has decided.
+    void afterGate(std::shared_ptr<Flow> flow, GateDecision gate, RequestFacts facts, Submission submission) const;
 
     PolicyGate gate_;
     mutable std::mutex appMutex_;
     std::shared_ptr<const CompiledApp> app_;   // guarded by appMutex_; swapped on recompile
     std::shared_ptr<const AppConfig> config_;  // guarded by appMutex_
     std::unique_ptr<UserDirectory> users_;     // over options.auth, for the `users` module
+    std::unique_ptr<RateCounter> rates_;       // over options.rates, for ratelimit()
     CodeTree code_;
     ScriptHost* scripts_;
     std::shared_ptr<const EngineOptions> options_;   // shared with runs in progress

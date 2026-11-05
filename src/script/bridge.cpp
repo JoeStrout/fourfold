@@ -238,13 +238,30 @@ Value userValue(const UserFacts& user) {
     return map;
 }
 
-Value makeRequestValue(const RequestFacts& facts) {
-    Value req = Value::make_map(9);
+Value makeRequestValue(Run& run) {
+    const RequestFacts& facts = run.context.request;
+    Value req = Value::make_map(12);
     req.MapSet("method", toValue(facts.method));
     req.MapSet("path", toValue(facts.path));
     req.MapSet("query", pairsToMap(facts.query));
     req.MapSet("headers", pairsToMap(facts.headers));
-    req.MapSet("form", pairsToMap(facts.form));
+    req.MapSet("form", facts.declaredForm ? toValue(*facts.declaredForm) : pairsToMap(facts.form));
+    req.MapSet("errors", facts.errors ? toValue(*facts.errors) : Value::Null);
+    // Uploads: name, type, size, and the bytes as RawData (save them with
+    // file.saveRaw).
+    Value files = Value::make_map(static_cast<int>(facts.files.size()));
+    for (const UploadFacts& u : facts.files) {
+        Value file = Value::make_map(4);
+        file.MapSet("name", toValue(u.filename));
+        file.MapSet("type", toValue(u.contentType));
+        file.MapSet("size", Value(static_cast<double>(u.bytes ? u.bytes->size() : 0)));
+        Value data = newRawData(run, u.bytes ? *u.bytes : std::string());
+        if (data.IsError()) return data;
+        file.MapSet("data", data);
+        files.MapSet(toValue(u.field), file);
+    }
+    req.MapSet("files", files);
+    req.MapSet("ip", toValue(facts.ip));
     // HTMX sends "HX-Request: true" with every request it makes.
     bool htmx = false;
     for (const auto& [name, value] : facts.headers) htmx = htmx || (name == "hx-request" && value == "true");
@@ -401,6 +418,7 @@ HandlerOutcome outcomeFrom(Run& run) {
             case OutcomeHandle::Kind::Redirect:
                 o.kind = HandlerOutcome::Kind::Redirect;
                 o.location = h->location;
+                o.headers = h->headers;
                 break;
             case OutcomeHandle::Kind::Json:
                 o.kind = HandlerOutcome::Kind::Json;
@@ -412,6 +430,7 @@ HandlerOutcome outcomeFrom(Run& run) {
                 o.body = h->body;
                 o.contentType = h->contentType;
                 o.hasScript = h->hasScript;
+                o.headers = h->headers;
                 break;
         }
         return o;
@@ -473,6 +492,7 @@ HandlerOutcome outcomeFromResult(Run& run) {
             failed.warnings = std::move(o.warnings);
             return failed;
         }
+        if (run.engineSessionChanged) session.engine = toJson(run.engineSession);
         o.session = std::move(session);
     }
     return o;

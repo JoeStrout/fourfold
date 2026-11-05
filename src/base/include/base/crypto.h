@@ -18,6 +18,14 @@ std::string hashBytes(std::string_view data);
 // only someone holding the key can make one that matches.
 std::string keyedHash(std::string_view key, std::string_view message);
 
+// SHA-256 of `data`: 32 raw bytes. For the proof-of-work puzzle (overview
+// §5, Proof of work), which browsers must be able to compute too; BLAKE2b
+// is used everywhere else.
+std::string sha256(std::string_view data);
+
+// The number of leading zero bits in `bytes`.
+int leadingZeroBits(std::string_view bytes);
+
 // Whether `a` and `b` are equal, taking the same time wherever they differ.
 // (Their lengths aren't secret: unequal lengths return at once.)
 bool constantTimeEqual(std::string_view a, std::string_view b);

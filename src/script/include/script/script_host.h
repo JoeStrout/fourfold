@@ -78,6 +78,15 @@ struct UserFacts {
     }
 };
 
+// An uploaded file (overview §4, Forms and validation), as `req.files`
+// shows it: checked by content against its field's declared types.
+struct UploadFacts {
+    std::string field;          // the form field's name
+    std::string filename;       // as the browser sent it, cleaned: no path, no control characters
+    std::string contentType;    // detected from the content ("image/png")
+    std::shared_ptr<const std::string> bytes;
+};
+
 // What a handler sees of a request (`req`, overview §4). Plain data, built by
 // the pipeline; the script thread turns it into a frozen map.
 struct RequestFacts {
@@ -87,10 +96,35 @@ struct RequestFacts {
     std::string path;      // canonical, "/guestbook"
     Pairs query;           // decoded; for a repeated name, the first wins
     Pairs headers;         // names lowercased; repeated names joined with ", "
-    Pairs form;            // decoded url-encoded POST body; raw strings
+    // The submitted form (url-encoded or multipart), as raw strings, when the
+    // handler declares no form; for a repeated name, the first wins.
+    Pairs form;
+    // With a form declaration (overview §4, Forms and validation): the
+    // declared fields only, normalized and typed (`req.form`); the errors
+    // by field (`req.errors`; nullopt: none); and the uploads (`req.files`).
+    std::optional<Datum> declaredForm;
+    std::optional<Datum> errors;
+    std::vector<UploadFacts> files;
+    // What the visitor typed in each declared field, normalized but not
+    // converted, for reshow(): a string, or a list for `choices`.
+    Datum typed = Datum::map({});
     std::optional<UserFacts> user;   // the signed-in visitor, looked up for this request
     // "html", or "markdown" for a Markdown page's /x.md URL (`req.format`).
     std::string format = "html";
+    // The visitor's address (`req.ip`): the connection's, or, from a trusted
+    // proxy, the one it forwarded.
+    std::string ip;
+};
+
+// Counting for rate limits from code (`ratelimit`, overview §5): the
+// engine's RateStore. Blocks (SQLite), so the module calls it on the worker
+// pool; it may be called from several threads at once.
+class RateCounter {
+public:
+    virtual ~RateCounter() = default;
+    // Counts one request against `key` under `rule` (rule.key is ignored);
+    // whether it's within the limit. An error counts as within it.
+    virtual bool hit(const std::string& key, const RateRule& rule) = 0;
 };
 
 // The engine's users, for the `users` module (overview §5, The user object):
@@ -111,7 +145,10 @@ public:
 
 // The visitor's session as a run starts (overview §2, Session storage).
 struct SessionInput {
-    Datum app = Datum::map({});   // the `session` map
+    Datum app = Datum::map({});      // the `session` map
+    // The engine's part, out of the app's reach: form state kept for one
+    // showing by reshow() (under "forms").
+    Datum engine = Datum::map({});
 };
 
 // What a run did to the session, for the engine to save after it.
@@ -121,6 +158,9 @@ struct SessionResult {
     // A page with a {{flash}} field was rendered, so `session.flash` (if
     // any) has been shown, and is left out of `app`.
     std::string app;
+    // The engine's part as canonical JSON, if the run changed it (reshow()
+    // stored a form's state, or formState() used it up).
+    std::optional<std::string> engine;
 };
 
 // The engine's side of a run's session: loading it (after taking its lock).
@@ -164,6 +204,18 @@ struct RunContext {
     const Dropbox* dropbox = nullptr;
     // The engine's users (the `users` module). Must outlive the run.
     UserDirectory* users = nullptr;
+    // Rate limits from code (`ratelimit`). Must outlive the run. Null: every
+    // call is within the limit.
+    RateCounter* rates = nullptr;
+    // Who a `per ip`, `per user` or `per session` rate counts this visitor
+    // as: their address group, user id (falling back to the address group),
+    // and session (likewise).
+    std::string rateIp{}, rateUser{}, rateSession{};
+    // A handler with a form declaration: the declaration (for reshow), and
+    // the URL of its file's page, where reshow sends a visitor without
+    // JavaScript.
+    std::shared_ptr<const FormSpec> form{};
+    std::string pageUrl{};
 };
 
 // A compile or runtime error in a script, located for the developer.
@@ -182,7 +234,7 @@ struct HandlerOutcome {
         Text,        // a string: text/plain
         Redirect,    // redirect(url): 303
         Json,        // json(value)
-        Status,      // status(code, body)
+        Status,      // status(code, body), or reshow(...) with HTMX (422)
         NoContent,   // null: 204
         Error,       // an error value, a runtime error, or a budget overrun: 500
     };
@@ -199,6 +251,9 @@ struct HandlerOutcome {
     std::vector<RenderWarning> warnings;
     std::string location;      // Redirect
     int status = 0;            // Status
+    // Status, Text, Fragment: more response headers (reshow's HX-Retarget;
+    // file.send's Content-Disposition).
+    std::vector<std::pair<std::string, std::string>> headers;
     ScriptError error;         // Error
     // If the run had session access and its handler finished without an
     // error: what it did to the session.
@@ -218,6 +273,9 @@ struct PageHandlers {
     // The file's `access =` declaration (overview §5, Access control), as
     // its top level left it; nullopt if it set none. The compiler checks it.
     std::optional<Datum> access;
+    // The file's form declarations (overview §4, Forms and validation),
+    // form.x by x, as its top level left them. The compiler checks them.
+    std::map<std::string, Datum> forms;
 };
 
 struct CompiledScripts {

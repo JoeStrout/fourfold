@@ -397,7 +397,13 @@ int HttpConnection::onHeadersComplete(llhttp_t* p) {
     c.request_.method = llhttp_method_name(static_cast<llhttp_method_t>(llhttp_get_method(p)));
     c.request_.versionMajor = llhttp_get_http_major(p);
     c.request_.versionMinor = llhttp_get_http_minor(p);
-    if ((p->flags & F_CONTENT_LENGTH) && p->content_length > c.limits_.maxBodyBytes) {
+    c.bodyLimit_ = c.limits_.maxBodyBytes;
+    if (const std::string* type = c.request_.headers.get("Content-Type")) {
+        std::string media = type->substr(0, type->find(';'));
+        while (!media.empty() && media.back() == ' ') media.pop_back();
+        if (equalsIgnoreCase(media, "multipart/form-data")) c.bodyLimit_ = c.limits_.maxUploadBodyBytes;
+    }
+    if ((p->flags & F_CONTENT_LENGTH) && p->content_length > c.bodyLimit_) {
         return c.reject(413);
     }
     const std::string* expect = c.request_.headers.get("Expect");
@@ -412,7 +418,7 @@ int HttpConnection::onHeadersComplete(llhttp_t* p) {
 
 int HttpConnection::onBody(llhttp_t* p, const char* at, size_t length) {
     HttpConnection& c = self(p);
-    if (c.request_.body.size() + length > c.limits_.maxBodyBytes) return c.reject(413);
+    if (c.request_.body.size() + length > c.bodyLimit_) return c.reject(413);
     c.request_.body.append(at, length);
     return 0;
 }

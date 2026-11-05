@@ -66,6 +66,10 @@ struct Run {
     std::vector<RelPath> updates;
     // What this run's RawData buffers hold (made on first use).
     std::shared_ptr<RawBudget> rawBudget;
+    // The engine's part of the session (request runs with a session), and
+    // whether formState() or reshow() changed it.
+    Datum engineSession = Datum::map({});
+    bool engineSessionChanged = false;
 
     // Discovery and Data runs only: called as the run finishes, before its
     // namespace is released, with an Error outcome if the top level failed.
@@ -152,8 +156,9 @@ HandlerOutcome outcomeFromResult(Run& run);
 // A user as a map: id, name, email, roles (bridge.cpp). Not frozen.
 MiniScript::Value userValue(const UserFacts& user);
 
-// The frozen `req` map (bridge.cpp).
-MiniScript::Value makeRequestValue(const RequestFacts& facts);
+// The frozen `req` map (bridge.cpp), with the run's uploads as RawData; an
+// error value if they're over the run's RawData budget.
+MiniScript::Value makeRequestValue(Run& run);
 
 // Adds `more` to a run's warnings, leaving out repeats.
 void addWarnings(Run& run, const std::vector<RenderWarning>& more);

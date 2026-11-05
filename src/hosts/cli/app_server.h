@@ -25,6 +25,7 @@
 #include "state/auth_store.h"
 #include "state/engine_log.h"
 #include "state/lock_service.h"
+#include "state/rate_store.h"
 #include "state/session_store.h"
 
 namespace fourfold::cli {
@@ -79,6 +80,8 @@ public:
     LockService::Stats dataLockStats() const { return data_->locks().stats(); }
     // The engine's users (for tests).
     AuthStore& users() { return *auth_; }
+    // Rate-limit counters (for tests).
+    RateStore& rates() { return *rates_; }
     // The config in use.
     std::shared_ptr<const AppConfig> config() const { return engine_->config(); }
     ScriptHost::Stats scriptStats() { return scripts_->stats(); }
@@ -126,6 +129,7 @@ private:
     std::unique_ptr<ConfigDir> configDir_;
     std::unique_ptr<SessionStore> sessions_;
     std::unique_ptr<AuthStore> auth_;
+    std::unique_ptr<RateStore> rates_;
     std::unique_ptr<LockService> sessionLocks_;
     std::unique_ptr<DataFiles> data_;
     std::unique_ptr<AuthFlow> authFlow_;

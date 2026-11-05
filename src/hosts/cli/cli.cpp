@@ -191,7 +191,10 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
         << ".\n"
         << "  - No per-request memory limit yet: a script can use as much memory as the\n"
         << "    machine has (time and instruction limits do apply).\n"
-        << "  - No rate limits or spam protection yet (sign-in links are throttled).\n"
+        << (server->config()->proxy.trust.empty()
+                ? "  - No trusted proxy (config.proxy.trust): behind a proxy, every visitor seems\n"
+                  "    to come from its address, and rate limits count them all together.\n"
+                : "")
         << "Press Ctrl-C to stop.\n"
         << std::flush;
     server->loop().run();

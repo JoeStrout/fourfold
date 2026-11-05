@@ -134,7 +134,8 @@ References scanReferences(const std::string& source) {
             }
             std::string word = source.substr(start, i - start);
             bool member = prevSignificant == '.';   // x.session isn't the global
-            if (!member && word == "session") refs.session = true;
+            // formState and reshow keep a form's state in the session.
+            if (!member && (word == "session" || word == "formState" || word == "reshow")) refs.session = true;
             afterImport = !member && word == "import";
             prevSignificant = 'a';
             continue;
@@ -294,6 +295,30 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
                 pageError("access must be \"login\", a role name, or a list of role names; it " + why);
             } else {
                 handlers.access = std::move(*d);
+            }
+        }
+
+        // form.sign = {...} (overview §4, Forms and validation): read now,
+        // like access, and checked by the compiler.
+        Value forms = run.interp.GetGlobalValue("form");
+        if (!forms.IsMap()) {
+            pageError("form must stay a map of form declarations (form.sign = {...})");
+        } else {
+            MiniScript::MapIterator it = forms.Iterator();
+            Value key, value;
+            while (MiniScript::map_iterator_next(&it, &key, &value)) {
+                std::string name = key.IsString() ? toStdString(key) : "";
+                if (!isIdentifier(name)) {
+                    pageError("form has a key that isn't a valid name: " + toStdString(key));
+                    continue;
+                }
+                std::string why;
+                std::optional<Datum> d = toDatum(value, why);
+                if (!d) {
+                    pageError("form." + name + " must be a map of fields; it " + why);
+                    continue;
+                }
+                handlers.forms.emplace(name, std::move(*d));
             }
         }
 

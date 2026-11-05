@@ -8,7 +8,7 @@ endif()
 
 # --- Foundation ---
 fourfold_component(base)
-target_link_libraries(ff_base PRIVATE monocypher)
+target_link_libraries(ff_base PRIVATE monocypher utf8proc)
 target_compile_definitions(ff_base PRIVATE FOURFOLD_VERSION="${PROJECT_VERSION}")
 fourfold_component(partition DEPS base)             # the four file areas; path rules
 fourfold_component(platform DEPS base)             # event loop, sockets, workers, random, SQLite
@@ -32,11 +32,12 @@ fourfold_component(compiler DEPS base partition template markdown compiledapp sc
 # --- Engine ---
 fourfold_component(http DIR engine/http)           # HttpRequest/HttpResponse
 fourfold_component(observer DIR engine/observer DEPS base partition compiledapp script)   # events for the dev tools
-fourfold_component(policy DIR engine/policy DEPS base platform compiledapp script)   # CSRF; later access and limits
+fourfold_component(policy DIR engine/policy DEPS base platform compiledapp script state)   # access, CSRF, rate limits, spam checks
 fourfold_component(pipeline DIR engine/pipeline DEPS base partition platform template compiledapp state appdata script config http observer policy)
 fourfold_embed(pipeline kHtmxLibrary ${CMAKE_SOURCE_DIR}/third_party/htmx/htmx.min.js)
 fourfold_embed(pipeline kHtmxConfig ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/htmx-config.js)
 fourfold_embed(pipeline kMarkdownCss ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/markdown.css)
+fourfold_embed(pipeline kChallengeScript ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/challenge.js)
 fourfold_component(authflow DIR engine/authflow   # the /__auth/ pages: magic links, sign-out, fake login
     DEPS base platform template compiledapp config mail state http pipeline)
 fourfold_component(lifecycle DIR engine/lifecycle   # watch, compile, swap

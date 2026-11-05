@@ -21,7 +21,9 @@
 #include "state/auth_store.h"
 #include "state/engine_log.h"
 #include "state/lock_service.h"
+#include "state/rate_store.h"
 #include "state/session_store.h"
+#include "base/clock.h"
 
 namespace fourfold {
 
@@ -56,6 +58,14 @@ struct EngineOptions {
     // The sign-in pages under /__auth/; null: not found. Must outlive the
     // engine.
     AuthRoutes* authRoutes = nullptr;
+    // Rate-limit counters and used puzzles (M7). Null: nothing is counted
+    // (and a puzzle can be used more than once). Must outlive the engine.
+    RateStore* rates = nullptr;
+    // The time, for the timing check and puzzles. Must outlive the engine.
+    const Clock* clock = &systemClock();
+    // How request bodies are read (overview §8, Connection and request
+    // limits). A route with file fields may take its uploads on top.
+    size_t maxFormBytes = 1024 * 1024;
 
     // The site is reached over HTTPS (perhaps through a proxy that ends
     // TLS): cookies get Secure and the __Host- prefix, and a request's own
@@ -82,6 +92,12 @@ struct AdmittedRequest {
 // Fills `out` and returns nullopt, or returns the response to send instead.
 std::optional<HttpResponse> admit(const HttpRequest& request, const EngineOptions& options,
                                   AdmittedRequest& out);
+
+// The visitor's address (overview §8, Trusting the client's address): the
+// connection's, unless that's a trusted proxy, in which case the nearest
+// address in X-Forwarded-For that isn't one (read from the right, since a
+// visitor can put anything at the left).
+std::string clientAddress(const HttpRequest& request, const std::vector<AddressRange>& trustedProxies);
 
 // --- Route: look the path up in the compiled app's route table. ---
 
@@ -114,12 +130,15 @@ RouteDecision route(const AdmittedRequest& request, const CompiledApp& app);
 // handlers get these as MiniScript strings.
 RequestFacts::Pairs parseUrlEncoded(std::string_view text);
 
+struct Submission;
+
 // The facts a handler's `req` is built from (overview §4, The request
-// object): the method, path, query, headers, and an url-encoded POST body.
-// The CSRF token field (_csrf) is left out of the form, and returned in
+// object): the method, path, query, headers, and the submitted form's
+// fields (from readSubmission; null for none), as raw strings. The CSRF
+// token (the X-CSRF-Token header, else the _csrf field) is returned in
 // `csrfToken` if asked for.
 RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted,
-                          std::optional<std::string>* csrfToken = nullptr);
+                          const Submission* submission = nullptr, std::optional<std::string>* csrfToken = nullptr);
 
 // --- Reserved: the engine's own files, under /__fourfold/. ---
 
@@ -129,6 +148,7 @@ RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& adm
 std::optional<HttpResponse> builtinAsset(const std::string& path);
 
 extern const char* const kBuiltinMarkdownCssUrl;   // "/__fourfold/markdown.css"
+extern const char* const kChallengeScriptUrl;      // "/__fourfold/challenge.js"
 
 // What every template rendered for one request uses: a fresh CSP nonce, and
 // the stylesheet for pages with Markdown (the app's pages/markdown.css if it

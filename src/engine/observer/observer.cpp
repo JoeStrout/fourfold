@@ -18,4 +18,9 @@ void ObserverList::renderWarnings(uint64_t generation, const std::vector<RenderW
     for (Observer* o : observers_) o->renderWarnings(generation, warnings);
 }
 
+void ObserverList::limitsCounted(const std::string& request,
+                                 const std::vector<std::pair<std::string, double>>& counts) {
+    for (Observer* o : observers_) o->limitsCounted(request, counts);
+}
+
 }  // namespace fourfold

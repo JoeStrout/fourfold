@@ -14,11 +14,20 @@
 //     file.name(path), file.parent(path), file.child(parent, name)
 //                                   path strings, without touching the disk
 //
+//     file.send(path, downloadName=null)
+//                                   the file as the response (overview §8, User
+//                                   uploads): its type from an allowlist, by
+//                                   extension; shown in the browser only if it's
+//                                   a safe type (images, plain text, audio,
+//                                   video), else downloaded; always downloaded,
+//                                   as downloadName, if that's given
+//
 // There are no open files, no current folder, and no appending (that's
 // data.append). Writes and deletes take the file's lock, the same one `data`
 // takes, so data.update never sees a file change under it. Failures come
 // back as error values.
 
+#include <cctype>
 #include <ctime>
 
 #include "../bridge.h"
@@ -168,6 +177,105 @@ Intrinsic makeLoadRaw() {
         }
         auto path = pathArg(ctx, "loadRaw", false, error);
         if (!path) return error;
+        return startWork(ctx, *run, [data, p = *path] {
+            auto bytes = data->readFile(p);
+            if (!bytes) return fail(bytes.error());
+            AsyncResult r;
+            if (bytes.value()) r.bytes = std::move(*bytes.value());
+            else r.found = false;
+            return r;
+        });
+    });
+    return f;
+}
+
+// Types file.send serves files as, by extension: those a browser may show
+// (inline) and those it must download. Anything else, and anything that
+// could hold script (.html, .svg, .xml, .js), is a download as
+// application/octet-stream.
+struct SendType {
+    const char* extension;
+    const char* type;
+    bool inlineSafe;
+};
+const SendType kSendTypes[] = {
+    {".png", "image/png", true},          {".jpg", "image/jpeg", true},         {".jpeg", "image/jpeg", true},
+    {".gif", "image/gif", true},          {".webp", "image/webp", true},        {".avif", "image/avif", true},
+    {".txt", "text/plain; charset=utf-8", true},
+    {".mp3", "audio/mpeg", true},         {".ogg", "audio/ogg", true},          {".wav", "audio/wav", true},
+    {".mp4", "video/mp4", true},          {".webm", "video/webm", true},
+    {".pdf", "application/pdf", false},   {".zip", "application/zip", false},
+    {".csv", "text/csv; charset=utf-8", false},
+    {".json", "application/json", false}, {".md", "text/markdown; charset=utf-8", false},
+};
+
+std::string lowerExtensionOf(const RelPath& path) {
+    std::string e(path.extension());
+    for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return e;
+}
+
+// A Content-Disposition value: an ASCII fallback name, and the full name
+// in UTF-8 (RFC 6266, RFC 8187).
+std::string disposition(bool attachment, const std::string& name) {
+    std::string ascii, encoded;
+    static const char* const kHex = "0123456789ABCDEF";
+    for (unsigned char c : name) {
+        bool plain = c < 0x80 && (std::isalnum(c) || c == '.' || c == '-' || c == '_' || c == ' ');
+        if (plain) {
+            ascii += static_cast<char>(c);
+        } else if ((c & 0xC0) != 0x80) {
+            ascii += '_';   // one per character, not per byte
+        }
+        if (std::isalnum(c) || c == '.' || c == '-' || c == '_') {
+            encoded += static_cast<char>(c);
+        } else {
+            encoded += '%';
+            encoded += kHex[c >> 4];
+            encoded += kHex[c & 15];
+        }
+    }
+    std::string out = attachment ? "attachment" : "inline";
+    if (name.empty()) return out;
+    return out + "; filename=\"" + ascii + "\"; filename*=UTF-8''" + encoded;
+}
+
+Intrinsic makeSend() {
+    Intrinsic f = Intrinsic::Create("");
+    f.AddParam("path");
+    f.AddParam("downloadName", Value::Null);
+    f.set_Code([](Context ctx, IntrinsicResult partial) {
+        IntrinsicResult error = IntrinsicResult::Null;
+        DataFiles* data = nullptr;
+        Run* run = dataRun(ctx, "file.send", data, error);
+        if (!run) return error;
+        auto path = pathArg(ctx, "send", false, error);
+        if (!path) return error;
+        Value download = ctx.GetArg(1);
+        if (!download.IsNull() && !download.IsString()) {
+            return intrinsicError("file.send: downloadName must be a file name string, or null");
+        }
+        if (!partial.done) {
+            std::optional<AsyncResult> result = std::move(run->async);
+            run->async.reset();
+            if (!result) return intrinsicError("file.send: no result (an engine bug)");
+            if (result->error) return intrinsicError("file.send: " + result->error->message);
+            if (!result->found) return intrinsicError("file.send: there's no file data/" + path->str());
+            std::string extension = lowerExtensionOf(*path);
+            const SendType* type = nullptr;
+            for (const SendType& t : kSendTypes) {
+                if (extension == t.extension) type = &t;
+            }
+            std::string name = download.IsString() ? toStdString(download) : std::string(path->name());
+            bool attachment = download.IsString() || !type || !type->inlineSafe;
+            OutcomeHandle h;
+            h.kind = OutcomeHandle::Kind::Status;
+            h.status = 200;
+            h.body = std::move(result->bytes);
+            h.contentType = type ? type->type : "application/octet-stream";
+            h.headers = {{"Content-Disposition", disposition(attachment, name)}};
+            return IntrinsicResult(makeOutcomeHandle(std::move(h)));
+        }
         return startWork(ctx, *run, [data, p = *path] {
             auto bytes = data->readFile(p);
             if (!bytes) return fail(bytes.error());
@@ -373,6 +481,7 @@ void addFile() {
                           {"writeLines", makeWriteLines()},
                           {"loadRaw", makeLoadRaw()},
                           {"saveRaw", makeSaveRaw()},
+                          {"send", makeSend()},
                           {"exists", makeExists()},
                           {"info", makeInfo()},
                           {"children", makeChildren()},

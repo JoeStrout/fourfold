@@ -43,3 +43,11 @@ target_link_libraries(sqlite3 PRIVATE Threads::Threads ${CMAKE_DL_LIBS})
 add_library(monocypher STATIC monocypher/monocypher.c)
 target_include_directories(monocypher SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/monocypher)
 set_target_properties(monocypher PROPERTIES C_STANDARD 99)
+
+# utf8proc: Unicode normalization (NFC) of submitted form text, behind base's
+# utf8.h. utf8proc.c includes utf8proc_data.c itself. Built static, so
+# UTF8PROC_STATIC keeps its header from declaring dllimport on Windows.
+add_library(utf8proc STATIC utf8proc/utf8proc.c)
+target_include_directories(utf8proc SYSTEM PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utf8proc)
+target_compile_definitions(utf8proc PUBLIC UTF8PROC_STATIC)
+set_target_properties(utf8proc PROPERTIES C_STANDARD 99)

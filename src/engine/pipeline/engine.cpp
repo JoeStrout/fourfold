@@ -2,6 +2,7 @@
 
 #include <cctype>
 
+#include "base/crypto.h"
 #include "platform/random.h"
 #include "session.h"
 
@@ -89,6 +90,37 @@ private:
     AuthStore& store_;
 };
 
+// ratelimit()'s view of the RateStore.
+class StoreRates : public RateCounter {
+public:
+    explicit StoreRates(RateStore& store) : store_(store) {}
+    bool hit(const std::string& key, const RateRule& rule) override {
+        auto r = store_.hit({{key, rule.count, rule.seconds}});
+        return !r || r.value().allowed;
+    }
+
+private:
+    RateStore& store_;
+};
+
+const char* const kTooManyPage =
+    "<!DOCTYPE html>\n<html><head><title>Too many requests</title></head>\n"
+    "<body><h1>Too many requests</h1>\n"
+    "<p>Please wait a little, then try again.</p></body></html>\n";
+
+const char* const kTooFastPage =
+    "<!DOCTYPE html>\n<html><head><title>That was quick</title></head>\n"
+    "<body><h1>That was quick!</h1>\n"
+    "<p>Please wait a moment, then send the form again.</p></body></html>\n";
+
+const char* const kNeedsJsPage =
+    "<!DOCTYPE html>\n<html><head><title>This form needs JavaScript</title></head>\n"
+    "<body><h1>This form needs JavaScript</h1>\n"
+    "<p>This form needs JavaScript turned on to be sent. Go back, reload the page, and try again.</p></body></html>\n";
+
+// Extra slack for a multipart body's boundaries and part headers.
+constexpr size_t kMultipartOverhead = 64 * 1024;
+
 std::string engineKeyFrom(const EngineOptions& options) {
     return options.engineKey.empty() ? randomBytes(32) : options.engineKey;
 }
@@ -128,6 +160,9 @@ struct Engine::Flow {
     std::optional<std::string> csrfCookie;   // the visitor's, if well formed
     std::optional<std::string> sessionHash;
     std::optional<AuthUser> user;            // set by identify()
+    // The visitor's address: the connection's, or a trusted proxy's
+    // forwarded one (`req.ip`).
+    std::string client;
     RouteDecision decision;
     // The response depends on who's asking: shared caches mustn't keep it.
     bool personal = false;
@@ -152,6 +187,7 @@ Engine::Engine(std::shared_ptr<const CompiledApp> app, CodeTree code, ScriptHost
       app_(std::move(app)),
       config_(std::make_shared<const AppConfig>()),
       users_(options.auth ? std::make_unique<StoreUsers>(*options.auth) : nullptr),
+      rates_(options.rates ? std::make_unique<StoreRates>(*options.rates) : nullptr),
       code_(std::move(code)),
       scripts_(scripts),
       options_(std::make_shared<const EngineOptions>(std::move(options))) {}
@@ -240,7 +276,16 @@ void Engine::handle(const HttpRequest& request, Done done) const {
         f->csrfCookie.reset();
         f->newCsrfCookie = PolicyGate::newCsrfCookie();
     }
-    f->render.csrfToken = gate_.tokenFor(f->csrfCookie ? *f->csrfCookie : *f->newCsrfCookie);
+    const std::string& cookie = f->csrfCookie ? *f->csrfCookie : *f->newCsrfCookie;
+    f->render.csrfToken = gate_.tokenFor(cookie);
+    // The timing token, and puzzles for forms whose routes ask for them
+    // (overview §5), bound to the same cookie.
+    int64_t now = options.clock->nowMillis();
+    f->render.formTimeToken = gate_.formTimeToken(cookie, now);
+    int bits = f->config->limits.challengeBits;
+    const PolicyGate* gate = &gate_;
+    f->render.newChallenge = [gate, cookie, now, bits] { return gate->newChallenge(cookie, now, bits); };
+    f->client = clientAddress(request, f->config->proxy.trust);
     if (auto id = cookieValue(request, cookieName("session", options.https))) {
         f->sessionHash = SessionStore::hashOfId(*id);
     }
@@ -293,8 +338,14 @@ void Engine::serveAuth(std::shared_ptr<Flow> f) const {
         f->send(HttpResponse::text(404, "Not Found\n"), false);
         return;
     }
+    SubmissionError bodyError;
+    std::optional<Submission> submission = readSubmission(f->request, SubmissionLimits{}, bodyError);
+    if (!submission) {
+        f->send(HttpResponse::text(bodyError.status, "Bad Request: " + bodyError.message + "\n"), false);
+        return;
+    }
     std::optional<std::string> csrfToken;
-    RequestFacts facts = requestFacts(f->request, f->admitted, &csrfToken);
+    RequestFacts facts = requestFacts(f->request, f->admitted, &*submission, &csrfToken);
     const std::string* host = f->request.headers.get("Host");
     std::string origin = std::string(options.https ? "https://" : "http://") + (host ? *host : "");
     if (!isSafeMethod(f->request.method)) {
@@ -320,7 +371,7 @@ void Engine::serveAuth(std::shared_ptr<Flow> f) const {
     a.query = std::move(facts.query);
     a.form = std::move(facts.form);
     a.sessionHash = f->sessionHash;
-    a.addressGroup = addressGroup(f->request.peerAddress);
+    a.addressGroup = addressGroup(f->client);
     a.user = f->user;
     a.app = f->app;
     a.config = f->config;
@@ -342,10 +393,28 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
         return;
     }
 
+    // Parse: the body, under limits, before the gate (the CSRF token may be
+    // in it). A route with file fields may take its uploads on top.
+    size_t allowed = options.maxFormBytes + (entry->form ? entry->form->maxUploadBytes() + kMultipartOverhead : 0);
+    if (request.body.size() > allowed) {
+        f->send(HttpResponse::text(413, "Payload Too Large\n"), false);
+        return;
+    }
+    SubmissionLimits limits;
+    limits.maxFormBytes = options.maxFormBytes;
+    SubmissionError bodyError;
+    auto submission = std::make_shared<std::optional<Submission>>(readSubmission(request, limits, bodyError));
+    if (!*submission) {
+        f->send(HttpResponse::text(bodyError.status, (bodyError.status == 413 ? "Payload Too Large: " : "Bad Request: ") +
+                                                         bodyError.message + "\n"),
+                false);
+        return;
+    }
+
     // Gate: nothing is served without the policy's approval.
     f->personal = !entry->access.isPublic() || f->user.has_value();
     std::optional<std::string> csrfToken;
-    RequestFacts facts = requestFacts(request, f->admitted, &csrfToken);
+    auto facts = std::make_shared<RequestFacts>(requestFacts(request, f->admitted, &**submission, &csrfToken));
     GateFacts gateFacts;
     gateFacts.method = request.method;
     if (const std::string* origin = request.headers.get("Origin")) gateFacts.origin = *origin;
@@ -354,12 +423,47 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
     gateFacts.csrfCookie = f->csrfCookie;
     gateFacts.csrfToken = csrfToken;
     if (f->user) gateFacts.visitor = {true, f->user->roles};
-    GateDecision gate = gate_.check(*entry, gateFacts);
+    gateFacts.addressGroup = addressGroup(f->client);
+    if (f->user) gateFacts.userId = f->user->id;
+    gateFacts.sessionHash = f->sessionHash;
+    gateFacts.defaultLimits = f->user ? f->config->limits.signedIn : f->config->limits.anonymous;
+    gateFacts.formTime = (*submission)->formTime;
+    gateFacts.challengeAnswer = (*submission)->challenge;
+    gateFacts.challengeBits = f->config->limits.challengeBits;
+    gateFacts.nowMs = options.clock->nowMillis();
+
+    auto next = [this, f, facts, submission](GateDecision gate) {
+        afterGate(f, std::move(gate), std::move(*facts), std::move(**submission));
+    };
+    if (options.rates && scripts_ && PolicyGate::needsStore(*entry, request.method)) {
+        // Counting is SQLite: on a worker.
+        const RouteEntry* e = entry;
+        RateStore* rates = options.rates;
+        const PolicyGate* gate = &gate_;
+        scripts_->workers().submit([gate, e, gateFacts, rates, next] { next(gate->check(*e, gateFacts, rates)); });
+        return;
+    }
+    next(gate_.check(*entry, gateFacts, options.rates));
+}
+
+void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts facts, Submission submission) const {
+    const EngineOptions& options = *options_;
+    const CompiledApp& app = *f->app;
+    const RouteDecision& decision = f->decision;
+    const RouteEntry* entry = decision.entry;
+    const HttpRequest& request = f->request;
+    if (options.observer && !gate.counted.empty()) options.observer->limitsCounted(request.method + " " +
+                                                                                    f->admitted.path.path, gate.counted);
     if (!gate.approval) {
-        const char* category = gate.denial == GateDecision::Denial::Csrf ? "csrf" : "access";
-        if (options.log) options.log->write(category, request.method + " " + f->admitted.path.path + ": " + gate.reason);
+        using Denial = GateDecision::Denial;
+        const char* category = gate.denial == Denial::Csrf                                    ? "csrf"
+                               : gate.denial == Denial::NeedLogin || gate.denial == Denial::Forbidden ? "access"
+                               : gate.denial == Denial::RateLimited                           ? "limits"
+                                                                                              : "spam";
+        if (options.log) options.log->write(category, request.method + " " + f->admitted.path.path + " from " +
+                                                          f->client + ": " + gate.reason);
         bool htmx = isHtmxRequest(request);
-        if (gate.denial == GateDecision::Denial::NeedLogin && (request.method == "GET" || request.method == "HEAD")) {
+        if (gate.denial == Denial::NeedLogin && (request.method == "GET" || request.method == "HEAD")) {
             // Sign in, then come back here.
             std::string back = encodeUrlPath(f->admitted.path.path) + (f->admitted.path.trailingSlash ? "/" : "");
             if (f->admitted.hasQuery) back += "?" + f->admitted.query;
@@ -375,14 +479,44 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
             f->send(std::move(r), false);
             return;
         }
-        if (gate.denial == GateDecision::Denial::Csrf && options.observer) {
+        if (gate.denial != Denial::NeedLogin && gate.denial != Denial::Forbidden && options.observer) {
             options.observer->scriptError({"request refused: " + gate.reason, "", 0});
         }
-        const char* html = gate.denial == GateDecision::Denial::NeedLogin ? kSignInPage
-                           : gate.denial == GateDecision::Denial::Forbidden ? kNotAllowedPage
-                                                                            : kForbiddenPage;
+        if (gate.denial == Denial::RateLimited || gate.denial == Denial::TooFast) {
+            HttpResponse r;
+            if (app.tooManyPage && gate.denial == Denial::RateLimited) {
+                if (const CompiledTemplate* t = app.templates.find(*app.tooManyPage)) {
+                    RenderOptions quiet = f->render;
+                    quiet.warnings = false;
+                    r.status = 429;
+                    r.headers.set("Content-Type", "text/html; charset=utf-8");
+                    r.body = render(*t, EmptyFields(), quiet).html.str();
+                }
+            }
+            if (r.body.empty()) {
+                r = page(429, gate.denial == Denial::TooFast ? kTooFastPage : kTooManyPage, gate.reason, options);
+            }
+            r.headers.set("Retry-After", std::to_string(gate.retryAfterSeconds));
+            f->send(std::move(r));
+            return;
+        }
+        const char* html = gate.denial == Denial::NeedLogin   ? kSignInPage
+                           : gate.denial == Denial::Forbidden ? kNotAllowedPage
+                           : gate.denial == Denial::Challenge ? kNeedsJsPage
+                                                              : kForbiddenPage;
         f->send(page(gate.status, html, gate.reason, options));
         return;
+    }
+
+    // A declared form: only its fields, normalized and typed, and its
+    // uploads, checked by content (overview §4, Forms and validation).
+    if (entry->form && request.method == "POST") {
+        CheckedForm checked = checkForm(*entry->form, submission);
+        facts.form.clear();
+        facts.declaredForm = std::move(checked.form);
+        facts.errors = std::move(checked.errors);
+        facts.files = std::move(checked.files);
+        facts.typed = std::move(checked.typed);
     }
 
     bool useSession = entry->usesSession && options.sessions && options.sessionLocks;
@@ -424,6 +558,7 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
     }
 
     RunContext context;
+    facts.ip = f->client;
     context.request = std::move(facts);
     context.request.format = decision.markdown ? "markdown" : "html";
     if (f->user) context.request.user = userFacts(*f->user);
@@ -431,10 +566,17 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
     context.data = options.data;
     context.dropbox = options.dropbox;
     context.users = users_.get();
+    context.rates = rates_.get();
+    std::string group = addressGroup(f->client);
+    context.rateIp = "ip:" + group;
+    context.rateUser = f->user ? "user:" + f->user->id : "ip:" + group;
+    context.rateSession = f->sessionHash ? "session:" + toHex(*f->sessionHash) : "ip:" + group;
+    context.form = entry->form;
+    context.pageUrl = entry->pageUrl;
     std::shared_ptr<EngineSession> session;
     if (useSession) {
         session = std::make_shared<EngineSession>(*options.sessions, *options.sessionLocks, scripts_->workers(),
-                                                  f->sessionHash, addressGroup(request.peerAddress), options.https);
+                                                  f->sessionHash, addressGroup(f->client), options.https);
         context.session = session;
         context.sessionMaxBytes = options.sessions->config().maxBytes;
     }

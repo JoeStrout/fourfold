@@ -40,6 +40,7 @@ Html& Html::operator+=(const Html& other) {
     markup_ += other.markup_;
     hasScript_ = hasScript_ || other.hasScript_;
     hasMarkdown_ = hasMarkdown_ || other.hasMarkdown_;
+    hasChallenge_ = hasChallenge_ || other.hasChallenge_;
     if (markdown_ && other.markdown_) {
         // Joined now, not deferred: frag("x", list) appends one item at a
         // time, and a chain of deferred joins would recurse once per item.

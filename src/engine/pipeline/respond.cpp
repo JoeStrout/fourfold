@@ -60,8 +60,28 @@ ScriptError fragmentScriptError(const RouteEntry& entry) {
 
 }  // namespace
 
+namespace {
+
+HttpResponse respondTo(const HandlerOutcome& outcome, const RouteEntry& entry, const CompiledApp& app,
+                       const EngineOptions& options, const RenderOptions& render, bool htmx);
+
+}  // namespace
+
 HttpResponse respond(const HandlerOutcome& outcome, const RouteEntry& entry, const CompiledApp& app,
                      const EngineOptions& options, const RenderOptions& render, bool htmx) {
+    HttpResponse r = respondTo(outcome, entry, app, options, render, htmx);
+    // reshow()'s HX-Retarget and HX-Reswap; file.send()'s
+    // Content-Disposition. (Not on an error page.)
+    if (outcome.kind != HandlerOutcome::Kind::Error && r.status < 500) {
+        for (const auto& [name, value] : outcome.headers) r.headers.set(name, value);
+    }
+    return r;
+}
+
+namespace {
+
+HttpResponse respondTo(const HandlerOutcome& outcome, const RouteEntry& entry, const CompiledApp& app,
+                       const EngineOptions& options, const RenderOptions& render, bool htmx) {
     switch (outcome.kind) {
         case HandlerOutcome::Kind::Render:
         case HandlerOutcome::Kind::Fragment: {
@@ -111,6 +131,8 @@ HttpResponse respond(const HandlerOutcome& outcome, const RouteEntry& entry, con
     }
     return HttpResponse::text(500, "Internal Server Error\n");
 }
+
+}  // namespace
 
 bool isHtmxRequest(const HttpRequest& request) {
     const std::string* h = request.headers.get("HX-Request");

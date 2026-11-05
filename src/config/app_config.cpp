@@ -1,5 +1,6 @@
 #include "config/app_config.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -402,15 +403,76 @@ void readBudget(Section budget, AppConfig& c, const Ceilings& ceilings, Problems
     budget.finish();
 }
 
+// The engine's default rates, as written: one string or a list.
+std::optional<std::vector<RateRule>> readRates(Section& s, const std::string& key, RateRule::Per per) {
+    auto v = s.raw(key);
+    if (!v) return std::nullopt;
+    std::vector<Datum> items;
+    if (v->kind() == Datum::Kind::String) items.push_back(*v);
+    if (v->kind() == Datum::Kind::List) items = v->asList();
+    if (items.empty()) {
+        s.error(key, "must be a rate like \"60/minute\", or a list of them");
+        return std::nullopt;
+    }
+    std::vector<RateRule> out;
+    for (const Datum& item : items) {
+        std::string error;
+        std::optional<RateRule> r = item.kind() == Datum::Kind::String ? parseRate(item.asString(), error)
+                                                                       : std::nullopt;
+        if (!r) {
+            s.error(key, error.empty() ? "must be a rate like \"60/minute\", or a list of them" : error);
+            return std::nullopt;
+        }
+        if (item.asString().find("per ip") != std::string::npos ||
+            item.asString().find("per user") != std::string::npos ||
+            item.asString().find("per session") != std::string::npos ||
+            std::count(item.asString().begin(), item.asString().end(), '/') > 1) {
+            s.error(key, "counts " + std::string(per == RateRule::Per::Ip ? "per address" : "per user") +
+                             " already; write just the rate, like \"60/minute\"");
+            return std::nullopt;
+        }
+        r->per = per;
+        r->key = "default";
+        out.push_back(*r);
+    }
+    return out;
+}
+
+void readLimits(Section limits, AppConfig& c) {
+    if (auto rules = readRates(limits, "anonymous", RateRule::Per::Ip)) c.limits.anonymous = *rules;
+    if (auto rules = readRates(limits, "signedIn", RateRule::Per::User)) c.limits.signedIn = *rules;
+    if (auto bits = limits.number("challengeBits", 1, 32)) c.limits.challengeBits = static_cast<int>(*bits);
+    limits.finish();
+}
+
+void readProxy(Section proxy, AppConfig& c) {
+    if (auto trust = proxy.strings("trust")) {
+        for (const std::string& t : *trust) {
+            auto range = AddressRange::parse(t);
+            if (!range) {
+                proxy.error("trust", "has \"" + t + "\", which isn't an IP address or a range like \"10.0.0.0/8\"");
+            } else {
+                c.proxy.trust.push_back(*range);
+            }
+        }
+    }
+    proxy.finish();
+}
+
 }  // namespace
 
 ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     Problems problems;
     auto c = std::make_shared<AppConfig>();
     c->mode = sources.mode;
+    std::string unused;
+    c->limits.anonymous = {*parseRate("60/minute", unused)};
+    c->limits.signedIn = {*parseRate("300/minute per user", unused)};
+    for (RateRule* r : {&c->limits.anonymous[0], &c->limits.signedIn[0]}) r->key = "default";
     if (sources.mode == ConfigMode::Dev) {
         c->auth.fakeLogin = true;
         c->mail.transport = MailConfig::Transport::Log;
+        c->limits.challengeBits = 4;
     }
 
     Ceilings ceilings;
@@ -451,6 +513,8 @@ ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     readSession(top.section("session"), *c, ceilings, problems);
     readAuth(top.section("auth"), *c);
     readMail(top.section("mail"), *c, problems);
+    readLimits(top.section("limits"), *c);
+    readProxy(top.section("proxy"), *c);
     top.finish();
 
     if (c->mail.transport == MailConfig::Transport::Log) {

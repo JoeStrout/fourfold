@@ -7,6 +7,8 @@
 // - RawData: a buffer of bytes, for binary files (raw_data.h).
 // - dropbox: the app's append-only output (dropbox.write).
 // - users: the engine's users (users.get, users.grant, ...).
+// - formState, reshow: showing a declared form again, with its errors.
+// - ratelimit: rate limits from code.
 #pragma once
 
 #include <string>
@@ -25,6 +27,8 @@ void addFile();
 void addRawData();
 void addDropbox();
 void addUsers();
+void addForms();
+void addRateLimit();
 
 // An intrinsic's error result.
 MiniScript::IntrinsicResult intrinsicError(const std::string& message);

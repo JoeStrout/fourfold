@@ -1,4 +1,5 @@
-# Fuzzing the template tokenizer and the Markdown renderer (M4).
+# Fuzzing the template tokenizer and the Markdown renderer (M4), and the
+# form body parser (M7).
 #
 # test_fuzz is an ordinary test (run by ctest): seeded random mutations of
 # a corpus, checked for crashes (best under the asan preset), for values
@@ -9,7 +10,7 @@
 # too, for open-ended runs:  ./build/<preset>/bin/fuzz_markdown -max_total_time=300
 
 add_executable(test_fuzz fuzz_test.cpp)
-target_link_libraries(test_fuzz PRIVATE fourfold::markdown fourfold_test_support)
+target_link_libraries(test_fuzz PRIVATE fourfold::pipeline fourfold_test_support)   # pipeline brings markdown
 fourfold_set_options(test_fuzz)
 add_test(NAME fuzz COMMAND test_fuzz)
 set_tests_properties(fuzz PROPERTIES LABELS unit)

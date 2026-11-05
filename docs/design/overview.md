@@ -587,7 +587,7 @@ form.sign = {
     "photo": {"type": "file", "maxKB": 2048, "types": ["image/png", "image/jpeg"]}}
 ```
 
-Like `access =`, `form` declarations are plain data, **read at compile time**. That lets the engine check them against the templates (below).
+Like `access =`, `form` declarations are plain data, **read at compile time**. That lets the engine check them against the templates (below). `form.x` declares what `post.x` accepts; a declaration with no `post.x` is a compile error (decided in M7).
 
 | Type | Accepts | Becomes |
 |---|---|---|
@@ -600,7 +600,7 @@ Like `access =`, `form` declarations are plain data, **read at compile time**. T
 | `choice` | one of `options` (a select or radio group) | string |
 | `choices` | any subset of `options` (several checkboxes) | list of strings |
 | `date` | `YYYY-MM-DD` (what `<input type="date">` sends) | string |
-| `file` | an upload within `maxKB`, whose **content** matches `types` | upload handle (in `req.files`) |
+| `file` | an upload within `maxKB`, whose **content** matches `types` | in `req.files`: `name`, `type`, `size`, and the bytes as `RawData` (M7) |
 
 Rules: `required`, `min`/`max` (length for text, value for numbers), `maxLinks` (counts URLs in text, a cheap spam filter), and `messages` to replace the default error messages per rule (e.g. `"messages": {"required": "Please sign your name"}`).
 
@@ -611,6 +611,7 @@ Rules: `required`, `min`/`max` (length for text, value for numbers), `maxLinks` 
 - **Drops undeclared fields.** A tampered form that adds `role=admin` or `price=0` never reaches the handler (no mass assignment). The same goes for a `choice` value that isn't in `options`, which a visitor can send by editing the page.
 - **Checks uploads by content**, not by the type the browser claims: a "PNG" must start like a PNG.
 - **Validates**, and puts the results in **`req.errors`**: `null` if everything passed, otherwise a map from field name to message. The handler still runs either way, since only it knows what to show next.
+- **Every declared field is in `req.form`** (decided in M7): empty text is `""`, and an empty or invalid number, date or choice, or any field that broke a rule, is `null`, so a handler can't use a bad value by mistake.
 
 A handler with no `form` declaration still gets `req.form`, as raw strings, still bounded by the engine's size limits (§8). The dev-mode access report flags `post` handlers that read `req.form` without a declaration.
 
@@ -645,7 +646,7 @@ post.sign = function(req)
 end function
 ```
 
-- **`formState(name)`** returns the map a form fragment needs: the submitted values (by field name) and an `errors` map (with `errors.form` for errors that aren't about one field). Normally it's empty. Right after a failed submission, it holds what the visitor typed and what went wrong. A field named `errors` is therefore a compile error.
+- **`formState(name)`** returns the map a form fragment needs: the submitted values (by field name) and an `errors` map (with `errors.form` for errors that aren't about one field). Normally it's empty. Right after a failed submission, it holds what the visitor typed and what went wrong. A field named `errors` is therefore a compile error. A `choice` or `choices` field is a map from each option to 1 or 0 (decided in M7), so `checked="{{mood.happy}}"` re-checks the visitor's pick without logic in the template.
 - **`reshow(fragName, extraErrors)`** sends the form back with its errors, whichever way it was submitted:
   - **With HTMX:** it renders the fragment and tells HTMX (with `HX-Retarget` and `HX-Reswap` headers) to replace the form itself, rather than appending to `#entries`. That's why the form's root element needs an `id`. The status is 422; the engine's HTMX configuration swaps 422 responses.
   - **Without JavaScript:** it stores the values and errors for one use in the engine's part of the session (like a flash message, §2, but out of the app's reach) and redirects to the handler's own page (`/guestbook`, known from routing; never the `Referer`, so it can't become an open redirect). That page's `render` calls `formState("sign")`, which picks them up. Redirect-after-POST stays intact.
@@ -661,7 +662,8 @@ Because the engine parses templates at compile time, and `form` declarations are
 
 #### Still open
 
-- Whether a `form` declaration should be **required** for any `post` handler that reads `req.form`, rather than just flagged.
+- Whether a `form` declaration should be **required** for any `post` handler that reads `req.form`, rather than just flagged. (M7 flags it in the access report.)
+- Declaring GET forms (search boxes), which M7 leaves to `req.query`.
 - A `pattern` rule needs regular expressions, which depend on what MS2 provides; and so does localization of the default messages (see Open questions).
 - Forms whose `options` are filled in by code can't be checked against the template at compile time.
 
@@ -949,7 +951,7 @@ A string or list is shorthand for rates only; a map can also turn on the timing 
 - **IPv6 addresses are limited by /64 prefix**, not by full address, since anyone with one IPv6 address usually has a whole /64.
 - **Shared IPs are a real concern for this audience.** A classroom or school behind one IP address looks like one very busy visitor. That's why the defaults are generous, why signed-in users are counted per user rather than per IP, and why the dev-mode report shows each route's effective limits.
 - **Limits from code**, for keys only the app knows: `ratelimit("comment:" + postId, "20/hour")` returns true if the request is within the limit (and counts it), false if not.
-- Counters are kept in `private/state/` (cached in memory), so they work in CGI mode and survive restarts.
+- Counters are kept in `private/state/`, so they work in CGI mode and survive restarts. (M7: sliding windows estimated from two fixed ones, in SQLite with no memory cache yet; a request is counted only once it has passed access and CSRF, and a refused one counts nothing. A route's own rules count every method; the defaults, every method but GET. Defaults are `config.limits`.)
 
 The engine's own sign-in flows have their own fixed limits, including **per email address**, so nobody can use the magic-link form to flood someone else's inbox.
 
@@ -962,10 +964,11 @@ The engine's own sign-in flows have their own fixed limits, including **per emai
 
 The engine already adds a token to every `<form method="post">` it renders (for CSRF). On routes with `minSeconds`, that token also carries **the time the form was rendered**, signed with a key only the engine has.
 
-- A submission that arrives sooner than `minSeconds` after the form was rendered is rejected before the handler runs, with a friendly "that was quick; please try again" response, since now and then it's a fast human. A bot can't forge an earlier time; it has to fetch the form and actually wait, which costs it time on every post.
+- A submission that arrives sooner than `minSeconds` after the form was rendered is rejected before the handler runs, with a friendly "that was quick; please try again" response (a 429 with `Retry-After`, as built in M7), since now and then it's a fast human. A bot can't forge an earlier time; it has to fetch the form and actually wait, which costs it time on every post.
 - It's opt-in, and best for forms where people type something. Fast humans are real: a one-button "like" form would trip it.
 - A request to the route without a valid timing token (e.g. a bot posting directly, without fetching the form) is rejected.
-- **Old forms aren't rejected by default,** because people leave tabs open overnight. A maximum age is an option.
+- **Old forms aren't rejected by default,** because people leave tabs open overnight. A maximum age is an option (`maxAgeMinutes`, M7).
+- (M7) The token goes in every post form, signed and bound to the visitor's CSRF cookie.
 
 #### Proof of work: `challenge`
 
@@ -975,6 +978,7 @@ On routes with `challenge`, the form carries a signed, single-use puzzle: find a
 - **A real cost for bulk posting:** each submission needs its own solution, and each challenge can be used once (the engine remembers used ones until they expire).
 - **It needs JavaScript**, which breaks the no-JS fallback (§4, [Progressive enhancement](#progressive-enhancement)) for that form. Visitors without JS see a message saying the form needs it. That's the main reason it's opt-in.
 - A spammer with plenty of computing power can pay the cost, so this reduces bulk spam rather than ending it.
+- (M7) The hash is SHA-256, which browsers can compute; the puzzle is signed, bound to the CSRF cookie, and good for 24 hours. The compiler adds a puzzle only to forms whose `action` or `hx-post` names a challenge route, and the page links the solver (`/__fourfold/challenge.js`, also part of `htmx.js`).
 
 #### The strongest defense: signing in
 
@@ -1156,6 +1160,8 @@ Files uploaded into `data/` can never execute. But if the app serves them back, 
 - send `X-Content-Type-Options: nosniff`, and
 - default to `Content-Disposition: attachment` for anything that isn't a known-safe type.
 
+Built in M7 as `file.send(path, downloadName)`: images, plain text, audio and video are shown inline; PDF, ZIP, CSV, JSON and Markdown are downloads; anything else, `.html` and `.svg` included, is a download as `application/octet-stream`.
+
 Static files in `code/pages/` are served normally, since only the developer can put them there.
 
 ### Hosting modes
@@ -1201,7 +1207,7 @@ Two supported shapes:
 
 #### Trusting the client's address
 
-- Behind a proxy, every connection appears to come from the proxy, so the real client address is in `X-Forwarded-For` (or `Forwarded`). Those headers are **trusted only when the connection comes from an address listed in the config** (`config.proxy.trust`); otherwise they're ignored. Without this rule, anyone could fake their IP and slip past per-IP limits.
+- Behind a proxy, every connection appears to come from the proxy, so the real client address is in `X-Forwarded-For` (or `Forwarded`). Those headers are **trusted only when the connection comes from an address listed in the config** (`config.proxy.trust`, addresses or CIDR ranges); otherwise they're ignored. (M7: `X-Forwarded-For` is read from the right, the first address that isn't a trusted proxy being the client; `Forwarded` isn't read yet.) Without this rule, anyone could fake their IP and slip past per-IP limits.
 - The result is available to code as `req.ip`, and is the address used for the engine's own per-IP limits (sign-in, anonymous sessions, connection caps).
 - **The `Host` header is checked** against the configured domain(s); a request for any other host is rejected. The engine never builds URLs from `Host` (magic links, redirects, and the CSRF `Origin` check all use `config.domain`), so a forged `Host` can't steer a sign-in link to an attacker's site.
 

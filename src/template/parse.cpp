@@ -214,6 +214,7 @@ struct TemplateParser {
     size_t i = 0;
     int line = 1;
     std::string literal;   // text since the last part
+    bool rootSeen = false;  // a fragment's first element has been read
 
     bool seenSignificant = false;   // for a page: has anything but whitespace and comments come yet?
     bool shapeReported = false;
@@ -721,11 +722,45 @@ struct TemplateParser {
             p.kind = Part::Kind::BodyStart;
             push(std::move(p));
         }
+        if (foreignDepth == 0 && (tag.name == "input" || tag.name == "select" || tag.name == "textarea" ||
+                                  tag.name == "button")) {
+            const Attribute* name = tag.find("name");
+            if (name && name->hasValue && !name->hasFields()) {
+                Part p;
+                p.kind = Part::Kind::FormControl;
+                p.text = name->literalValue();
+                p.between = tag.name;
+                if (tag.name == "input") {
+                    const Attribute* type = tag.find("type");
+                    p.field.attribute = type && !type->hasFields() ? lower(trimmed(type->literalValue())) : "";
+                    if (p.field.attribute.empty()) p.field.attribute = "text";
+                }
+                p.field.file = file;
+                p.field.line = tag.line;
+                for (const Attribute& a : tag.attributes) p.attributes.push_back(a.name);
+                push(std::move(p));
+            }
+        }
         literal += tag.tail;
 
+        if (kind == TemplateKind::Fragment && !rootSeen && foreignDepth == 0) {
+            rootSeen = true;
+            const Attribute* id = tag.find("id");
+            if (id && id->hasValue && !id->hasFields()) compiled().rootId_ = trimmed(id->literalValue());
+        }
         if (tag.name == "form" && foreignDepth == 0) {
             const Attribute* method = tag.find("method");
-            if (method && lower(trimmed(method->literalValue())) == "post") {
+            const Attribute* hxPost = tag.find("hx-post");
+            if (!hxPost) hxPost = tag.find("data-hx-post");
+            bool post = method && lower(trimmed(method->literalValue())) == "post";
+            if (post || hxPost) {
+                const Attribute* target = hxPost ? hxPost : tag.find("action");
+                Part start;
+                start.kind = Part::Kind::FormStart;
+                if (target && target->hasValue && !target->hasFields()) start.text = trimmed(target->literalValue());
+                start.field.file = file;
+                start.field.line = tag.line;
+                push(std::move(start));
                 Part p;
                 p.kind = Part::Kind::PostForm;
                 push(std::move(p));
@@ -831,6 +866,11 @@ struct TemplateParser {
             literal += a.closing;
         }
         literal += tag.tail;
+        if (tag.name == "form" && foreignDepth == 0) {
+            Part p;
+            p.kind = Part::Kind::FormEnd;
+            push(std::move(p));
+        }
 
         if (foreignDepth > 0) {
             if (tag.name == integration) integration.clear();
@@ -1169,6 +1209,44 @@ std::vector<TemplateProblem> resolveIncludes(CompiledTemplate& page, const Fragm
         return &it->second;
     });
     return std::move(r.problems);
+}
+
+std::vector<CompiledTemplate::Form> CompiledTemplate::forms() const {
+    std::vector<Form> out;
+    bool open = false;
+    for (const Part& p : parts_) {
+        if (p.kind == Part::Kind::FormStart) {
+            out.push_back({p.text, p.field.file, p.field.line, {}});
+            open = true;
+        } else if (p.kind == Part::Kind::FormEnd) {
+            open = false;
+        } else if (p.kind == Part::Kind::FormControl && open) {
+            out.back().controls.push_back(
+                {p.text, p.between, p.field.attribute, p.attributes, p.field.file, p.field.line});
+        }
+    }
+    return out;
+}
+
+void CompiledTemplate::annotateForms(const std::function<FormAnnotation(const Form&)>& decide) {
+    std::vector<Form> all = forms();
+    size_t form = 0, control = 0;
+    bool open = false;
+    FormAnnotation current;
+    for (Part& p : parts_) {
+        if (p.kind == Part::Kind::FormStart) {
+            current = decide(all[form++]);
+            control = 0;
+            open = true;
+        } else if (p.kind == Part::Kind::FormEnd) {
+            open = false;
+        } else if (p.kind == Part::Kind::PostForm && open) {
+            p.flag = current.challenge;
+        } else if (p.kind == Part::Kind::FormControl && open) {
+            if (control < current.controlAttributes.size()) p.after = current.controlAttributes[control];
+            control++;
+        }
+    }
 }
 
 }  // namespace fourfold

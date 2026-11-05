@@ -80,6 +80,78 @@ struct AccessLevel {
     bool operator==(const AccessLevel& o) const { return all == o.all; }
 };
 
+// --- Forms (overview §4, Forms and validation) ---
+
+enum class FormFieldType { Text, Multiline, Email, Url, Number, Int, Bool, Choice, Choices, Date, File };
+
+// "text", "multiline", ...; and the reverse (nullopt for an unknown name).
+const char* formFieldTypeName(FormFieldType type);
+std::optional<FormFieldType> formFieldTypeFrom(const std::string& name);
+
+// One declared field: its type and rules.
+struct FormField {
+    std::string name;
+    FormFieldType type = FormFieldType::Text;
+    bool required = false;
+    // Text types: the length, in characters. Number and int: the value.
+    std::optional<double> min;
+    std::optional<double> max;
+    std::optional<int> maxLinks;           // text types: URLs allowed in the value
+    std::vector<std::string> options;      // choice and choices
+    double maxKB = 0;                      // file: the largest upload, in KB (1024 bytes)
+    std::vector<std::string> types;        // file: content types, checked by content ("image/png", "image/*")
+    std::map<std::string, std::string> messages;   // by rule ("required", "max", ...): the message to show
+};
+
+// A form declaration, form.x in a page's .ms file: the fields post.x
+// accepts. Read at compile time; the request path only looks fields up.
+struct FormSpec {
+    RelPath source;      // "pages/guestbook.ms"
+    std::string name;    // "sign"
+    std::vector<FormField> fields;   // in a stable order (by name)
+
+    const FormField* find(const std::string& field) const;
+    bool hasFiles() const;
+    // The most a submission's uploads may add up to, in bytes.
+    size_t maxUploadBytes() const;
+    // "form.sign"
+    std::string label() const { return "form." + name; }
+    // The key for CompiledApp::forms: "pages/guestbook.ms#sign".
+    std::string key() const { return source.str() + "#" + name; }
+};
+
+// The content types a file field may declare (checked by content, so only
+// those Fourfold can recognize): image/png, image/jpeg, image/gif,
+// image/webp, application/pdf, application/zip, text/plain, and image/*.
+bool isCheckableUploadType(const std::string& type);
+
+// --- Rate limits (overview §5, Rate limits) ---
+
+// One limit: at most `count` requests per `seconds`, counted per visitor
+// address group, per signed-in user (falling back to the address for
+// visitors who aren't), or per session (falling back to the address).
+struct RateRule {
+    enum class Per { Ip, User, Session };
+
+    int64_t count = 0;
+    int64_t seconds = 60;
+    Per per = Per::Ip;
+    // What's counted together: the rule's source ("default", or
+    // "code/limits.ms: /guestbook/sign"); every route a rule covers shares
+    // its counter.
+    std::string key;
+
+    // "5/minute per ip"
+    std::string describe() const;
+    bool operator==(const RateRule& o) const {
+        return count == o.count && seconds == o.seconds && per == o.per && key == o.key;
+    }
+};
+
+// A rate as written: "5/minute", "100 per minute per user",
+// "10/hour/session". nullopt, with `error` set, if it isn't one.
+std::optional<RateRule> parseRate(const std::string& text, std::string& error);
+
 // A role name: a letter, then letters, digits, '_' or '-', at most 64
 // bytes; and not "login" or "public", which mean something else in access
 // rules.
@@ -106,6 +178,26 @@ struct RouteEntry {
     // ("code/access.ms: /admin", "code/pages/admin/index.ms").
     AccessLevel access{};
     std::vector<std::string> accessSources{};
+
+    // Rate limits (overview §5) from code/limits.ms, each counting every
+    // request to the route; the engine's default limits (for every method
+    // but GET) apply as well. `limitSources` names each rule that applied.
+    std::vector<RateRule> limits{};
+    std::vector<std::string> limitSources{};
+    // The timing check: a submission (any method but GET) must come at least
+    // this long after its form was rendered, and, if maxAgeSeconds is set,
+    // no longer. 0: off.
+    double minSeconds = 0;
+    double maxAgeSeconds = 0;
+    // Proof of work: a submission must carry a solved, unused puzzle.
+    bool challenge = false;
+
+    // Handler: the form post.x declares (form.x), if any.
+    std::shared_ptr<const FormSpec> form{};
+    // Handler: the URL of its file's own page (/guestbook for
+    // pages/guestbook.ms), where reshow sends a visitor without
+    // JavaScript; empty if the file has no page.
+    std::string pageUrl{};
 };
 
 // Canonical URL path (see canonicalUrlPath, which reports the trailing slash
@@ -168,6 +260,9 @@ public:
     void add(RelPath source, CompiledTemplate compiled);
     const CompiledTemplate* find(const RelPath& source) const;
     size_t size() const { return templates_.size(); }
+    // For the compiler, while it builds the app.
+    CompiledTemplate* findForUpdate(const RelPath& source);
+    FragmentMap& fragmentsForUpdate() { return fragments_; }
 
     void setFragments(FragmentMap fragments) { fragments_ = std::move(fragments); }
     const CompiledTemplate* fragment(const std::string& name) const;
@@ -195,6 +290,10 @@ struct CompiledApp {
     bool hasMarkdownCss = false;
     std::optional<RelPath> notFoundPage;    // pages/404.html, if present
     std::optional<RelPath> errorPage;       // pages/500.html, if present
+    std::optional<RelPath> tooManyPage;     // pages/429.html, if present
+    // Every form declaration, by FormSpec::key() ("pages/guestbook.ms#sign"),
+    // for formState().
+    std::map<std::string, std::shared_ptr<const FormSpec>> forms;
     // Null if the app has no .ms files. Shared by every request on this
     // generation; the bytecode is released when the last one lets go.
     std::shared_ptr<const ScriptBundle> scripts;

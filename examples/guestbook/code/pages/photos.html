@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photos</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  {{> header}}
+  <main>
+    <h1>Photos</h1>
+    <p class="flash">{{flash}}</p>
+    <ul class="photos">{{photos}}</ul>
+    {{uploadForm}}
+    <p class="note">Uploads are checked by their content (a PNG must start like one), saved in
+      <code>data/photos/</code>, and served by <code>file.send</code>.</p>
+  </main>
+</body>
+</html>

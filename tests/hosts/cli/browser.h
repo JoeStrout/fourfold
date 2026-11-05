@@ -71,17 +71,19 @@ public:
         return send("POST", target, body, htmx);
     }
 
+    // `extraHeaders` are whole lines ("X-Forwarded-For: 1.2.3.4\r\n").
     std::string send(const std::string& method, const std::string& target, const std::string& body,
-                     bool htmx = false) {
+                     bool htmx = false, const std::string& extraHeaders = "",
+                     const std::string& contentType = "application/x-www-form-urlencoded") {
         std::string request = method + " " + target + " HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n";
         std::string cookies;
         for (const auto& [name, value] : jar_) cookies += (cookies.empty() ? "" : "; ") + name + "=" + value;
         if (!cookies.empty()) request += "Cookie: " + cookies + "\r\n";
         if (!token_.empty()) request += "X-CSRF-Token: " + token_ + "\r\n";
         if (htmx) request += "HX-Request: true\r\n";
+        request += extraHeaders;
         if (method == "POST") {
-            request += "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
-                       std::to_string(body.size()) + "\r\n";
+            request += "Content-Type: " + contentType + "\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
         }
         request += "\r\n" + body;
         std::string response = rawFetch(port_, request);
@@ -95,6 +97,10 @@ public:
         token_.clear();
     }
     const std::map<std::string, std::string>& cookies() const { return jar_; }
+    // The timing token (_t) and the proof-of-work puzzle of the last page
+    // that had them.
+    const std::string& formTime() const { return formTime_; }
+    const std::string& puzzle() const { return puzzle_; }
     // Sets a cookie, as if a response had (e.g. to replay an old one).
     void setCookie(const std::string& name, const std::string& value) { jar_[name] = value; }
 
@@ -118,11 +124,17 @@ private:
         std::string token = textBetween(response, "X-CSRF-Token&quot;: &quot;", "&quot;");
         if (token.empty()) token = textBetween(response, "name=\"_csrf\" value=\"", "\"");
         if (!token.empty()) token_ = token;
+        std::string formTime = textBetween(response, "name=\"_t\" value=\"", "\"");
+        if (!formTime.empty()) formTime_ = formTime;
+        std::string puzzle = textBetween(response, "data-ff-challenge=\"", "\"");
+        if (!puzzle.empty()) puzzle_ = puzzle;
     }
 
     uint16_t port_;
     std::map<std::string, std::string> jar_;
     std::string token_;
+    std::string formTime_;
+    std::string puzzle_;
 };
 
 // The body of a response.

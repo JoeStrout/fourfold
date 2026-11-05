@@ -14,7 +14,10 @@
 //
 // - /__dev/access (M6): the access report, every URL the app serves with its
 //   effective access level and the rules that produced it, and the access
-//   warnings; /__dev/access.json has the same as data.
+//   warnings; /__dev/access.json has the same as data. From M7, also each
+//   route's rate limits, timing check, challenge and form.
+// - /__dev/limits (M7): the rate-limit counters, the latest requests counted
+//   (and refused), and a button that resets the counters.
 //
 // It's an Observer (compile events come in) and the engine's EngineHooks
 // (requests for /__dev/ and HTML responses go through it). The core never
@@ -46,7 +49,11 @@ public:
     // Where the access report finds the app serving now. Set before serving.
     void setAppSource(std::function<std::shared_ptr<const CompiledApp>()> current) { currentApp_ = std::move(current); }
 
-    // The access report's data: [{url, kind, access, sources}], and warnings.
+    // Where /__dev/limits reads the counters. Set before serving; may be null.
+    void setRateStore(RateStore* rates) { rates_ = rates; }
+
+    // The access report's data: [{url, kind, access, sources, limits,
+    // form}], and warnings.
     static Datum accessReport(const CompiledApp& app);
     ~DevTools() override;
 
@@ -56,6 +63,8 @@ public:
     // Observer
     void compileFinished(const CompileReport& report) override;
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
+    void scriptError(const ScriptError& error) override;
+    void limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) override;
 
     // EngineHooks
     std::optional<HttpResponse> reserved(const HttpRequest& request, const AdmittedRequest& admitted) override;
@@ -75,6 +84,7 @@ private:
     CodeTree code_;
     std::shared_ptr<Hub> hub_;
     std::function<std::shared_ptr<const CompiledApp>()> currentApp_;   // shared with tasks posted to the loop
+    RateStore* rates_ = nullptr;
 };
 
 // The client script served at /__dev/client.js.

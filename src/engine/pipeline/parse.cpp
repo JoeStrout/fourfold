@@ -1,6 +1,7 @@
 #include <cctype>
 
 #include "base/utf8.h"
+#include "pipeline/forms.h"
 #include "pipeline/stages.h"
 
 namespace fourfold {
@@ -12,31 +13,6 @@ int hexValue(char c) {
     if (c >= 'a' && c <= 'f') return c - 'a' + 10;
     if (c >= 'A' && c <= 'F') return c - 'A' + 10;
     return -1;
-}
-
-// Replaces each byte that isn't part of valid UTF-8 with U+FFFD.
-std::string validUtf8(std::string s) {
-    if (isValidUtf8(s)) return s;
-    std::string out;
-    size_t i = 0;
-    while (i < s.size()) {
-        // Try the longest valid sequence starting here (at most 4 bytes).
-        size_t len = 0;
-        for (size_t n = 1; n <= 4 && i + n <= s.size(); n++) {
-            if (isValidUtf8(std::string_view(s).substr(i, n))) {
-                len = n;
-                break;
-            }
-        }
-        if (len) {
-            out.append(s, i, len);
-            i += len;
-        } else {
-            out += "\xEF\xBF\xBD";
-            i++;
-        }
-    }
-    return out;
 }
 
 std::string decodeComponent(std::string_view s) {
@@ -53,7 +29,7 @@ std::string decodeComponent(std::string_view s) {
             out += c;
         }
     }
-    return validUtf8(std::move(out));
+    return toValidUtf8(out);
 }
 
 std::string lower(const std::string& s) {
@@ -108,7 +84,7 @@ std::string withoutEngineCookies(const std::string& header) {
 
 }  // namespace
 
-RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted,
+RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& admitted, const Submission* submission,
                           std::optional<std::string>* csrfToken) {
     RequestFacts facts;
     facts.method = admitted.method;
@@ -140,21 +116,11 @@ RequestFacts requestFacts(const HttpRequest& request, const AdmittedRequest& adm
         }
         if (!merged) facts.headers.emplace_back(name, value);
     }
-    for (auto& [name, value] : facts.headers) value = validUtf8(std::move(value));
+    for (auto& [name, value] : facts.headers) value = toValidUtf8(value);
 
-    if (admitted.method == "POST") {
-        const std::string* type = request.headers.get("Content-Type");
-        std::string mediaType = type ? lower(type->substr(0, type->find(';'))) : "";
-        while (!mediaType.empty() && mediaType.back() == ' ') mediaType.pop_back();
-        if (mediaType == "application/x-www-form-urlencoded") facts.form = parseUrlEncoded(request.body);
-    }
-    for (auto it = facts.form.begin(); it != facts.form.end();) {
-        if (it->first == "_csrf") {
-            if (csrfToken && !*csrfToken) *csrfToken = it->second;
-            it = facts.form.erase(it);
-        } else {
-            ++it;
-        }
+    if (submission) {
+        facts.form = submission->fields;
+        if (csrfToken && !*csrfToken && submission->csrf) *csrfToken = submission->csrf;
     }
     return facts;
 }

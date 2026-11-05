@@ -136,13 +136,15 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     auto sessions = SessionStore::open(dbPath.value(), config->session);
     auto auth = sessions ? AuthStore::open(dbPath.value(), config->auth.store)
                          : Result<std::unique_ptr<AuthStore>>(sessions.error());
-    if (!sessions || !auth) {
-        err << command << "can't open private/state/state.db: " << (!sessions ? sessions.error() : auth.error()).message
-            << "\n";
+    auto rates = auth ? RateStore::open(dbPath.value()) : Result<std::unique_ptr<RateStore>>(auth.error());
+    if (!sessions || !auth || !rates) {
+        err << command << "can't open private/state/state.db: "
+            << (!sessions ? sessions.error() : !auth ? auth.error() : rates.error()).message << "\n";
         return nullptr;
     }
     server->sessions_ = std::move(sessions).value();
     server->auth_ = std::move(auth).value();
+    server->rates_ = std::move(rates).value();
     server->sessionLocks_ = makeMemoryLockService();
     server->authFlow_ = std::make_unique<AuthFlow>(*server->auth_, *server->sessions_, *server->sessionLocks_,
                                                    server->scripts_->workers(), server->log_.get());
@@ -164,6 +166,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     server->observers_.add(self);
     if (options.dev) {
         server->devtools_ = std::make_unique<DevTools>(*server->loop_, std::move(devCode).value());
+        server->devtools_->setRateStore(server->rates_.get());
         server->observers_.add(server->devtools_.get());
     }
 
@@ -179,6 +182,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     engineOptions.log = server->log_.get();
     engineOptions.auth = server->auth_.get();
     engineOptions.authRoutes = server->authFlow_.get();
+    engineOptions.rates = server->rates_.get();
     engineOptions.https = options.https;
     engineOptions.engineKey = std::move(key).value();
     server->engine_ = std::make_unique<Engine>(nullptr, std::move(engineCode).value(), server->scripts_.get(),
@@ -205,7 +209,9 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     server->server_ = std::make_unique<HttpServer>(*server->loop_, [self](HttpRequest request, Responder respond) {
         std::string line = request.method + " " + request.target;
         bool quiet = request.target.compare(0, 7, "/__dev/") == 0;   // the dev tools' own traffic
-        std::string peer = request.peerAddress;
+        // The visitor's address, as the engine sees it (a trusted proxy's
+        // forwarded one).
+        std::string peer = clientAddress(request, self->engine_->config()->proxy.trust);
         // The response may come from the script thread or a worker; the
         // server wants it on its own loop.
         self->engine_->handle(request, [self, respond, line, quiet, peer](HttpResponse response) {
@@ -246,6 +252,7 @@ AppServer::~AppServer() {
     authFlow_.reset();
     data_.reset();
     sessionLocks_.reset();
+    rates_.reset();
     auth_.reset();
     sessions_.reset();
     configDir_.reset();
@@ -261,6 +268,8 @@ void AppServer::scheduleSweep(std::chrono::milliseconds delay) {
             if (!removed) log_->write("session", "sweeping expired sessions failed: " + removed.error().message);
             auto tokens = auth_->sweep();
             if (!tokens) log_->write("auth", "sweeping old sign-in links failed: " + tokens.error().message);
+            auto counters = rates_->sweep();
+            if (!counters) log_->write("limits", "sweeping old rate-limit counters failed: " + counters.error().message);
         });
         scheduleSweep(kSweepInterval);
     });

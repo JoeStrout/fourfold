@@ -20,6 +20,7 @@
 // Nothing here depends on MiniScript: values come through a FieldSource.
 #pragma once
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <string>
@@ -89,7 +90,17 @@ public:
             Attribute,
             Nonce,       // after "<script": nonce="…", if the render has one
             HeadEnd,     // where markdown.css is linked, if the page needs it
-            PostForm,    // just after a <form method="post"> start tag: the CSRF token field
+            PostForm,    // just after a <form method="post"> (or hx-post) start tag: the CSRF
+                         // token field, the timing token, and (if `flag`) a proof-of-work puzzle
+            FormStart,   // a <form> that posts: `text` is its URL (hx-post, else action), if
+                         // written without fields; writes nothing
+            FormEnd,     // </form>; writes nothing
+            // An <input>, <select>, <textarea> or <button> with a name written
+            // without fields, just before the end of its start tag: `text`
+            // is the name, `between` the element, `field.attribute` the
+            // input's type, `attributes` the attributes it has. Writes
+            // `after`: validation attributes the compiler adds.
+            FormControl,
             BodyStart,   // before the end of the <body> start tag: hx-headers with the CSRF token
             Include,     // {{> text}}, until includes are resolved
         };
@@ -100,6 +111,31 @@ public:
         std::string after;
         TemplateField field;
         int line = 0;   // Include
+        std::vector<std::string> attributes;   // FormControl
+        bool flag = false;                     // PostForm: the form needs a proof-of-work puzzle
+    };
+
+    // A <form> that posts, with its named controls, as the compiler checks
+    // it against the form declaration it posts to (overview §4, Checking
+    // forms against templates).
+    struct Form {
+        struct Control {
+            std::string name;
+            std::string element;   // "input", "select", "textarea", "button"
+            std::string type;      // an input's type ("text" if none); empty for the others
+            std::vector<std::string> attributes;   // lowercased names
+            std::string file;
+            int line = 0;
+        };
+        std::string url;    // as written; empty if it has fields or none
+        std::string file;   // where the <form> is: "frags/signForm.html"
+        int line = 0;
+        std::vector<Control> controls;
+    };
+    // What the compiler adds to one form.
+    struct FormAnnotation {
+        bool challenge = false;                     // give it a proof-of-work puzzle
+        std::vector<std::string> controlAttributes; // by control, as in Form::controls: ` required maxlength="40"`
     };
 
     // A URL written literally (with no fields) in a link attribute: href,
@@ -133,6 +169,14 @@ public:
     size_t postForms() const { return postForms_; }
     // Its literal links, including those of included fragments.
     const std::vector<Link>& links() const { return links_; }
+    // The id of a fragment's first element, if written without fields
+    // (reshow() retargets HTMX to it).
+    const std::string& rootId() const { return rootId_; }
+
+    // Its forms that post, with includes resolved.
+    std::vector<Form> forms() const;
+    // For the compiler: annotates each form forms() lists, in order.
+    void annotateForms(const std::function<FormAnnotation(const Form&)>& decide);
 
 private:
     friend struct TemplateParser;
@@ -150,6 +194,7 @@ private:
     bool isMarkdown_ = false;
     size_t postForms_ = 0;
     std::vector<Link> links_;
+    std::string rootId_;
 };
 
 struct TemplateProblem {
@@ -202,6 +247,14 @@ struct RenderOptions {
     // a hidden _csrf field, and into <body> as HTMX's X-CSRF-Token header
     // (overview §5, CSRF protection). Empty writes none.
     std::string csrfToken;
+    // The timing token (overview §5, Timing check), written into every post
+    // form as a hidden _t field. Empty writes none.
+    std::string formTimeToken;
+    // Makes a fresh proof-of-work puzzle (overview §5, Proof of work), for
+    // each form the compiler marked; null writes none. A page with one
+    // links `challengeScript`, the solver, at the end of <head>.
+    std::function<std::string()> newChallenge;
+    std::string challengeScript;
 };
 
 struct RenderWarning {

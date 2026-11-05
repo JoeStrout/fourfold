@@ -31,3 +31,23 @@ TEST_CASE("isValidUtf8 rejects malformed text") {
     CHECK_FALSE(isValidUtf8("\xF5\x80\x80\x80"));
     CHECK_FALSE(isValidUtf8("\xFF"));
 }
+
+TEST_CASE("toValidUtf8 replaces bad bytes with U+FFFD") {
+    CHECK_EQ(fourfold::toValidUtf8("ok"), "ok");
+    CHECK_EQ(fourfold::toValidUtf8("a\xFF" "b"), "a\xEF\xBF\xBD" "b");
+    CHECK_EQ(fourfold::toValidUtf8("\xC3"), "\xEF\xBF\xBD");
+}
+
+TEST_CASE("toNfc composes, and leaves composed text alone") {
+    CHECK_EQ(fourfold::toNfc("cafe\xCC\x81"), "caf\xC3\xA9");     // e + combining acute → é
+    CHECK_EQ(fourfold::toNfc("caf\xC3\xA9"), "caf\xC3\xA9");
+    CHECK_EQ(fourfold::toNfc("plain"), "plain");
+    CHECK_EQ(fourfold::toNfc("\xE2\x84\xAB"), "\xC3\x85");        // ANGSTROM SIGN → Å
+    CHECK_EQ(fourfold::toNfc("a\xFF"), "a\xEF\xBF\xBD");           // made well formed first
+}
+
+TEST_CASE("utf8Length counts code points") {
+    CHECK_EQ(fourfold::utf8Length(""), 0u);
+    CHECK_EQ(fourfold::utf8Length("caf\xC3\xA9"), 4u);
+    CHECK_EQ(fourfold::utf8Length("\xF0\x9F\x98\x80!"), 2u);
+}

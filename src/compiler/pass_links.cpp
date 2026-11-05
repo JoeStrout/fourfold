@@ -98,7 +98,7 @@ void linksPass(const CodeListing& listing, const CompiledApp& app, Diagnostics& 
         for (size_t i = 1; i < segments.size(); i++) folder.emplace_back(segments[i]);
         checker.check(*t, folder);
     }
-    for (const std::optional<RelPath>* special : {&app.notFoundPage, &app.errorPage}) {
+    for (const std::optional<RelPath>* special : {&app.notFoundPage, &app.errorPage, &app.tooManyPage}) {
         if (!*special) continue;
         if (const CompiledTemplate* t = app.templates.find(**special)) checker.check(*t, std::nullopt);
     }

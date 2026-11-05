@@ -23,6 +23,7 @@ struct Renderer {
     bool hasScript = false;
     bool hasMarkdown = false;
     std::set<std::string> reportedMissing;
+    bool wroteChallenge = false;   // a proof-of-work puzzle: the page needs the solver
 
     void warn(const TemplateField& f, std::string message) {
         if (!options.warnings) return;
@@ -83,6 +84,7 @@ struct Renderer {
                 } else {
                     hasScript = hasScript || v.html.hasScript();
                     hasMarkdown = hasMarkdown || v.html.hasMarkdown();
+                    wroteChallenge = wroteChallenge || v.html.hasChallenge();
                     text = v.html.str();
                 }
                 return true;
@@ -144,6 +146,7 @@ struct Renderer {
                 }
                 hasScript = hasScript || v.html.hasScript();
                 hasMarkdown = hasMarkdown || v.html.hasMarkdown();
+                wroteChallenge = wroteChallenge || v.html.hasChallenge();
                 text = v.html.str();
                 return true;
             case FieldValue::Kind::Missing:
@@ -225,6 +228,22 @@ struct Renderer {
                 if (!options.csrfToken.empty()) {
                     out += "<input type=\"hidden\" name=\"_csrf\" value=\"" + escapeHtml(options.csrfToken) + "\">";
                 }
+                if (!options.formTimeToken.empty()) {
+                    out += "<input type=\"hidden\" name=\"_t\" value=\"" + escapeHtml(options.formTimeToken) + "\">";
+                }
+                if (p.flag && options.newChallenge) {
+                    // The solver fills in the value (overview §5, Proof of work).
+                    out += "<input type=\"hidden\" name=\"_pow\" value=\"\" data-ff-challenge=\"" +
+                           escapeHtml(options.newChallenge()) + "\">"
+                           "<noscript><p class=\"ff-needs-js\">This form needs JavaScript to send.</p></noscript>";
+                    wroteChallenge = true;
+                }
+                return true;
+            case Kind::FormStart:
+            case Kind::FormEnd:
+                return true;
+            case Kind::FormControl:
+                out += p.after;
                 return true;
             case Kind::BodyStart:
                 if (!options.csrfToken.empty()) {
@@ -297,9 +316,17 @@ struct Renderer {
                 links += "<link rel=\"alternate\" type=\"text/markdown\" href=\"" +
                          escapeHtml(options.markdownAlternate) + "\">\n";
             }
+            if (wroteChallenge && !options.challengeScript.empty()) {
+                links += "<script src=\"" + escapeHtml(options.challengeScript) + "\"" +
+                         (options.nonce.empty() ? std::string() : " nonce=\"" + escapeHtml(options.nonce) + "\"") +
+                         " defer></script>\n";
+            }
             out.insert(headAt, links);
         }
-        result.html = HtmlAccess::make(std::move(out), hasScript, hasMarkdown);
+        // A fragment with a puzzle tells the page it goes into to link the
+        // solver (a fragment has no <head> of its own).
+        result.html = HtmlAccess::withChallenge(HtmlAccess::make(std::move(out), hasScript, hasMarkdown),
+                                                wroteChallenge && headAt == std::string::npos);
     }
 };
 
@@ -329,7 +356,9 @@ RenderResult renderFragment(const CompiledTemplate& compiled, const FieldSource&
         }
         form = MarkdownForm::ready(std::move(md.markdown));
     }
-    r.html = HtmlAccess::make(r.html.str(), r.html.hasScript(), r.html.hasMarkdown(), std::move(form));
+    r.html = HtmlAccess::withChallenge(
+        HtmlAccess::make(r.html.str(), r.html.hasScript(), r.html.hasMarkdown(), std::move(form)),
+        r.html.hasChallenge());
     return r;
 }
 

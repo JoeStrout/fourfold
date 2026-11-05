@@ -58,6 +58,17 @@ void markdownPass(const CodeListing& listing, const CodeTree& code, CompiledApp&
 void accessPass(const CodeListing& listing, const CodeTree& code, const std::map<RelPath, PageHandlers>& handlers,
                 DataEvaluator* evaluator, CompiledApp& app, Diagnostics& diagnostics);
 
+// Each route's rate limits, timing check and challenge, from code/limits.ms
+// (evaluated by `evaluator`). After the routes pass.
+void limitsPass(const CodeListing& listing, const CodeTree& code, DataEvaluator* evaluator, CompiledApp& app,
+                Diagnostics& diagnostics);
+
+// The page files' form declarations, onto their post handlers' routes; then
+// each template's forms checked against them (with validation attributes
+// added), and marked for a proof-of-work puzzle where their route has a
+// challenge. After the routes, access and limits passes.
+void formsPass(const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app, Diagnostics& diagnostics);
+
 // An access level as written ("login", "admin", ["admin", "moderator"]): the
 // roles of which any will do, empty for "login"; or nullopt, with `error`
 // saying why it isn't one.

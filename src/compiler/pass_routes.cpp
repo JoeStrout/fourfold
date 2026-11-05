@@ -12,6 +12,7 @@
 //                             →  /guide.md        the same route, as Markdown
 //   pages/404.html            →  the not-found page (not a route)
 //   pages/500.html            →  the error page (not a route)
+//   pages/429.html            →  the "too many requests" page (not a route)
 
 #include <algorithm>
 #include <set>
@@ -66,7 +67,7 @@ RelPath withExtension(const RelPath& path, const char* extension) {
 }
 
 bool isSpecialPage(const std::vector<std::string_view>& segments, std::string_view stem) {
-    return segments.size() == 2 && (stem == "404" || stem == "500");
+    return segments.size() == 2 && (stem == "404" || stem == "429" || stem == "500");
 }
 
 void routeHandlers(const RelPath& source, const std::vector<std::string_view>& segments, std::string_view stem,
@@ -132,7 +133,7 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
 
         if (extension == ".html") {
             if (isSpecialPage(segments, stem)) {
-                (stem == "404" ? app.notFoundPage : app.errorPage) = file.path;
+                (stem == "404" ? app.notFoundPage : stem == "429" ? app.tooManyPage : app.errorPage) = file.path;
                 continue;
             }
             std::string url = urlFor(segments, isIndex ? std::string_view() : stem);
