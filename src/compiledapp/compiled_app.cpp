@@ -359,9 +359,48 @@ std::string describe(const CompiledApp& app) {
     s += "not found page: " + (app.notFoundPage ? app.notFoundPage->str() : std::string("(none)")) + "\n";
     s += "error page: " + (app.errorPage ? app.errorPage->str() : std::string("(none)")) + "\n";
     if (app.tooManyPage) s += "too many requests page: " + app.tooManyPage->str() + "\n";
+    if (app.unavailablePage) s += "unavailable page: " + app.unavailablePage->str() + "\n";
+    if (!app.queries.empty()) {
+        s += std::string("queries (") + sqlDialectName(app.dialect) + "):\n";
+        for (const auto& [name, q] : app.queries) {
+            s += "  " + name + "  " + q->source.str();
+            if (!q->sql.keys.empty()) {
+                s += "  keys:";
+                for (const std::string& k : q->sql.keys) s += " " + k;
+            }
+            for (const SqlSlot& slot : q->sql.slots) {
+                s += "  slot " + slot.key + ":";
+                for (const std::string& o : slot.options) s += " " + o;
+            }
+            s += "\n";
+        }
+    }
+    if (!app.migrations.empty()) {
+        s += "migrations:\n";
+        for (const Migration& m : app.migrations) {
+            s += "  " + std::to_string(m.number) + "  " + m.fileLabel();
+            if (m.source.str() != "migrations/" + m.fileLabel()) s += "  " + m.source.str();
+            for (const auto& [name, q] : m.queries) s += "  query " + name;
+            s += "\n";
+        }
+    }
+    if (app.seed) s += "seed: " + app.seed->str() + "\n";
     s += "diagnostics:\n";
     for (const Diagnostic& d : app.diagnostics) s += "  " + d.toString() + "\n";
     return s;
+}
+
+std::string Migration::fileLabel() const {
+    if (kind == Kind::Folder) return name + "/";
+    return std::string(source.name());
+}
+
+bool CompiledApp::usesDatabase() const {
+    if (!queries.empty()) return true;
+    for (const Migration& m : migrations) {
+        if (m.usesDatabase()) return true;
+    }
+    return false;
 }
 
 }  // namespace fourfold

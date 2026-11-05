@@ -9,7 +9,9 @@
 namespace fourfold {
 
 std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const CodeTree& code,
-                                            ScriptCompiler* compiler, CompiledApp& app, Diagnostics& diagnostics) {
+                                            ScriptCompiler* compiler, DatabaseSources database, CompiledApp& app,
+                                            Diagnostics& diagnostics) {
+    const RelPath migrations = RelPath::parse("migrations").value();
     const RelPath pages = RelPath::parse("pages").value();
     const RelPath lib = RelPath::parse("lib").value();
     std::vector<CodeFile> pageFiles, libFiles;
@@ -17,6 +19,7 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
     for (const CodeEntry& entry : listing.files) {
         if (entry.path.extension() != ".ms") continue;
         if (entry.path.str() == "access.ms" || entry.path.str() == "limits.ms") continue;
+        if (entry.path.str() == "seed.ms" || entry.path.isWithin(migrations)) continue;   // the database pass's
         std::string name = codeFileName(entry.path);
         std::vector<CodeFile>* into = nullptr;
         if (entry.path.isWithin(pages)) {
@@ -26,7 +29,7 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
         } else if (entry.path.isWithin(lib)) {
             diagnostics.warning(name, "can't be imported: only files directly in code/lib/ can; ignored");
         } else {
-            diagnostics.warning(name, "MiniScript files belong in code/pages/ or code/lib/; ignored");
+            diagnostics.warning(name, "MiniScript files belong in code/pages/, code/lib/ or code/migrations/; ignored");
         }
         if (!into) continue;
         auto file = code.read(entry.path);
@@ -37,12 +40,14 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
         into->push_back(std::move(file).value());
     }
 
-    if (pageFiles.empty() && libFiles.empty()) return {};
+    if (pageFiles.empty() && libFiles.empty() && database.migrations.empty() && !database.seed) return {};
     if (!compiler) {
         diagnostics.error("code", "this app has MiniScript files, but no script compiler was provided");
         return {};
     }
-    CompiledScripts compiled = compiler->compileScripts(pageFiles, libFiles);
+    ScriptSources sources{std::move(pageFiles), std::move(libFiles), std::move(database.migrations),
+                          std::move(database.seed)};
+    CompiledScripts compiled = compiler->compileScripts(sources);
     for (const Diagnostic& d : compiled.diagnostics) {
         if (d.severity == Diagnostic::Severity::Error) {
             diagnostics.error(d.file, d.message, d.line);

@@ -32,6 +32,12 @@ SqliteStatement& SqliteStatement::bindInt(int index, int64_t value) {
     return *this;
 }
 
+SqliteStatement& SqliteStatement::bindDouble(int index, double value) {
+    int rc = sqlite3_bind_double(stmt_, index, value);
+    if (rc != SQLITE_OK && bindError_.empty()) bindError_ = sqlite3_errstr(rc);
+    return *this;
+}
+
 SqliteStatement& SqliteStatement::bindText(int index, std::string_view text) {
     int rc = sqlite3_bind_text64(stmt_, index, text.data(), text.size(), SQLITE_TRANSIENT, SQLITE_UTF8);
     if (rc != SQLITE_OK && bindError_.empty()) bindError_ = sqlite3_errstr(rc);
@@ -72,6 +78,29 @@ Status SqliteStatement::run() {
         if (!row.value()) return {};
     }
 }
+
+int SqliteStatement::columnCount() const { return sqlite3_column_count(stmt_); }
+
+std::string SqliteStatement::columnName(int column) const {
+    const char* name = sqlite3_column_name(stmt_, column);
+    return name ? name : "";
+}
+
+SqliteStatement::Type SqliteStatement::type(int column) const {
+    switch (sqlite3_column_type(stmt_, column)) {
+        case SQLITE_INTEGER: return Type::Integer;
+        case SQLITE_FLOAT: return Type::Real;
+        case SQLITE_TEXT: return Type::Text;
+        case SQLITE_BLOB: return Type::Blob;
+        default: return Type::Null;
+    }
+}
+
+double SqliteStatement::real(int column) const { return sqlite3_column_double(stmt_, column); }
+
+bool SqliteStatement::readOnly() const { return sqlite3_stmt_readonly(stmt_) != 0; }
+
+void SqliteStatement::finish() { sqlite3_reset(stmt_); }
 
 bool SqliteStatement::isNull(int column) const { return sqlite3_column_type(stmt_, column) == SQLITE_NULL; }
 
@@ -154,5 +183,83 @@ Status Sqlite::transaction(const std::function<Status()>& body) {
 }
 
 int64_t Sqlite::changes() const { return sqlite3_changes64(db_); }
+
+Result<std::unique_ptr<SqliteStatement>> Sqlite::prepareOnce(const std::string& sql) {
+    sqlite3_stmt* stmt = nullptr;
+    const char* tail = nullptr;
+    int rc = sqlite3_prepare_v3(db_, sql.c_str(), static_cast<int>(sql.size()), 0, &stmt, &tail);
+    if (rc != SQLITE_OK) return sqliteError(db_, rc, "SQLite");
+    auto owned = std::unique_ptr<SqliteStatement>(new SqliteStatement(db_, stmt));
+    if (!stmt) return makeError(ErrorCode::Invalid, "SQLite: there's no statement to run");
+    // Anything after it must be space and comments only.
+    if (tail && *tail) {
+        sqlite3_stmt* rest = nullptr;
+        rc = sqlite3_prepare_v2(db_, tail, -1, &rest, nullptr);
+        bool another = rc != SQLITE_OK || rest != nullptr;
+        sqlite3_finalize(rest);
+        if (another) return makeError(ErrorCode::Invalid, "SQLite: only one statement may be run at a time");
+    }
+    return owned;
+}
+
+int Sqlite::progress(void* self) {
+    auto* db = static_cast<Sqlite*>(self);
+    return db->deadline_ && std::chrono::steady_clock::now() > *db->deadline_ ? 1 : 0;
+}
+
+void Sqlite::setDeadline(std::optional<std::chrono::steady_clock::time_point> deadline) {
+    deadline_ = deadline;
+    if (deadline) {
+        sqlite3_progress_handler(db_, 1000, &Sqlite::progress, this);
+    } else {
+        sqlite3_progress_handler(db_, 0, nullptr, nullptr);
+    }
+}
+
+namespace {
+
+// Copies `from` into `to` with the online backup API, a step at a time.
+Status copyDatabase(sqlite3* from, sqlite3* to, const std::string& what) {
+    sqlite3_backup* backup = sqlite3_backup_init(to, "main", from, "main");
+    if (!backup) return sqliteError(to, sqlite3_errcode(to), what);
+    int rc;
+    do {
+        rc = sqlite3_backup_step(backup, 256);
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) sqlite3_sleep(20);
+    } while (rc == SQLITE_OK || rc == SQLITE_BUSY || rc == SQLITE_LOCKED);
+    sqlite3_backup_finish(backup);
+    if (rc != SQLITE_DONE) return sqliteError(nullptr, rc, what);
+    return {};
+}
+
+}  // namespace
+
+Status Sqlite::backupTo(const std::string& path) {
+    sqlite3* dest = nullptr;
+    int rc = sqlite3_open_v2(path.c_str(), &dest, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOFOLLOW,
+                             nullptr);
+    if (rc != SQLITE_OK) {
+        Error e = sqliteError(dest, rc, "SQLite backup");
+        sqlite3_close(dest);
+        return e;
+    }
+    Status s = copyDatabase(db_, dest, "SQLite backup");
+    sqlite3_close(dest);
+    return s;
+}
+
+Status Sqlite::restoreFrom(const std::string& path) {
+    sqlite3* src = nullptr;
+    int rc = sqlite3_open_v2(path.c_str(), &src, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOFOLLOW, nullptr);
+    if (rc != SQLITE_OK) {
+        Error e = sqliteError(src, rc, "SQLite restore");
+        sqlite3_close(src);
+        return e;
+    }
+    cache_.clear();   // statements over the old schema
+    Status s = copyDatabase(src, db_, "SQLite restore");
+    sqlite3_close(src);
+    return s;
+}
 
 }  // namespace fourfold

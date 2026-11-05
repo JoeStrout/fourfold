@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include "appdata/database.h"
 #include "compiledapp/compiled_app.h"
 #include "mail/mailer.h"
 #include "partition/config_dir.h"
@@ -76,6 +77,38 @@ struct ProxyConfig {
     std::vector<AddressRange> trust;
 };
 
+// The app's database (overview §3): SQLite in data/ unless config.db names
+// a Postgres server. Read once, when the server starts: changing it takes a
+// restart (a reload keeps the database in use, with a warning).
+struct DatabaseConfig {
+    SqlDialect dialect = SqlDialect::Sqlite;
+    PostgresSettings postgres;   // with dialect Postgres; the password from an engine-only secret
+    size_t poolSize = 4;         // connections
+    DbLimits limits;             // queryTimeout follows budget.seconds unless set
+};
+
+// Deploying and migrating (overview §3, Applying migrations).
+struct DeployConfig {
+    // How long requests wait while migrations run, before a 503.
+    std::chrono::milliseconds migrationWait{30'000};
+    // A migration's own time budget (separate from requests').
+    std::chrono::milliseconds migrationBudget{600'000};
+    // Sign every anonymous visitor out after migrations ran (their
+    // sessions may hold the old shapes).
+    bool clearAnonymousSessions = false;
+};
+
+// Backups (overview §3, Backups).
+struct BackupConfig {
+    // Where backups go: a host path outside every partition. Empty:
+    // private/state/backups/.
+    std::string folder;
+    // Scheduled backups, every this many hours; 0: none.
+    double everyHours = 0;
+    // Automatic backups (before migrations, and scheduled) to keep.
+    size_t keep = 10;
+};
+
 // The secrets from secrets.ms (overview §10, "Secrets: a separate file").
 // A secret with no hosts is engine-only (SMTP passwords and the like); one
 // with hosts will be usable by app code, only toward those hosts (M9).
@@ -93,6 +126,9 @@ struct AppConfig {
     MailConfig mail;
     LimitsConfig limits;
     ProxyConfig proxy;
+    DatabaseConfig db;
+    DeployConfig deploy;
+    BackupConfig backups;
     // Sends mail as configured; null if the transport is None. Thread-safe.
     std::shared_ptr<Mailer> mailer;
     // By name. Only `config` reads the values.

@@ -142,6 +142,7 @@ Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
         if (!fds[i]->valid()) return osError(reals[i].second);
     }
     folders.stateReal = reals[4].second;
+    folders.dataReal = reals[1].second;
     if (newConfig) {
         writeTemplate(folders.config.get(), "app.ms", kAppTemplate);
         writeTemplate(folders.config.get(), "secrets.ms", kSecretsTemplate);
@@ -174,7 +175,7 @@ Result<ConfigDir> AppFolder::configDir() const {
 Result<DataDir> AppFolder::dataDir() const {
     auto fd = duplicate(folders_.data, "data");
     if (!fd) return fd.error();
-    return DataDir(std::move(fd).value());
+    return DataDir(std::move(fd).value(), folders_.dataReal);
 }
 
 Result<Dropbox> AppFolder::dropbox() const {

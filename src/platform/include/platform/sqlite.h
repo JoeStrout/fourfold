@@ -30,6 +30,7 @@ public:
 
     // Parameters are numbered from 1. Each returns *this, for chaining.
     SqliteStatement& bindInt(int index, int64_t value);
+    SqliteStatement& bindDouble(int index, double value);
     SqliteStatement& bindText(int index, std::string_view text);
     SqliteStatement& bindBlob(int index, std::string_view bytes);
     SqliteStatement& bindNull(int index);
@@ -42,9 +43,20 @@ public:
     Status run();
 
     // Columns are numbered from 0, for the current row.
+    enum class Type { Integer, Real, Text, Blob, Null };
+    int columnCount() const;
+    std::string columnName(int column) const;
+    Type type(int column) const;
     bool isNull(int column) const;
     int64_t integer(int column) const;
+    double real(int column) const;
     std::string text(int column) const;   // also for blobs
+
+    // Whether the statement only reads (SELECT, and the like).
+    bool readOnly() const;
+    // Stops a statement part way (done with it before its last row), so it
+    // doesn't hold its read open.
+    void finish();
 
 private:
     friend class Sqlite;
@@ -81,11 +93,29 @@ public:
     // Rows changed by the last INSERT, UPDATE or DELETE.
     int64_t changes() const;
 
+    // A statement prepared for one use, not cached: for SQL whose text isn't
+    // a constant (app queries are cached by statement(), which is better).
+    // Fails if `sql` holds more than one statement.
+    Result<std::unique_ptr<SqliteStatement>> prepareOnce(const std::string& sql);
+
+    // Interrupts whatever runs after `deadline` (an error, "interrupted"),
+    // until cleared with nullopt. For a query's time limit.
+    void setDeadline(std::optional<std::chrono::steady_clock::time_point> deadline);
+
+    // Copies the whole database into the file at `path` (replacing it),
+    // with SQLite's online backup API: a consistent snapshot, even while
+    // others write.
+    Status backupTo(const std::string& path);
+    // The reverse: replaces this database's contents with the file at `path`.
+    Status restoreFrom(const std::string& path);
+
 private:
     explicit Sqlite(sqlite3* db) : db_(db) {}
     Error error(const std::string& what) const;
+    static int progress(void* self);
 
     sqlite3* db_;
+    std::optional<std::chrono::steady_clock::time_point> deadline_;
     std::unordered_map<std::string, std::unique_ptr<SqliteStatement>> cache_;
 };
 

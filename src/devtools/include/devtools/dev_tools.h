@@ -18,6 +18,8 @@
 //   route's rate limits, timing check, challenge and form.
 // - /__dev/limits (M7): the rate-limit counters, the latest requests counted
 //   (and refused), and a button that resets the counters.
+// - /__dev/migrations (M8): which migrations are applied, pending, failed or
+//   changed, with "redo last" and "reset dev data".
 //
 // It's an Observer (compile events come in) and the engine's EngineHooks
 // (requests for /__dev/ and HTML responses go through it). The core never
@@ -52,6 +54,18 @@ public:
     // Where /__dev/limits reads the counters. Set before serving; may be null.
     void setRateStore(RateStore* rates) { rates_ = rates; }
 
+    // What /__dev/migrations shows and does (overview §3, Dev mode), over
+    // the host's app instance. Each call waits.
+    struct MigrationPanel {
+        // {"items": [{number, name, file, state, appliedAt}], "lastError",
+        // "problems": [...], "waiting"}
+        std::function<Datum()> status;
+        // Each returns what happened, for the developer.
+        std::function<std::string()> redoLast;
+        std::function<std::string()> resetData;
+    };
+    void setMigrationPanel(MigrationPanel panel) { migrations_ = std::move(panel); }
+
     // The access report's data: [{url, kind, access, sources, limits,
     // form}], and warnings.
     static Datum accessReport(const CompiledApp& app);
@@ -85,6 +99,9 @@ private:
     std::shared_ptr<Hub> hub_;
     std::function<std::shared_ptr<const CompiledApp>()> currentApp_;   // shared with tasks posted to the loop
     RateStore* rates_ = nullptr;
+    MigrationPanel migrations_;
+    std::mutex messageMutex_;
+    std::string migrationMessage_;   // the last action's outcome, shown once
 };
 
 // The client script served at /__dev/client.js.

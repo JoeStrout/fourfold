@@ -6,9 +6,9 @@ assumes Fourfold is already installed and serving your app with
 `fourfold serve`; setting that up is covered in the
 [admin guide](../admin/admin_guide.md).
 
-*Status: covers what works as of Milestone 7. Features still to come
-(databases, background jobs, outbound HTTP and more) will be added here as
-they arrive.*
+*Status: covers what works as of Milestone 8. Features still to come
+(background jobs, outbound HTTP and more) will be added here as they
+arrive.*
 
 Markdown has its own reference, [FourFold Flavored Markdown](MARKDOWN.md),
 which this guide links to rather than repeats.
@@ -31,23 +31,25 @@ for the language. This guide covers what Fourfold adds to it.
 9. [Shared code: code/lib](#shared-code-codelib)
 10. [Persistent site-wide data: data](#persistent-site-wide-data-data)
 11. [Files in data/: file and RawData](#files-in-data-file-and-rawdata)
-12. [Remembering visitors: session](#remembering-visitors-session)
-13. [One-time messages: session.flash](#one-time-messages-sessionflash)
-14. [Signing in: req.user](#signing-in-requser)
-15. [Who may see what: access rules](#who-may-see-what-access-rules)
-16. [Users and roles: users](#users-and-roles-users)
-17. [Configuration: private/config](#configuration-privateconfig)
-18. [Forms and CSRF protection](#forms-and-csrf-protection)
-19. [Declaring a form: form.x](#declaring-a-form-formx)
-20. [File uploads](#file-uploads)
-21. [Spam and rate limits: code/limits.ms](#spam-and-rate-limits-codelimitsms)
-22. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
-23. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
-24. [Output: print and the dropbox](#output-print-and-the-dropbox)
-25. [Errors and limits](#errors-and-limits)
-26. [Deploying changes](#deploying-changes)
-27. [Developing on your own machine](#developing-on-your-own-machine)
-28. [Quick reference](#quick-reference)
+12. [A database: db.query](#a-database-dbquery)
+13. [Changing the data's shape: migrations](#changing-the-datas-shape-migrations)
+14. [Remembering visitors: session](#remembering-visitors-session)
+15. [One-time messages: session.flash](#one-time-messages-sessionflash)
+16. [Signing in: req.user](#signing-in-requser)
+17. [Who may see what: access rules](#who-may-see-what-access-rules)
+18. [Users and roles: users](#users-and-roles-users)
+19. [Configuration: private/config](#configuration-privateconfig)
+20. [Forms and CSRF protection](#forms-and-csrf-protection)
+21. [Declaring a form: form.x](#declaring-a-form-formx)
+22. [File uploads](#file-uploads)
+23. [Spam and rate limits: code/limits.ms](#spam-and-rate-limits-codelimitsms)
+24. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
+25. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
+26. [Output: print and the dropbox](#output-print-and-the-dropbox)
+27. [Errors and limits](#errors-and-limits)
+28. [Deploying changes](#deploying-changes)
+29. [Developing on your own machine](#developing-on-your-own-machine)
+30. [Quick reference](#quick-reference)
 
 ---
 
@@ -70,6 +72,8 @@ Inside `code/`:
 | `code/frags/` | Pieces of HTML (and Markdown) that pages and code put together |
 | `code/lib/` | MiniScript modules shared by pages |
 | `code/access.ms` | who may see what: [access rules](#who-may-see-what-access-rules) |
+| `code/queries/` | the SQL your code can run: [named queries](#a-database-dbquery) |
+| `code/migrations/` | changes to the data's shape: [migrations](#changing-the-datas-shape-migrations) |
 
 Nothing outside `code/pages/` has a URL, and the only way anything in `data/`
 reaches a visitor is through your code.
@@ -861,6 +865,284 @@ and `info` return `null`.
 
 ---
 
+## A database: `db.query`
+
+For data that outgrows a few JSON files (many rows, searching and sorting,
+several kinds of record that refer to each other), use a SQL database. Out of
+the box it's **SQLite**: a single file, `data/.fourfold/app.sqlite`, made the
+first time it's needed, with real transactions and no server to run. A host
+can switch an app to **Postgres** in its configuration
+([admin guide](../admin/admin_guide.md#a-postgres-database)); your code stays
+the same.
+
+Your code runs only SQL you've written in **`code/queries/`**, one statement
+per file, by the file's name:
+
+```
+-- code/queries/findUser.sql
+SELECT id, name FROM users WHERE email = {{0}}
+```
+
+```
+rows = db.query("findUser", [email])
+if rows isa error then return rows
+if rows.len == 0 then return "No such user"
+name = rows[0].name
+```
+
+There's no way to run SQL from a string. Values go in only through
+placeholders, and are always passed to the database separately from the SQL,
+never pasted into it. So no value, whatever a visitor typed, can change what
+a query does: SQL injection can't happen.
+
+### Placeholders
+
+A placeholder is `{{key}}`, like a template field, where the key is a name or
+an index:
+
+```
+-- code/queries/addNote.sql
+INSERT INTO notes (title, body, author) VALUES ({{title}}, {{body}}, {{author}})
+RETURNING id
+```
+
+- **Names** (`{{title}}`) take their values from a map:
+  `db.query("addNote", {"title": t, "body": b, "author": req.user.id})`.
+  Extra keys are ignored, so you can pass `req.form`, or a row you already
+  have.
+- **Indexes** (`{{0}}`, `{{1}}`, counting from 0) take theirs from a list,
+  `db.query("findUser", [email])`, or from a map with the keys `0` or `"0"`.
+- A key can appear more than once: `WHERE owner = {{user}} OR editor = {{user}}`.
+- A value that's missing is an error; so is a list for a query with named
+  placeholders.
+
+A placeholder stands for a value only, never for SQL: not for a table or
+column name, and not inside quotes. `'{{name}}'` is an error when the app
+compiles ("placeholders can't go inside quotes"); write `{{name}}`, without
+quotes, and the database treats the value as a string anyway.
+
+### Choosing a column: name slots
+
+Sometimes the visitor chooses part of the SQL itself, such as which column
+to sort by. A **name slot** lists the names it may be, and the value picks
+one:
+
+```
+-- code/queries/listNotes.sql
+SELECT id, title, created, stars FROM notes
+WHERE owner = {{user}}
+ORDER BY {{sort: title, created, stars}} {{dir: asc, desc}}
+```
+
+```
+db.query("listNotes", {"user": req.user.id, "sort": req.query.sort, "dir": "desc"})
+```
+
+The chosen name goes into the SQL as you wrote it in the list, as if you'd
+typed it there. A value that isn't on the list (matched ignoring case) is an
+error, `{{sort}} must be title, created or stars`, so nothing a visitor
+sends can become SQL. Each name must be a plain name (letters, digits and
+`_`), or two joined by a dot (`notes.title`); `asc` and `desc` are names
+too. A slot's key follows the same rules as a placeholder's, and can't also
+be used as a value in the same query.
+
+### What comes back
+
+`db.query` returns the statement's rows, as a list of maps by column name.
+A statement that returns no rows (most `INSERT`, `UPDATE` and `DELETE`s)
+returns an empty list. To get a new row's id, add `RETURNING id`, which
+both databases understand.
+
+| In the database | In MiniScript |
+|---|---|
+| NULL | `null` |
+| integers and decimals | numbers |
+| text | strings |
+| booleans (Postgres) | 1 and 0 |
+| `json` and `jsonb` (Postgres) | maps and lists |
+| binary data (BLOB, `bytea`) | an error: store text instead |
+
+Values going in: numbers (whole ones as integers), strings, `null`, and lists
+and maps, which are stored as JSON text.
+
+### Errors and limits
+
+A failed query (a constraint broken, a misspelled column) returns an **error
+value** with the database's own message, such as
+`db.query("addUser"): UNIQUE constraint failed: users.email`. Check with
+`isa error` where you can do something about it; otherwise return it, and
+the visitor sees the error page.
+
+A query may run as long as the request's time budget (`budget.seconds`), and
+return at most 10,000 rows; both can be changed in
+[the configuration](#configuration-privateconfig) (`db.queryTimeoutSeconds`,
+`db.maxRows`). Use `LIMIT` for long lists.
+
+Each `db.query` is its own transaction. (Several queries as one transaction,
+from a request, aren't available yet; a migration's are always one.)
+
+### SQLite and Postgres: variants
+
+The two databases differ in places: how a table gets an auto-numbered key,
+types, date functions, and more. A query (or migration) that must differ can
+have a **variant** for each database, beside the plain file:
+
+```
+code/queries/
+  findUser.sql             used by both
+  recentPosts.sqlite.sql   used on SQLite
+  recentPosts.pg.sql       used on Postgres
+```
+
+A variant replaces the plain file on its database; a variant for the other
+database is ignored. Every variant of a query must use the same placeholder
+keys (their order can differ), so your code passes the same values either
+way. Most apps need few variants, or none, if they keep to SQL both
+understand:
+
+- **Tables:** on SQLite, write `STRICT` after a table's definition, so its
+  columns hold only their declared types, as Postgres's do. For an
+  auto-numbered key, SQLite's `id INTEGER PRIMARY KEY` and Postgres's
+  `id SERIAL PRIMARY KEY` differ: that's the usual first variant.
+- **Times:** store them as ISO text (`"2026-11-05T14:02:12Z"`) or as numbers
+  (seconds), and compare those. Each database's "now" differs
+  (`datetime('now')` and `now()`).
+- **True and false:** use an `INTEGER` column holding 0 and 1. (Postgres
+  `BOOLEAN` columns come back as 1 and 0 too, but SQLite has none.)
+- **Text matching:** `LIKE` (SQLite's ignores case for ASCII, Postgres's
+  doesn't; `lower(x) LIKE lower({{q}})` behaves the same on both). Avoid
+  Postgres's `ILIKE`.
+- **Upserts and new ids:** `INSERT ... ON CONFLICT (...) DO UPDATE` and
+  `RETURNING` work on both.
+- **A value Postgres can't place:** `SELECT {{0}}` alone leaves Postgres
+  unsure of the value's type; write `CAST({{0}} AS TEXT)` (or `{{0}}::text`
+  in a `.pg.sql` variant).
+
+### Using a database: a first table
+
+Tables are made by [migrations](#changing-the-datas-shape-migrations), not
+by your pages. A first one:
+
+```
+-- code/migrations/001_create_notes.sql
+CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT NOT NULL, body TEXT) STRICT;
+```
+
+`fourfold dev` applies it as soon as you save; `examples/tasks` is a
+complete small app.
+
+---
+
+## Changing the data's shape: migrations
+
+A site's data outlives its first design: tables gain columns, data files
+change shape. A **migration** is a numbered file in `code/migrations/` that
+makes one such change. Migrations run in order, once each, and the record of
+which ones have run is kept with the data, so a fresh install (or a restore
+from a backup) knows exactly what to run.
+
+```
+code/migrations/
+  001_create_notes.sql
+  002_add_stars.sql
+  003_backfill_stars/
+    migrate.ms
+    all.sql
+    setStars.sql
+  004_split_guestbook.ms
+```
+
+The number comes first (`001`, or `1`; gaps are fine); the rest of the name
+is up to you. There are three kinds:
+
+- **A `.sql` file** runs as it is, against the database: any number of
+  statements, and no placeholders (there are no values to give it). It can
+  have variants (`001_create_notes.pg.sql`), as queries can.
+- **A folder** is for changes that need logic. Its `migrate.ms` defines
+  `migrate = function()`, which runs with `db`, `data` and `file`. Its
+  `db.query` reaches only the `.sql` files in its own folder, and it can
+  `import` only the other `.ms` files there (copy a helper in from
+  `code/lib/` if you need one). That's on purpose: a migration may run years
+  from now, on a fresh install, and it must do then exactly what it does
+  today, whatever has happened to the rest of the code.
+
+  ```
+  // code/migrations/003_backfill_stars/migrate.ms
+  migrate = function
+      for note in db.query("all")
+          db.query "setStars", {"id": note.id, "stars": note.title.len % 5}
+      end for
+  end function
+  ```
+- **A single `.ms` file** is for data files only (it can't use `db`, or
+  import anything): reshaping what's in `data/`, say.
+
+  ```
+  // code/migrations/004_split_guestbook.ms
+  migrate = function
+      for entry in data.get("guestbook", [])
+          data.append "guestbook/" + entry.year, entry
+      end for
+      data.delete "guestbook"
+  end function
+  ```
+
+`migrate` returning an error value fails the migration. Migrations can't
+send mail, or use sessions or users: they change data, and nothing else.
+Each may run for 10 minutes (`deploy.migrationBudgetSeconds`).
+
+### How they're applied
+
+Before applying new migrations, Fourfold holds new requests (they wait
+rather than fail), lets those already running finish, and **takes a backup**.
+Then it runs the migrations; all their database work is one transaction.
+
+- **If they all succeed**, the new version of the code starts serving, and
+  the held requests go on to it. The pause is usually under a second.
+- **If one fails**, nothing is changed: the database work is undone, the data
+  files are put back from the backup, and the old version goes on serving.
+  The error says which migration failed, and why.
+
+Requests that would wait longer than 30 seconds (`deploy.migrationWaitSeconds`)
+get a 503 page instead: `code/pages/503.html` if you have one ("down for
+maintenance; back shortly"), or a plain one.
+
+**In dev mode**, migrations are applied as soon as you save. **In
+production**, they wait for you: see [Deploying changes](#deploying-changes).
+
+### Rules
+
+- **An applied migration can't change.** Editing one afterward is a compile
+  error ("002_add_stars.sql was changed after it was applied; write a new
+  migration instead"). In dev mode, "redo the last migration" (below) is how
+  you fix one you're still writing.
+- **There are no "down" migrations.** To undo one, restore the backup taken
+  before it, or write a new migration that reverses it.
+- **A new migration numbered below one already applied** (say, from merging
+  two lines of work) is a compile error: renumber it.
+- **Code older than the data is refused.** If the data has migration 7 and
+  the code being deployed stops at 5, it would run against a shape it doesn't
+  know, so it doesn't run. (The admin guide has the emergency override.)
+- Sessions aren't migrated: a `session` written by old code keeps its old
+  shape, so code should tolerate that. (Your host can clear anonymous
+  sessions after migrations: `deploy.clearAnonymousSessions`.)
+
+### Sample data: `code/seed.ms`
+
+In dev mode, `code/seed.ms`, if you have one, runs after the migrations on a
+fresh database (and after "reset dev data"), to fill it with sample content.
+It's an ordinary script with the app's `db.query`, `data`, `file` and
+`code/lib/`. It never runs in production.
+
+```
+// code/seed.ms
+for title in ["Buy milk", "Write the report"]
+    db.query "addNote", {"title": title, "body": ""}
+end for
+```
+
+---
+
 ## Remembering visitors: `session`
 
 `session` is a map that belongs to one visitor. Whatever you put in it is
@@ -1220,6 +1502,17 @@ on a server is covered in the [admin guide](../admin/admin_guide.md#mail-for-sig
 | `limits.signedIn` | `"300/minute"` | the same per user, for signed-in visitors |
 | `limits.challengeBits` | 16 (4 in dev) | how hard a proof-of-work puzzle is; each bit doubles the work |
 | `proxy.trust` | `[]` | addresses (or ranges, `"10.0.0.0/8"`) of a reverse proxy whose `X-Forwarded-For` is believed; see the [admin guide](../admin/admin_guide.md#behind-a-reverse-proxy) |
+| `db.url` | none: SQLite | a Postgres database, `"postgres://host/dbname"`; see the [admin guide](../admin/admin_guide.md#a-postgres-database) |
+| `db.passwordSecret`, `db.schema` | | Postgres: the secret holding the password, and a schema to work in |
+| `db.pool` | 4 | connections to the database |
+| `db.queryTimeoutSeconds` | `budget.seconds` | how long one query may run |
+| `db.maxRows` | 10,000 | the most rows one query may return |
+| `deploy.migrationWaitSeconds` | 30 | how long requests wait while migrations run, before a 503 |
+| `deploy.migrationBudgetSeconds` | 600 | how long one migration may run |
+| `deploy.clearAnonymousSessions` | `false` | sign out every anonymous visitor after migrations |
+| `backups.folder` | `private/state/backups/` | where backups go: a full path, outside the app's other folders |
+| `backups.everyHours` | 0 (none) | take a backup on a schedule |
+| `backups.keep` | 10 | how many automatic backups (before migrations, and scheduled) to keep |
 
 **Secrets** (passwords and API keys) go in `private/config/secrets.ms`, so
 `app.ms` can be shared or kept in version control while `secrets.ms` isn't:
@@ -1785,6 +2078,21 @@ Fourfold then compiles the new code and switches to it:
 - Changes to `private/config/` don't need a deploy: they're read again on
   their own (see [Configuration](#configuration-privateconfig)).
 
+**A deploy with new [migrations](#changing-the-datas-shape-migrations)**
+compiles, but doesn't go live on its own: the old version keeps serving, and
+the engine log says how many migrations are waiting. When you're ready,
+apply them:
+
+```sh
+fourfold migrate path/to/myapp
+```
+
+It asks the running server to hold requests, back up, migrate and switch to
+the new version, and prints the outcome. (If no server is running, it does
+the work itself.) A fresh install has every migration pending, so
+`fourfold serve` won't start until you've run `fourfold migrate`, or you
+start it with `fourfold serve --migrate`.
+
 Since anything in `code/` with an error stops the whole deploy, it's best to
 check your changes locally first.
 
@@ -1823,6 +2131,13 @@ loop:
   URL, who may use it, and why; and its rate limits, spam checks and form.
 - **Rate limits**, at `/__dev/limits` (also in the corner menu): the counters,
   the latest requests counted or refused, and a button to reset them.
+- **Migrations** are applied as soon as you save one (with a backup first),
+  and `code/seed.ms` fills a fresh database with sample data. `/__dev/migrations`
+  shows which are applied, pending, failed or changed, with two buttons:
+  **redo the last migration** (go back to the backup from before it, and
+  apply what's there now: for editing a migration until it's right) and
+  **reset dev data** (empty `data/` and the database, after a backup, then
+  run every migration and the seed). Both work with SQLite only.
 - **Proof-of-work puzzles** are very easy, so testing isn't slowed.
 
 Dev mode listens only on your own machine (`localhost`), over plain HTTP.
@@ -1840,13 +2155,16 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `code/pages/x.ms` | its code: `render`, `get.*`, `post.*` |
 | `code/pages/x.md` | a Markdown page at `/x`, and as Markdown at `/x.md` |
 | `code/pages/dir/index.html` | the page at `/dir/` |
-| `code/pages/404.html`, `500.html`, `429.html` | the error pages |
+| `code/pages/404.html`, `500.html`, `429.html`, `503.html` | the error pages (503: while migrations run too long) |
 | `code/pages/markdown.css` | styles for rendered Markdown |
 | `code/frags/x.html`, `x.md` | the fragment `x` |
 | `code/frags/layout/markdown.html` | the page around Markdown pages |
 | `code/lib/x.ms` | the module for `import "x"` |
 | `code/access.ms` | access rules: `rules["/path"] = "login"` |
 | `code/limits.ms` | rate limits and spam checks: `limits["/path"] = "5/minute"` |
+| `code/queries/x.sql` | the named query `x`; `x.sqlite.sql`, `x.pg.sql` for one database |
+| `code/migrations/001_x.sql` | a migration: SQL, a folder with `migrate.ms`, or a `.ms` file |
+| `code/seed.ms` | sample data for a fresh dev database |
 | `code/frags/auth/layout.html` | the page around the sign-in pages |
 | `code/.deploy` | touch it to deploy |
 | `private/config/app.ms` | the configuration: `config = {}` |
@@ -1859,6 +2177,7 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `{{name}}` | a field |
 | `{{user.name}}` | a field inside a map |
 | `{{> header}}` | include `frags/header` |
+| `{{key}}` in a `.sql` file | a value for the query: `{{title}}` from a map, `{{0}}` from a list |
 | `{{flash}}` | `session.flash`, if any; showing it removes it |
 | `\{{` | a literal `{{` |
 | `[[` | reserved in `.md` files in `code/`; write `\[[` |
@@ -1902,6 +2221,7 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `dropbox.write(name, text)` | null |
 | `users.get(id)`, `users.find(email)` | the user's map, or null |
 | `users.grant(id, role)`, `users.revoke(id, role)` | null |
+| `db.query(name, values=null)` | the rows, a list of maps |
 
 ### Globals
 
@@ -1912,4 +2232,5 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `session` | this visitor's map, saved if changed; `session.flash` is removed once a page shows it |
 | `get`, `post` | maps of handlers |
 | `form` | a map of form declarations: `form.sign` for `post.sign` |
+| `migrate` | in a migration: the function that makes the change |
 | `render` | the page's render function, if it has one |

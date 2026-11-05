@@ -100,16 +100,71 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
     });
 }
 
+void ScriptHost::Impl::startMigration(std::shared_ptr<const CompiledApp> app, int number, RunContext context,
+                                      ScriptHost::Done done) {
+    const ScriptBundle* bundle = app ? app->scripts.get() : nullptr;
+    auto run = std::make_unique<Run>();
+    run->host = this;
+    run->app = app;
+    run->bundle = bundle;
+    run->context = std::move(context);
+    run->done = std::move(done);
+    // No session or users in a migration or the seed (they change the
+    // app's data, nothing else), and no rate limits.
+    run->context.session.reset();
+    run->context.users = nullptr;
+    run->context.rates = nullptr;
+    run->context.form.reset();
+    if (number < 0) {
+        if (!bundle || !bundle->seed) {
+            run->done(errorOutcome("no compiled code/seed.ms", "code/seed.ms"));
+            return;
+        }
+        run->kind = Run::Kind::Seed;
+        run->fileName = bundle->seed->fileName;
+        run->libs = &bundle->libs;
+        run->context.queries = &app->queries;
+        prepareInterpreter(*run, bundle->seed->functions);
+        schedule(std::move(run));
+        return;
+    }
+    auto it = bundle ? bundle->migrations.find(number) : decltype(bundle->migrations.end()){};
+    const Migration* migration = nullptr;
+    for (const Migration& m : app->migrations) {
+        if (m.number == number) migration = &m;
+    }
+    if (!bundle || it == bundle->migrations.end() || !migration) {
+        run->done(errorOutcome("no compiled migration " + std::to_string(number), "code/migrations"));
+        return;
+    }
+    run->kind = Run::Kind::Migration;
+    run->migration = &it->second;
+    run->fileName = it->second.fileName;
+    run->libs = &it->second.helpers;
+    // Its own queries only (overview §3, A migration brings its own SQL); a
+    // single-file migration has no database at all.
+    run->context.queries = &migration->queries;
+    if (!migration->usesDatabase()) run->context.db = nullptr;
+    prepareInterpreter(*run, it->second.functions);
+    schedule(std::move(run));
+}
+
+const ScriptBudget& ScriptHost::Impl::budgetOf(const Run& run) const {
+    return run.context.budget ? *run.context.budget : options.budget;
+}
+
 void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
     run->id = nextRunId++;
     uint64_t id = run->id;
-    run->deadline = loop->addTimer(options.budget.wallClock, [this, id] {
+    std::chrono::milliseconds wallClock = budgetOf(*run).wallClock;
+    run->deadline = loop->addTimer(wallClock, [this, id, wallClock] {
         auto it = runs.find(id);
         if (it == runs.end()) return;
         Run& r = *it->second;
         r.deadline = 0;
-        finish(r, errorOutcome(overBudget(r, "the request took longer than its time budget (" +
-                                                 describeMs(options.budget.wallClock) + ")"),
+        std::string what = r.kind == Run::Kind::Migration ? "the migration" : r.kind == Run::Kind::Seed ? "the seed"
+                                                                                                         : "the request";
+        finish(r, errorOutcome(overBudget(r, what + " took longer than its time budget (" + describeMs(wallClock) + ")"),
                                r.fileName));
     });
     bool parked = run->parked;   // a run waiting for its session starts parked
@@ -156,8 +211,27 @@ bool ScriptHost::Impl::slice(Run& run) {
         return false;
     }
     if (!vm.IsRunning()) {
-        if (run.kind == Run::Kind::Discovery || run.kind == Run::Kind::Data) {
+        if (run.kind == Run::Kind::Discovery || run.kind == Run::Kind::Data || run.kind == Run::Kind::Seed) {
             finish(run, HandlerOutcome{});   // the top level ran; `discovered` reads its globals
+            return false;
+        }
+        if (run.kind == Run::Kind::Migration) {
+            if (run.phase == Run::Phase::TopLevel) {
+                if (!run.interp.GetGlobalValue("migrate").IsFuncRef()) {
+                    finish(run, errorOutcome("a migration must define migrate = function()", run.fileName));
+                    return false;
+                }
+                run.phase = Run::Phase::Handler;
+                vm.Reset(run.migration->stub.functions, run.interp.GetGlobals());
+                return true;
+            }
+            MiniScript::Value result = run.interp.GetGlobalValue("_ff_result");
+            HandlerOutcome o;
+            if (result.IsError()) {
+                o.kind = HandlerOutcome::Kind::Error;
+                o.error = scriptErrorFrom(result, run.fileName);
+            }
+            finish(run, std::move(o));
             return false;
         }
         if (run.phase == Run::Phase::TopLevel) {
@@ -176,10 +250,10 @@ bool ScriptHost::Impl::slice(Run& run) {
         finish(run, outcomeFromResult(run));
         return false;
     }
-    uint64_t limit = run.instructionLimit ? run.instructionLimit : options.budget.instructions;
+    uint64_t limit = run.instructionLimit ? run.instructionLimit : budgetOf(run).instructions;
     if (run.instructions >= limit) {
-        finish(run, errorOutcome(overBudget(run, "the request used more than its budget of " +
-                                                     std::to_string(options.budget.instructions) +
+        finish(run, errorOutcome(overBudget(run, std::string(run.kind == Run::Kind::Request ? "the request" : "the run") +
+                                                     " used more than its budget of " + std::to_string(limit) +
                                                      " instructions (an endless loop?)"),
                                  run.fileName));
         return false;
@@ -279,13 +353,13 @@ ScriptHost::~ScriptHost() {
     g_hostExists = false;
 }
 
-CompiledScripts ScriptHost::compileScripts(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs) {
+CompiledScripts ScriptHost::compileScripts(const ScriptSources& sources) {
     // If the host is destroyed mid-compile, the promise is broken, not kept.
     auto finished = std::make_shared<std::promise<CompiledScripts>>();
     std::future<CompiledScripts> result = finished->get_future();
     Impl* impl = impl_.get();
-    impl->loop->post([impl, &pages, &libs, finished] {
-        impl->compile(pages, libs, [finished](CompiledScripts out) { finished->set_value(std::move(out)); });
+    impl->loop->post([impl, &sources, finished] {
+        impl->compile(sources, [finished](CompiledScripts out) { finished->set_value(std::move(out)); });
     });
     try {
         return result.get();
@@ -312,6 +386,23 @@ void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler,
         impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->context),
                        std::move(args->done));
     });
+}
+
+void ScriptHost::runMigration(std::shared_ptr<const CompiledApp> app, int number, RunContext context, Done done) {
+    struct Args {
+        std::shared_ptr<const CompiledApp> app;
+        RunContext context;
+        Done done;
+    };
+    auto args = std::make_shared<Args>(Args{std::move(app), std::move(context), std::move(done)});
+    Impl* impl = impl_.get();
+    impl->loop->post([impl, args, number] {
+        impl->startMigration(std::move(args->app), number, std::move(args->context), std::move(args->done));
+    });
+}
+
+void ScriptHost::runSeed(std::shared_ptr<const CompiledApp> app, RunContext context, Done done) {
+    runMigration(std::move(app), -1, std::move(context), std::move(done));
 }
 
 void ScriptHost::setBudget(ScriptBudget budget) {

@@ -8,6 +8,7 @@
 #include "app_server.h"
 #include "base/version.h"
 #include "cgi.h"
+#include "data_commands.h"
 
 namespace fourfold::cli {
 
@@ -24,8 +25,15 @@ void printUsage(std::ostream& out) {
            "Commands:\n"
            "  dev <app-folder> [--port N]   Serve an app on localhost for development\n"
            "  serve <app-folder> [--listen ADDRESS:PORT] [--host NAME]... [--plain-http]\n"
-           "        [--server-config FILE]  Serve an app for real use, behind a proxy that\n"
-           "                                provides HTTPS\n"
+           "        [--server-config FILE] [--migrate]\n"
+           "                                Serve an app for real use, behind a proxy that\n"
+           "                                provides HTTPS (--migrate: apply pending\n"
+           "                                migrations first)\n"
+           "  migrate <app-folder>          Apply the app's pending migrations (asking its\n"
+           "                                server, if it's running), after a backup\n"
+           "  backup <app-folder>           Back up the app's data and state\n"
+           "  restore <app-folder> [NAME]   List the app's backups, or restore one (with\n"
+           "        [--data-only]           the app stopped)\n"
            "  version                       Print the Fourfold version\n"
            "  help                          Show this message\n";
 }
@@ -103,6 +111,8 @@ struct ServeArgs {
     std::vector<std::string> hosts;
     bool plainHttp = false;
     std::string serverConfig;
+    bool migrate = false;
+    bool allowOlderCode = false;
 };
 
 bool parseServeArgs(const std::vector<std::string>& args, ServeArgs& out, std::string& error) {
@@ -144,6 +154,10 @@ bool parseServeArgs(const std::vector<std::string>& args, ServeArgs& out, std::s
             }
         } else if (a == "--plain-http") {
             out.plainHttp = true;
+        } else if (a == "--migrate") {
+            out.migrate = true;
+        } else if (a == "--allow-older-code") {
+            out.allowOlderCode = true;
         } else if (!a.empty() && a[0] == '-') {
             error = "unknown option '" + a + "'";
             return false;
@@ -167,7 +181,7 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
     if (!parseServeArgs(args, serve, problem)) {
         err << "fourfold serve: " << problem
             << "\nUsage: fourfold serve <app-folder> [--listen ADDRESS:PORT] [--host NAME]... [--plain-http] "
-               "[--server-config FILE]\n";
+               "[--server-config FILE] [--migrate]\n";
         return kExitUsage;
     }
     ServerOptions options;
@@ -177,6 +191,8 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
     options.hosts = serve.hosts;
     options.https = !serve.plainHttp;
     options.serverConfig = serve.serverConfig;
+    options.migrateOnStart = serve.migrate;
+    options.allowOlderCode = serve.allowOlderCode;
 
     auto server = AppServer::start(serve.folder, options, out, err);
     if (!server) return kExitError;
@@ -225,6 +241,9 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     if (command == "serve") {
         return runServe(rest, out, err);
     }
+    if (command == "migrate") return runMigrate(rest, out, err);
+    if (command == "backup") return runBackup(rest, out, err);
+    if (command == "restore") return runRestore(rest, out, err);
     if (command == "cgi") {
         // Unlisted: M5's CGI spike. `fourfold cgi <app-folder>`, run by a web
         // server as a CGI program; FOURFOLD_CGI_TIMING=1 reports timings.

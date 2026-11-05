@@ -7,12 +7,18 @@
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
+#include <atomic>
 #include <mutex>
+#include <optional>
+#include <thread>
 #include <set>
 #include <string>
 #include <vector>
 
+#include "appdata/backup.h"
 #include "appdata/data_files.h"
+#include "appdata/database.h"
+#include "partition/file_lock.h"
 #include "authflow/auth_flow.h"
 #include "config/app_config.h"
 #include "devtools/dev_tools.h"
@@ -48,7 +54,24 @@ struct ServerOptions {
     // and https:// as the site's origin. Dev mode is plain HTTP.
     bool https = false;
     LifecycleOptions lifecycle;
+
+    // Listen for requests. Off for the CLI's `migrate` and `backup` when no
+    // server is running: everything is opened, the app compiled, and the
+    // command works through the same app instance.
+    bool listen = true;
+    // `fourfold serve --migrate`: apply pending migrations before serving
+    // (otherwise serve won't start with any pending).
+    bool migrateOnStart = false;
+    // The emergency override: serve code older than the data's migrations.
+    bool allowOlderCode = false;
 };
+
+// Whether a Fourfold server (dev or serve) is running the app at `folder`
+// now: it holds the app's server lock.
+bool serverRunning(const std::string& folder);
+
+// Takes the app's server lock, if it's free (nullopt if a server holds it).
+Result<std::optional<FileLock>> takeServerLock(const StateDir& state);
 
 class AppServer : private Observer {
 public:
@@ -85,6 +108,12 @@ public:
     // The config in use.
     std::shared_ptr<const AppConfig> config() const { return engine_->config(); }
     ScriptHost::Stats scriptStats() { return scripts_->stats(); }
+    // The app instance: migrations and backups.
+    AppInstance& instance() { return *instance_; }
+    // The app's database (opened on first use), or null.
+    Database* database() { return database_.get(); }
+    BackupService& backups() { return *backups_; }
+    SchemaGate::Stats schemaStats() const { return schema_.stats(); }
 
 private:
     AppServer(std::ostream& out, std::ostream& err) : out_(out), err_(err) {}
@@ -107,6 +136,12 @@ private:
     void configLoaded(const ConfigLoad& load, bool first);
     // Where dev mode's printed mail goes.
     void printMail(const std::string& text);
+    // Requests from `fourfold migrate` and `fourfold backup` (files in
+    // private/state/control/): checked now, and every so often.
+    void scheduleControl(std::chrono::milliseconds delay);
+    void checkControl();
+    // Scheduled backups (config.backups.everyHours).
+    void scheduleBackup(std::chrono::milliseconds delay);
 
     std::ostream& out_;
     std::ostream& err_;
@@ -123,6 +158,16 @@ private:
     // In order of construction. Destroyed in a different order (see the
     // destructor): whatever posts to or calls into something must stop first.
     std::unique_ptr<EventLoop> loop_;
+    std::optional<FileLock> serverLock_;   // held while this server runs the app
+    std::unique_ptr<StateDir> state_;
+    std::unique_ptr<DataDir> dataDir_;     // for migrations and backups
+    std::unique_ptr<Database> database_;
+    std::string dbUrl_, dbSchema_;         // the database it started with
+    std::unique_ptr<BackupService> backups_;
+    SchemaGate schema_;
+    DataServices dataServices_;
+    std::thread controlThread_;            // a control request being carried out
+    std::atomic<bool> controlBusy_{false};
     std::unique_ptr<EngineLog> log_;
     std::unique_ptr<Dropbox> dropbox_;
     std::unique_ptr<ScriptHost> scripts_;

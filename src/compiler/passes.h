@@ -37,10 +37,24 @@ std::string lowerExtension(const RelPath& path);
 // (and the Markdown layout), resolving includes.
 void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp& app, Diagnostics& diagnostics);
 
-// Compiles the .ms files in code/pages/ and code/lib/ into app.scripts, and
-// returns the handlers each page file defines.
+// What the database pass hands the scripts pass: migrations' MiniScript and
+// code/seed.ms.
+struct DatabaseSources {
+    std::vector<MigrationScript> migrations;
+    std::optional<CodeFile> seed;
+};
+
+// Named queries (code/queries/), migrations (code/migrations/) and the seed
+// (code/seed.ms), for `dialect`, into the app.
+DatabaseSources databasePass(const CodeListing& listing, const CodeTree& code, SqlDialect dialect, CompiledApp& app,
+                             Diagnostics& diagnostics);
+
+// Compiles the .ms files in code/pages/ and code/lib/ into app.scripts, with
+// the migrations' and the seed's, and returns the handlers each page file
+// defines.
 std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const CodeTree& code,
-                                            ScriptCompiler* compiler, CompiledApp& app, Diagnostics& diagnostics);
+                                            ScriptCompiler* compiler, DatabaseSources database, CompiledApp& app,
+                                            Diagnostics& diagnostics);
 
 // Routes for code/pages/: pages, handlers, static files, and the 404 and 500
 // pages.

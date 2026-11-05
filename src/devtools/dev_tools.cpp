@@ -97,6 +97,8 @@ td:first-child { font-family: ui-monospace, Menlo, monospace; }
 tr.restricted td:nth-child(3) { font-weight: 600; color: #8a3b00; }
 .note { color: #666; }
 .warning { background: #fff4d6; padding: .4rem .75rem; border-radius: 4px; }
+.done { background: #e3f4e1; padding: .4rem .75rem; border-radius: 4px; }
+form { margin: 1rem 0; }
 )css";
 
 }  // namespace
@@ -323,6 +325,70 @@ Datum DevTools::accessReport(const CompiledApp& app) {
 
 std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const AdmittedRequest& admitted) {
     const std::string& path = admitted.path.path;
+    if ((path == "/__dev/migrations/redo" || path == "/__dev/migrations/reset") && request.method == "POST") {
+        // Only from the panel itself, as for /__dev/limits/reset.
+        const std::string* origin = request.headers.get("Origin");
+        const std::string* host = request.headers.get("Host");
+        if (!origin || !host || *origin != "http://" + *host) return HttpResponse::text(403, "Forbidden\n");
+        std::string message;
+        if (path == "/__dev/migrations/redo" && migrations_.redoLast) message = migrations_.redoLast();
+        if (path == "/__dev/migrations/reset" && migrations_.resetData) message = migrations_.resetData();
+        {
+            std::lock_guard<std::mutex> lock(messageMutex_);
+            migrationMessage_ = message;
+        }
+        HttpResponse r;
+        r.status = 303;
+        r.headers.set("Location", "/__dev/migrations");
+        return r;
+    }
+    if (path == "/__dev/migrations" && (request.method == "GET" || request.method == "HEAD")) {
+        HttpResponse r;
+        r.headers.set("Cache-Control", "no-store");
+        r.headers.set("Content-Type", "text/html; charset=utf-8");
+        std::string html = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Migrations</title><style>";
+        html += kReportStyle;
+        html += "</style></head>\n<body><main>\n<h1>Migrations</h1>\n<p class=\"note\">code/migrations/, and "
+                "which of them this app's data has. In dev mode they're applied after each recompile, with a "
+                "backup first. Dev mode only.</p>\n";
+        std::string message;
+        {
+            std::lock_guard<std::mutex> lock(messageMutex_);
+            message.swap(migrationMessage_);
+        }
+        if (!message.empty()) html += "<p class=\"done\">" + escapeHtml(message) + "</p>\n";
+        Datum status = migrations_.status ? migrations_.status() : Datum::map({});
+        const Datum::MapItems& st = status.kind() == Datum::Kind::Map ? status.asMap() : Datum::MapItems{};
+        if (auto it = st.find("problems"); it != st.end() && it->second.kind() == Datum::Kind::List) {
+            for (const Datum& p : it->second.asList()) {
+                html += "<p class=\"warning\">" + escapeHtml(p.asString()) + "</p>\n";
+            }
+        }
+        if (auto it = st.find("lastError"); it != st.end() && it->second.kind() == Datum::Kind::String &&
+                                              !it->second.asString().empty()) {
+            html += "<p class=\"warning\">Last failure: " + escapeHtml(it->second.asString()) + "</p>\n";
+        }
+        html += "<table>\n<tr><th>#</th><th>Migration</th><th>State</th><th>Applied</th></tr>\n";
+        if (auto it = st.find("items"); it != st.end() && it->second.kind() == Datum::Kind::List) {
+            for (const Datum& item : it->second.asList()) {
+                const auto& m = item.asMap();
+                std::string state = m.at("state").asString();
+                html += "<tr" + std::string(state == "applied" ? "" : " class=\"restricted\"") + "><td>" +
+                        std::to_string(static_cast<int>(m.at("number").asNumber())) + "</td><td>" +
+                        escapeHtml(m.at("file").asString()) + "</td><td>" + escapeHtml(state) + "</td><td>" +
+                        escapeHtml(m.at("appliedAt").asString()) + "</td></tr>\n";
+            }
+        }
+        html += "</table>\n"
+                "<form method=\"post\" action=\"/__dev/migrations/redo\"><button>Redo the last migration</button> "
+                "<span class=\"note\">Goes back to the backup taken before the last migrations, and applies "
+                "them again as they are now: for editing a migration until it's right.</span></form>\n"
+                "<form method=\"post\" action=\"/__dev/migrations/reset\"><button>Reset dev data</button> "
+                "<span class=\"note\">Empties data/ and the database (after a backup), runs every migration, "
+                "then code/seed.ms.</span></form>\n</main></body></html>\n";
+        r.body = std::move(html);
+        return r;
+    }
     if (path == "/__dev/limits/reset" && request.method == "POST") {
         // Only from the dev tools' own page: a page on another site can't
         // reset the counters (the dev server answers only to localhost, but

@@ -11,7 +11,7 @@ using MiniScript::Value;
 
 Run* dataRun(Context& ctx, const std::string& function, DataFiles*& data, IntrinsicResult& error) {
     Run* run = Run::of(ctx);
-    if (!run || run->kind != Run::Kind::Request) {
+    if (!run || !run->canPark()) {
         error = intrinsicError(function + " can't be used at a page's top level");
         return nullptr;
     }

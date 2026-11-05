@@ -1,0 +1,6 @@
+<form id="addForm" method="post" action="/add" hx-post="/add" hx-target="#board" hx-swap="outerHTML">
+  <input name="title" value="{{title}}" placeholder="Something to do" autofocus>
+  <label><input type="checkbox" name="urgent" checked="{{urgent}}"> urgent</label>
+  <button>Add</button>
+  <span class="error">{{errors.title}}</span>
+</form>

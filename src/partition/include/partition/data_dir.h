@@ -12,6 +12,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -35,10 +36,16 @@ struct FileInfo {
     int64_t modifiedNs = 0;     // since the epoch
 };
 
+// What a backup's copy of a partition leaves out: given a path relative to
+// the partition ("a/b.txt", ".fourfold/locks") and whether it's a folder,
+// true to skip it (and, for a folder, everything in it).
+using TreeSkip = std::function<bool(const std::string& path, bool folder)>;
+
 class DataDir {
 public:
-    // Over `fd`, an open data/ folder.
-    explicit DataDir(Fd fd) : fd_(std::move(fd)) {}
+    // Over `fd`, an open data/ folder; `hostPath` is its real path, for
+    // SQLite, which opens its database by name (empty: no database).
+    explicit DataDir(Fd fd, std::string hostPath = {}) : fd_(std::move(fd)), hostPath_(std::move(hostPath)) {}
 
     // TooLarge if the file is over `maxBytes`.
     Result<std::string> read(const RelPath& path, size_t maxBytes) const;
@@ -62,8 +69,29 @@ public:
     // RelPath can't name that folder, so app code can't reach it).
     Result<Fd> lockFile(std::string_view key) const;
 
+    // --- Engine use only: data/.fourfold/, which app code can't name. ---
+
+    // A file in data/.fourfold/ ("migrations.json"): nullopt if missing.
+    Result<std::optional<std::string>> readEngineFile(const std::string& name, size_t maxBytes) const;
+    // Replaced all at once.
+    Status writeEngineFile(const std::string& name, std::string_view bytes) const;
+    // The host path of the app's SQLite database, data/.fourfold/app.sqlite
+    // (its folder is created if missing). Fails if there's no host path.
+    Result<std::string> databasePath() const;
+
+    // For backups (overview §3, Backups): every file in data/, dot-names
+    // included, copied into a backup's folder, or back from one (removing
+    // what isn't in it). What `skip` names is left alone.
+    Status copyOut(const std::string& hostFolder, const TreeSkip& skip) const;
+    Status copyIn(const std::string& hostFolder, const TreeSkip& skip) const;
+
+    // Removes everything in data/ except what `skip` names (dev mode's
+    // "reset dev data").
+    Status clear(const TreeSkip& skip) const;
+
 private:
     Fd fd_;
+    std::string hostPath_;
 };
 
 class Dropbox {
@@ -91,12 +119,21 @@ public:
     Status create(const RelPath& path, std::string_view bytes) const;
     Status append(const RelPath& path, std::string_view bytes) const;
     Result<bool> exists(const RelPath& path) const;
+    // Removes a file; NotFound if there's none.
+    Status remove(const RelPath& path) const;
     // The lock file for `key`, in private/state/locks/.
     Result<Fd> lockFile(std::string_view key) const;
 
     // The host path of a file here ("…/private/state/state.db"), for SQLite
     // only. The file's folder is created if missing.
     Result<std::string> sqlitePath(const RelPath& path) const;
+    // The host path of folder `name` here ("backups"), created if missing:
+    // for backups, which are written by host path.
+    Result<std::string> folderPath(const RelPath& name) const;
+
+    // For backups, as DataDir's.
+    Status copyOut(const std::string& hostFolder, const TreeSkip& skip) const;
+    Status copyIn(const std::string& hostFolder, const TreeSkip& skip) const;
 
 private:
     Fd fd_;

@@ -21,12 +21,27 @@ fourfold_component(compiledapp DEPS base partition template)   # CompiledApp: th
 
 # --- Subsystems ---
 fourfold_component(state DEPS base partition platform)   # engine stores in private/state/: sessions, locks, log
-fourfold_component(appdata DEPS base partition platform state)   # the app's data: Tier 1 files (later databases)
+fourfold_component(appdata DEPS base partition platform state compiledapp)   # the app's data: files, SQLite, Postgres
+# Postgres support, if libpq can be found (pg_config, or FOURFOLD_PG_CONFIG).
+find_program(FOURFOLD_PG_CONFIG pg_config)
+if(FOURFOLD_PG_CONFIG)
+    execute_process(COMMAND ${FOURFOLD_PG_CONFIG} --includedir OUTPUT_VARIABLE pg_include OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(COMMAND ${FOURFOLD_PG_CONFIG} --libdir OUTPUT_VARIABLE pg_libdir OUTPUT_STRIP_TRAILING_WHITESPACE)
+    find_library(FOURFOLD_LIBPQ NAMES pq HINTS ${pg_libdir} NO_DEFAULT_PATH)
+endif()
+if(FOURFOLD_LIBPQ)
+    message(STATUS "Postgres support: yes (${FOURFOLD_LIBPQ})")
+    target_include_directories(ff_appdata SYSTEM PRIVATE ${pg_include})
+    target_link_libraries(ff_appdata PRIVATE ${FOURFOLD_LIBPQ})
+    target_compile_definitions(ff_appdata PRIVATE FOURFOLD_HAVE_POSTGRES=1)
+else()
+    message(STATUS "Postgres support: no (libpq not found; install it, or set FOURFOLD_PG_CONFIG)")
+endif()
 find_package(CURL REQUIRED)
 fourfold_component(mail DEPS base platform LIBS CURL::libcurl)   # sending email: SMTP, Postmark, or a dev log
 fourfold_component(script DEPS base partition platform template markdown compiledapp appdata
     LIBS fourfold::ms2)                                 # the script thread; the only user of MS2
-fourfold_component(config DEPS base partition compiledapp script state mail)   # private/config/ → AppConfig
+fourfold_component(config DEPS base partition compiledapp appdata script state mail)   # private/config/ → AppConfig
 fourfold_component(compiler DEPS base partition template markdown compiledapp script)
 
 # --- Engine ---
@@ -40,8 +55,8 @@ fourfold_embed(pipeline kMarkdownCss ${CMAKE_SOURCE_DIR}/src/engine/pipeline/ass
 fourfold_embed(pipeline kChallengeScript ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/challenge.js)
 fourfold_component(authflow DIR engine/authflow   # the /__auth/ pages: magic links, sign-out, fake login
     DEPS base platform template compiledapp config mail state http pipeline)
-fourfold_component(lifecycle DIR engine/lifecycle   # watch, compile, swap
-    DEPS base partition compiledapp script compiler config observer pipeline platform)
+fourfold_component(lifecycle DIR engine/lifecycle   # watch, compile, migrate, swap; backups
+    DEPS base partition compiledapp appdata script compiler config observer pipeline platform)
 
 # --- Hosts ---
 fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform)

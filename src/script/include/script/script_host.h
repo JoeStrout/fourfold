@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "appdata/data_files.h"
+#include "appdata/database.h"
 #include "base/datum.h"
 #include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
@@ -216,6 +217,13 @@ struct RunContext {
     // JavaScript.
     std::shared_ptr<const FormSpec> form{};
     std::string pageUrl{};
+    // The app's database (the `db` module), and the queries db.query may
+    // name: the app's, or a migration's own (set by runMigration). Must
+    // outlive the run. Null: no database.
+    QueryRunner* db = nullptr;
+    const QuerySet* queries = nullptr;
+    // Limits for this run instead of the host's (a migration's budget).
+    std::optional<ScriptBudget> budget{};
 };
 
 // A compile or runtime error in a script, located for the developer.
@@ -285,15 +293,39 @@ struct CompiledScripts {
     std::vector<Diagnostic> diagnostics;
 };
 
+// A migration's MiniScript (overview §3, Migration files): a single .ms
+// migration, or a folder migration's migrate.ms and its helpers. It can
+// import only its helpers, never code/lib/; a single file imports nothing,
+// and can't name `db`.
+struct MigrationScript {
+    int number = 0;
+    std::string name;                 // "003_backfill_entry_time"
+    CodeFile main;                    // migrate.ms, or the single .ms file
+    std::vector<CodeFile> helpers;    // the folder's other .ms files, importable by name
+    bool folder = false;
+};
+
+// Every .ms file the compiler hands the script side.
+struct ScriptSources {
+    // .ms files in code/pages/, and those directly in code/lib/ (importable
+    // by name: "util" for lib/util.ms).
+    std::vector<CodeFile> pages;
+    std::vector<CodeFile> libs;
+    std::vector<MigrationScript> migrations;
+    std::optional<CodeFile> seed;     // code/seed.ms (it may import code/lib/)
+};
+
 // The compiler's view of the script side: .ms files in, a bundle out.
 class ScriptCompiler {
 public:
     virtual ~ScriptCompiler() = default;
 
-    // `pages` are .ms files in code/pages/; `libs` are .ms files directly in
-    // code/lib/, importable by name ("util" for lib/util.ms).
-    virtual CompiledScripts compileScripts(const std::vector<CodeFile>& pages,
-                                           const std::vector<CodeFile>& libs) = 0;
+    virtual CompiledScripts compileScripts(const ScriptSources& sources) = 0;
+
+    // Pages and libs only.
+    CompiledScripts compileScripts(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs) {
+        return compileScripts(ScriptSources{pages, libs, {}, std::nullopt});
+    }
 };
 
 // The result of evaluating a file as data.
@@ -331,8 +363,8 @@ public:
     ScriptHost& operator=(const ScriptHost&) = delete;
 
     // Compiles on the script thread, and waits for the result.
-    CompiledScripts compileScripts(const std::vector<CodeFile>& pages,
-                                   const std::vector<CodeFile>& libs) override;
+    CompiledScripts compileScripts(const ScriptSources& sources) override;
+    using ScriptCompiler::compileScripts;
 
     // DataEvaluator.
     EvaluatedData evaluate(const CodeFile& file, const std::string& global) override;
@@ -344,6 +376,17 @@ public:
     // pinned (with its bytecode) until then.
     void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, const GateApproval& approval,
              RunContext context, Done done);
+
+    // Runs migration `number` of `app` (overview §3, Migration files): its
+    // file's top level, then migrate(), in a fresh VM. The context gives it
+    // data/ and the database (a connection in the migration's transaction);
+    // its db.query reaches only the migration's own queries, and it gets no
+    // session, users, mail or the like. `done` gets NoContent, or Error if
+    // the migration failed (an error, or migrate returned an error value).
+    void runMigration(std::shared_ptr<const CompiledApp> app, int number, RunContext context, Done done);
+    // Runs code/seed.ms's top level (overview §3, Dev mode), with the app's
+    // libs and queries.
+    void runSeed(std::shared_ptr<const CompiledApp> app, RunContext context, Done done);
 
     // Changes the budget for runs started from now on (config reloads).
     void setBudget(ScriptBudget budget);

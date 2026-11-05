@@ -459,6 +459,74 @@ void readProxy(Section proxy, AppConfig& c) {
     proxy.finish();
 }
 
+void readDatabase(Section db, AppConfig& c) {
+    bool timeoutSet = false;
+    if (auto url = db.string("url")) {
+        std::string u = *url;
+        if (u.rfind("postgres://", 0) == 0 || u.rfind("postgresql://", 0) == 0) {
+            c.db.dialect = SqlDialect::Postgres;
+            c.db.postgres.url = u;
+            if (u.find('@') != std::string::npos &&
+                u.substr(0, u.find('@')).find(':', u.find("://") + 3) != std::string::npos) {
+                db.error("url", "has a password in it; put the password in secrets.ms, and name that secret with "
+                                "passwordSecret");
+            }
+            if (!Database::postgresSupported()) {
+                db.error("url", "names a Postgres database, but this build of Fourfold has no Postgres support "
+                                "(it was built without libpq)");
+            }
+        } else {
+            db.error("url", "must be a Postgres URL, like \"postgres://db.internal/myapp\" (leave config.db out to "
+                            "use SQLite)");
+        }
+    }
+    std::optional<std::string> password = engineSecret(db, "passwordSecret", c.secrets);
+    if (password) c.db.postgres.password = *password;
+    if (auto schema = db.string("schema")) {
+        if (!isIdentifier(*schema)) {
+            db.error("schema", "must be a schema's name (letters, digits and _)");
+        } else {
+            c.db.postgres.schema = *schema;
+        }
+    }
+    if (auto pool = db.number("pool", 1, 100)) c.db.poolSize = static_cast<size_t>(*pool);
+    if (auto seconds = db.number("queryTimeoutSeconds", 0.1, 3600)) {
+        c.db.limits.queryTimeout = std::chrono::milliseconds(static_cast<int64_t>(*seconds * 1000));
+        timeoutSet = true;
+    }
+    if (auto rows = db.number("maxRows", 1, 1e7)) c.db.limits.maxRows = static_cast<size_t>(*rows);
+    if (c.db.dialect == SqlDialect::Sqlite && (password || c.db.postgres.schema.size())) {
+        db.error(password ? "passwordSecret" : "schema", "is for a Postgres database (set url too)");
+    }
+    db.finish();
+    // A query may take as long as the request that runs it.
+    if (!timeoutSet) c.db.limits.queryTimeout = c.budget.wallClock;
+}
+
+void readDeploy(Section deploy, AppConfig& c) {
+    if (auto s = deploy.number("migrationWaitSeconds", 0, 3600)) {
+        c.deploy.migrationWait = std::chrono::milliseconds(static_cast<int64_t>(*s * 1000));
+    }
+    if (auto s = deploy.number("migrationBudgetSeconds", 1, 7 * 24 * 3600)) {
+        c.deploy.migrationBudget = std::chrono::milliseconds(static_cast<int64_t>(*s * 1000));
+    }
+    if (auto clear = deploy.boolean("clearAnonymousSessions")) c.deploy.clearAnonymousSessions = *clear;
+    deploy.finish();
+}
+
+void readBackups(Section backups, AppConfig& c) {
+    if (auto folder = backups.string("folder")) {
+        if (folder->empty() || (*folder)[0] != '/') {
+            backups.error("folder", "must be a full path, like \"/var/backups/myapp\", outside the app's folders");
+        } else {
+            c.backups.folder = *folder;
+        }
+    }
+    if (auto hours = backups.number("everyHours", 0, 24 * 365)) c.backups.everyHours = *hours;
+    if (auto keep = backups.number("keep", 1, 10000)) c.backups.keep = static_cast<size_t>(*keep);
+    backups.finish();
+}
+
 }  // namespace
 
 ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
@@ -515,6 +583,9 @@ ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     readMail(top.section("mail"), *c, problems);
     readLimits(top.section("limits"), *c);
     readProxy(top.section("proxy"), *c);
+    readDatabase(top.section("db"), *c);
+    readDeploy(top.section("deploy"), *c);
+    readBackups(top.section("backups"), *c);
     top.finish();
 
     if (c->mail.transport == MailConfig::Transport::Log) {

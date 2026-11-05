@@ -354,7 +354,7 @@ void formsPass(const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app
         if (route.kind != RouteKind::Page) continue;
         if (CompiledTemplate* t = app.templates.findForUpdate(route.source)) checker.check(*t, folderOf(route.source));
     }
-    for (const std::optional<RelPath>* special : {&app.notFoundPage, &app.errorPage, &app.tooManyPage}) {
+    for (const std::optional<RelPath>* special : {&app.notFoundPage, &app.errorPage, &app.tooManyPage, &app.unavailablePage}) {
         if (!*special) continue;
         if (CompiledTemplate* t = app.templates.findForUpdate(**special)) checker.check(*t, std::nullopt);
     }

@@ -1,6 +1,7 @@
 #include "app_server.h"
 
 #include <ostream>
+#include <sys/stat.h>
 
 #include "partition/app_folder.h"
 
@@ -9,8 +10,31 @@ namespace fourfold::cli {
 namespace {
 
 constexpr auto kSweepInterval = std::chrono::hours(1);
+constexpr auto kControlInterval = std::chrono::milliseconds(250);
+
+// Whether `folder` (a host path) is inside `root`'s partition `name`.
+bool insidePartition(const std::string& folder, const std::string& root, const char* name) {
+    std::string p = root + "/" + name;
+    return folder == p || folder.rfind(p + "/", 0) == 0;
+}
 
 }  // namespace
+
+// The app's server lock: held by whichever Fourfold serves the app.
+Result<std::optional<FileLock>> takeServerLock(const StateDir& state) {
+    auto file = state.lockFile("server");
+    if (!file) return file.error();
+    return FileLock::tryAcquire(std::move(file).value());
+}
+
+bool serverRunning(const std::string& folder) {
+    auto app = AppFolder::open(folder, AppFolder::Missing::Fail);
+    if (!app) return false;
+    auto state = app.value().stateDir();
+    if (!state) return false;
+    auto lock = takeServerLock(state.value());
+    return lock.ok() && !lock.value().has_value();
+}
 
 std::unique_ptr<AppServer> AppServer::startDev(const std::string& folder, uint16_t port, std::ostream& out,
                                                std::ostream& err, LifecycleOptions lifecycle) {
@@ -22,7 +46,7 @@ std::unique_ptr<AppServer> AppServer::startDev(const std::string& folder, uint16
 
 std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOptions options, std::ostream& out,
                                             std::ostream& err) {
-    const char* command = options.dev ? "fourfold dev: " : "fourfold serve: ";
+    const char* command = !options.listen ? "fourfold: " : options.dev ? "fourfold dev: " : "fourfold serve: ";
     std::unique_ptr<AppServer> server(new AppServer(out, err));
     server->dev_ = options.dev;
 
@@ -56,6 +80,25 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
             << "\n";
         return nullptr;
     }
+    // One Fourfold at a time runs an app (and the CLI's migrate, backup and
+    // restore check for it).
+    auto serverLock = takeServerLock(state.value());
+    if (!serverLock || !serverLock.value()) {
+        err << command
+            << (serverLock ? std::string("another Fourfold (fourfold dev or serve) is already running this app")
+                           : serverLock.error().message)
+            << "\n";
+        return nullptr;
+    }
+    server->serverLock_ = std::move(*serverLock.value());
+    auto stateForData = app.value().stateDir();
+    auto dataForMigrations = app.value().dataDir();
+    if (!stateForData || !dataForMigrations) {
+        err << command << (!stateForData ? stateForData.error() : dataForMigrations.error()).message << "\n";
+        return nullptr;
+    }
+    server->state_ = std::make_unique<StateDir>(std::move(stateForData).value());
+    server->dataDir_ = std::make_unique<DataDir>(std::move(dataForMigrations).value());
     auto key = loadOrCreateEngineKey(state.value());
     auto dbPath = state.value().sqlitePath(RelPath::parse("state.db").value());
     if (!key || !dbPath) {
@@ -146,6 +189,74 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     server->auth_ = std::move(auth).value();
     server->rates_ = std::move(rates).value();
     server->sessionLocks_ = makeMemoryLockService();
+
+    // The app's database (overview §3): opened on first use, so an app that
+    // never uses one gets no database file. SQLite is data/.fourfold/app.sqlite.
+    const DatabaseConfig& dbConfig = config->db;
+    if (dbConfig.dialect == SqlDialect::Postgres) {
+        PostgresSettings settings = dbConfig.postgres;
+        DbLimits limits = dbConfig.limits;
+        size_t pool = dbConfig.poolSize;
+        server->database_ = makeLazyDatabase(SqlDialect::Postgres, [settings, limits, pool] {
+            return Database::openPostgres(settings, limits, pool);
+        });
+    } else {
+        DbLimits limits = dbConfig.limits;
+        size_t pool = dbConfig.poolSize;
+        const DataDir* data = server->dataDir_.get();
+        server->database_ = makeLazyDatabase(SqlDialect::Sqlite, [data, limits, pool]() -> Result<std::unique_ptr<Database>> {
+            // Asked each time: it makes data/.fourfold/ again if a reset or
+            // restore removed it.
+            auto path = data->databasePath();
+            if (!path) return path.error();
+            return Database::openSqlite(path.value(), limits, pool);
+        });
+    }
+
+    // Backups go to private/state/backups/, or a folder of the config's,
+    // which must be outside every partition (a backup holds the users and
+    // sessions).
+    std::string backupFolder = config->backups.folder;
+    if (backupFolder.empty()) {
+        auto folder = server->state_->folderPath(RelPath::parse("backups").value());
+        if (!folder) {
+            err << command << folder.error().message << "\n";
+            return nullptr;
+        }
+        backupFolder = folder.value();
+    } else {
+        for (const char* partition : {"code", "data", "dropbox", "private/config"}) {
+            if (insidePartition(backupFolder, server->root_, partition)) {
+                err << command << "config.backups.folder is inside " << partition
+                    << "/; backups hold the app's users and sessions, so they must be outside every partition\n";
+                return nullptr;
+            }
+        }
+    }
+    server->backups_ = std::make_unique<BackupService>(*server->dataDir_, *server->state_, backupFolder,
+                                                       dbConfig.dialect == SqlDialect::Sqlite);
+    server->dbUrl_ = dbConfig.postgres.url;
+    server->dbSchema_ = dbConfig.postgres.schema;
+    server->dataServices_.db = server->database_.get();
+    server->dataServices_.data = server->dataDir_.get();
+    server->dataServices_.backups = server->backups_.get();
+    server->dataServices_.schema = &server->schema_;
+    if (dbConfig.dialect == SqlDialect::Sqlite) {
+        const DataDir* data = server->dataDir_.get();
+        server->dataServices_.databaseExists = [data] {
+            auto path = data->databasePath();
+            struct stat info;
+            return path && ::stat(path.value().c_str(), &info) == 0;
+        };
+    }
+    server->dataServices_.files = server->data_.get();
+    server->dataServices_.afterMigrations = [self] {
+        if (!self->engine_->config()->deploy.clearAnonymousSessions) return;
+        auto removed = self->sessions_->removeAnonymous();
+        self->log_->write("session", removed ? "cleared " + std::to_string(removed.value()) +
+                                                   " anonymous sessions after migrations"
+                                             : "clearing anonymous sessions failed: " + removed.error().message);
+    };
     server->authFlow_ = std::make_unique<AuthFlow>(*server->auth_, *server->sessions_, *server->sessionLocks_,
                                                    server->scripts_->workers(), server->log_.get());
 
@@ -167,6 +278,26 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     if (options.dev) {
         server->devtools_ = std::make_unique<DevTools>(*server->loop_, std::move(devCode).value());
         server->devtools_->setRateStore(server->rates_.get());
+        DevTools::MigrationPanel panel;
+        panel.status = [self] {
+            MigrationStatus st = self->instance_->migrationStatus();
+            Datum::ListItems items, problems;
+            for (const MigrationStatus::Item& i : st.items) {
+                items.push_back(Datum::map({{"number", Datum::number(i.number)},
+                                            {"name", Datum::string(i.name)},
+                                            {"file", Datum::string(i.file)},
+                                            {"state", Datum::string(i.state)},
+                                            {"appliedAt", Datum::string(i.appliedAt)}}));
+            }
+            for (const std::string& p : st.problems) problems.push_back(Datum::string(p));
+            return Datum::map({{"items", Datum::list(std::move(items))},
+                               {"problems", Datum::list(std::move(problems))},
+                               {"lastError", Datum::string(st.lastError)},
+                               {"waiting", Datum::number(st.waiting ? 1 : 0)}});
+        };
+        panel.redoLast = [self] { return self->instance_->redoLast().message; };
+        panel.resetData = [self] { return self->instance_->resetData().message; };
+        server->devtools_->setMigrationPanel(std::move(panel));
         server->observers_.add(server->devtools_.get());
     }
 
@@ -183,6 +314,8 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     engineOptions.auth = server->auth_.get();
     engineOptions.authRoutes = server->authFlow_.get();
     engineOptions.rates = server->rates_.get();
+    engineOptions.db = server->database_.get();
+    engineOptions.schema = &server->schema_;
     engineOptions.https = options.https;
     engineOptions.engineKey = std::move(key).value();
     server->engine_ = std::make_unique<Engine>(nullptr, std::move(engineCode).value(), server->scripts_.get(),
@@ -197,14 +330,37 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     options.lifecycle.config = std::move(watch);
 
     if (!options.dev) options.lifecycle.trigger = LifecycleOptions::Trigger::DeployOnly;
+    // Migrations: applied after each compile in dev mode; in production,
+    // only when asked (`fourfold migrate`, or serve --migrate).
+    options.lifecycle.autoMigrate = options.dev;
+    options.lifecycle.seed = options.dev;
+    options.lifecycle.allowOlderCode = options.allowOlderCode;
     auto instance = AppInstance::create(std::move(watchedCode).value(), server->scripts_.get(), *server->engine_,
-                                        &server->observers_, options.lifecycle);
+                                        &server->observers_, options.lifecycle, &server->dataServices_);
     if (!instance) {
         err << command << instance.error().message << "\n";
         return nullptr;
     }
     server->instance_ = std::move(instance).value();
     server->instance_->start();   // reports through compileFinished
+
+    if (!options.dev && server->instance_->pendingMigrations() > 0) {
+        size_t pending = server->instance_->pendingMigrations();
+        if (options.migrateOnStart) {
+            MigrateResult r = server->instance_->migrateNow();
+            server->log_->write("migrate", r.message);
+            if (!r.ok) {
+                err << command << r.message << "\n";
+                return nullptr;
+            }
+        } else if (options.listen) {
+            err << command << pending << (pending == 1 ? " migration is" : " migrations are")
+                << " pending. Apply them first with `fourfold migrate " << folder
+                << "`, or start with `fourfold serve --migrate`.\n";
+            return nullptr;
+        }
+    }
+    if (!options.listen) return server;
 
     server->server_ = std::make_unique<HttpServer>(*server->loop_, [self](HttpRequest request, Responder respond) {
         std::string line = request.method + " " + request.target;
@@ -236,6 +392,10 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
                                      options.address + " port " + std::to_string(server->port()) +
                                      (options.https ? ", behind HTTPS" : ", plain HTTP"));
     server->scheduleSweep(std::chrono::milliseconds(0));
+    server->scheduleControl(kControlInterval);
+    if (config->backups.everyHours > 0) {
+        server->scheduleBackup(std::chrono::milliseconds(static_cast<int64_t>(config->backups.everyHours * 3600'000)));
+    }
     return server;
 }
 
@@ -245,9 +405,11 @@ AppServer::~AppServer() {
     // run calls back into the engine's options, hooks or stores), and the
     // rest after.
     server_.reset();
+    if (controlThread_.joinable()) controlThread_.join();
     instance_.reset();
     scripts_.reset();
     engine_.reset();
+    database_.reset();
     devtools_.reset();
     authFlow_.reset();
     data_.reset();
@@ -275,6 +437,61 @@ void AppServer::scheduleSweep(std::chrono::milliseconds delay) {
     });
 }
 
+void AppServer::scheduleControl(std::chrono::milliseconds delay) {
+    loop_->addTimer(delay, [this] {
+        checkControl();
+        scheduleControl(kControlInterval);
+    });
+}
+
+void AppServer::checkControl() {
+    if (controlBusy_) return;
+    for (const char* command : {"migrate", "backup"}) {
+        RelPath request = RelPath::parse(std::string("control/") + command + ".request").value();
+        auto exists = state_->exists(request);
+        if (!exists || !exists.value()) continue;
+        auto id = state_->read(request, 200);
+        (void)state_->remove(request);
+        if (!id) continue;
+        std::string requestId = id.value();
+        while (!requestId.empty() && (requestId.back() == '\n' || requestId.back() == ' ')) requestId.pop_back();
+        if (requestId.empty() || requestId.find_first_not_of("0123456789abcdef") != std::string::npos) continue;
+        controlBusy_ = true;
+        if (controlThread_.joinable()) controlThread_.join();
+        std::string what = command;
+        controlThread_ = std::thread([this, what, requestId] {
+            bool ok = false;
+            std::string message;
+            if (what == "migrate") {
+                MigrateResult r = instance_->migrateNow();
+                ok = r.ok;
+                message = r.message;
+            } else {
+                auto b = instance_->backupNow("manual");
+                ok = b.ok();
+                message = b ? "Backup " + b.value().name + " is in " + b.value().path : b.error().message;
+            }
+            log_->write(what, message);
+            if (dev_ || what == "migrate") (ok ? say(message) : sayError(message));
+            Datum result = Datum::map({{"ok", Datum::number(ok ? 1 : 0)}, {"message", Datum::string(message)}});
+            (void)state_->write(RelPath::parse("control/" + what + "-" + requestId + ".result").value(),
+                                toJson(result) + "\n");
+            controlBusy_ = false;
+        });
+        return;
+    }
+}
+
+void AppServer::scheduleBackup(std::chrono::milliseconds delay) {
+    loop_->addTimer(delay, [this, delay] {
+        scripts_->workers().submit([this] {
+            auto b = instance_->backupNow("scheduled");
+            log_->write("backup", b ? "scheduled backup " + b.value().name : "scheduled backup failed: " + b.error().message);
+        });
+        scheduleBackup(delay);
+    });
+}
+
 void AppServer::configLoaded(const ConfigLoad& load, bool first) {
     for (const Diagnostic& d : load.diagnostics) {
         sayError(d.toString());
@@ -283,6 +500,12 @@ void AppServer::configLoaded(const ConfigLoad& load, bool first) {
     if (!load.ok()) {
         sayError("The config has errors; still using the previous one.");
         return;
+    }
+    const DatabaseConfig& db = load.config->db;
+    if (!first && database_ &&
+        (db.dialect != database_->dialect() || db.postgres.url != dbUrl_ || db.postgres.schema != dbSchema_)) {
+        sayError("config.db changed: restart Fourfold to use the new database; still using the one it started with.");
+        log_->write("config", "config.db changed; takes effect after a restart");
     }
     sessions_->setConfig(load.config->session);
     auth_->setConfig(load.config->auth.store);
@@ -305,6 +528,14 @@ void AppServer::compileFinished(const CompileReport& report) {
     }
     bool first = !started_;
     started_ = true;
+    if (!report.migrated.empty()) {
+        std::string line = "Applied " + std::to_string(report.migrated.size()) +
+                           (report.migrated.size() == 1 ? " migration" : " migrations") +
+                           (report.backup.empty() ? "" : " (backup first: " + report.backup + ")") +
+                           (report.seeded ? ", then code/seed.ms" : "") + ".";
+        say(line);
+        log_->write("migrate", line);
+    }
     if (first) {
         firstCompileOk_ = report.ok;
         if (!report.ok) {
@@ -316,6 +547,14 @@ void AppServer::compileFinished(const CompileReport& report) {
     if (!report.ok) {
         sayError(report.generation ? "Didn't compile; still serving the last version that did."
                                    : "Didn't compile; nothing to serve yet.");
+        return;
+    }
+    if (report.pendingMigrations > 0) {
+        std::string line = "Compiled, with " + std::to_string(report.pendingMigrations) +
+                           (report.pendingMigrations == 1 ? " migration" : " migrations") +
+                           " pending: still serving the previous version until `fourfold migrate` applies them.";
+        say(line);
+        log_->write("compile", line);
         return;
     }
     std::string changed;

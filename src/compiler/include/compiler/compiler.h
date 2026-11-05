@@ -21,6 +21,9 @@ struct CompileOptions {
     // Evaluates code/access.ms and code/limits.ms (normally the ScriptHost
     // too). Required if the app has either.
     DataEvaluator* evaluator = nullptr;
+    // The app's database (from its config), whose variant of each query and
+    // migration is used.
+    SqlDialect dialect = SqlDialect::Sqlite;
 };
 
 struct CompileOutput {

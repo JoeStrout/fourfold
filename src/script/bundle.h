@@ -9,6 +9,7 @@
 
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,6 +30,16 @@ struct PageProgram {
     std::map<std::string, HandlerStub> stubs;           // by HandlerRef::label()
 };
 
+// A migration's compiled MiniScript (overview §3, Migration files): its
+// file's top level, then migrate() through `stub`; it imports only its
+// folder's helpers.
+struct MigrationProgram {
+    std::string fileName;   // "code/migrations/003_backfill/migrate.ms"
+    MiniScript::List<MiniScript::FuncDef> functions;   // [0] is @main
+    HandlerStub stub;       // "_ff_result = migrate"
+    std::map<std::string, MiniScript::FuncDef> helpers;   // by import name
+};
+
 class ScriptBundle {
 public:
     ScriptBundle();
@@ -46,6 +57,8 @@ public:
 
     std::map<RelPath, PageProgram> pages;               // by "pages/hello.ms"
     std::map<std::string, MiniScript::FuncDef> libs;    // by import name ("util")
+    std::map<int, MigrationProgram> migrations;         // by number
+    std::optional<PageProgram> seed;                    // code/seed.ms: its top level is the seed
 
     const PageProgram* page(const RelPath& source) const;
     const HandlerStub* stub(const HandlerRef& handler) const;

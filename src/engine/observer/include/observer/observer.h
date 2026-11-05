@@ -32,6 +32,14 @@ struct CompileReport {
     // instead of reloading.
     bool cssOnly = false;
     std::chrono::milliseconds duration{0};
+    // Migrations (overview §3): those applied before the new version was
+    // swapped in (dev mode, or `fourfold migrate`), and the backup taken
+    // first; or, in production, how many are waiting for `fourfold migrate`
+    // (the new version isn't serving until then).
+    std::vector<int> migrated;
+    std::string backup;
+    size_t pendingMigrations = 0;
+    bool seeded = false;   // code/seed.ms ran (dev mode, on a fresh database)
 };
 
 class Observer {

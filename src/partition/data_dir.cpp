@@ -60,6 +60,35 @@ Result<Fd> DataDir::lockFile(std::string_view key) const {
     return lockFileIn(fd_.get(), {".fourfold", "locks"}, key, kData);
 }
 
+Result<std::optional<std::string>> DataDir::readEngineFile(const std::string& name, size_t maxBytes) const {
+    auto dir = writable::ensureEngineFolder(fd_.get(), {".fourfold"}, 0700, kData);
+    if (!dir) return dir.error();
+    return writable::readEngineFile(dir.value().get(), name, maxBytes, std::string(kData) + "/.fourfold/" + name);
+}
+
+Status DataDir::writeEngineFile(const std::string& name, std::string_view bytes) const {
+    auto dir = writable::ensureEngineFolder(fd_.get(), {".fourfold"}, 0700, kData);
+    if (!dir) return dir.error();
+    return writable::writeEngineFile(dir.value().get(), name, bytes, 0600, std::string(kData) + "/.fourfold/" + name);
+}
+
+Result<std::string> DataDir::databasePath() const {
+    if (hostPath_.empty()) return makeError(ErrorCode::Invalid, "data/: no host path for the database");
+    auto dir = writable::ensureEngineFolder(fd_.get(), {".fourfold"}, 0700, kData);
+    if (!dir) return dir.error();
+    return hostPath_ + "/.fourfold/app.sqlite";
+}
+
+Status DataDir::copyOut(const std::string& hostFolder, const TreeSkip& skip) const {
+    return writable::copyTreeOut(fd_.get(), hostFolder, skip, kData);
+}
+
+Status DataDir::copyIn(const std::string& hostFolder, const TreeSkip& skip) const {
+    return writable::copyTreeIn(hostFolder, fd_.get(), skip, kData);
+}
+
+Status DataDir::clear(const TreeSkip& skip) const { return writable::clearTree(fd_.get(), skip, kData); }
+
 Status Dropbox::append(const RelPath& path, std::string_view bytes) const {
     return writable::append(fd_.get(), path, bytes, 0644, kDropbox);
 }
@@ -82,6 +111,8 @@ Status StateDir::append(const RelPath& path, std::string_view bytes) const {
 
 Result<bool> StateDir::exists(const RelPath& path) const { return writable::fileExists(fd_.get(), path, kState); }
 
+Status StateDir::remove(const RelPath& path) const { return writable::removeFile(fd_.get(), path, kState); }
+
 Result<Fd> StateDir::lockFile(std::string_view key) const { return lockFileIn(fd_.get(), {"locks"}, key, kState); }
 
 Result<std::string> StateDir::sqlitePath(const RelPath& path) const {
@@ -89,6 +120,21 @@ Result<std::string> StateDir::sqlitePath(const RelPath& path) const {
     auto folder = writable::ensureFolder(fd_.get(), path.parent(), 0700, kState);
     if (!folder) return folder.error();
     return hostPath_ + "/" + path.str();
+}
+
+Result<std::string> StateDir::folderPath(const RelPath& name) const {
+    if (name.isRoot()) return makeError(ErrorCode::Invalid, std::string(kState) + ": not a folder name");
+    auto folder = writable::ensureFolder(fd_.get(), name, 0700, kState);
+    if (!folder) return folder.error();
+    return hostPath_ + "/" + name.str();
+}
+
+Status StateDir::copyOut(const std::string& hostFolder, const TreeSkip& skip) const {
+    return writable::copyTreeOut(fd_.get(), hostFolder, skip, kState);
+}
+
+Status StateDir::copyIn(const std::string& hostFolder, const TreeSkip& skip) const {
+    return writable::copyTreeIn(hostFolder, fd_.get(), skip, kState);
 }
 
 }  // namespace fourfold

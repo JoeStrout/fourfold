@@ -7,7 +7,7 @@ the server. The person writing the site needs the
 config file, deploying), this guide covers what the server needs and links to
 the user guide for the rest.
 
-*Status: covers what works as of Milestone 7. Fourfold isn't ready yet to
+*Status: covers what works as of Milestone 8. Fourfold isn't ready yet to
 face the internet on its own: see [Known gaps](#known-gaps). CGI and FastCGI
 hosting, TLS and a production server will be added here as they arrive.*
 
@@ -26,10 +26,12 @@ hosting, TLS and a production server will be added here as they arrive.*
 9. [The first admin](#the-first-admin)
 10. [Server limits: `--server-config`](#server-limits---server-config)
 11. [Deploying an app's changes](#deploying-an-apps-changes)
-12. [Logs](#logs)
-13. [Backups](#backups)
-14. [Known gaps](#known-gaps)
-15. [Quick reference](#quick-reference)
+12. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
+13. [A Postgres database](#a-postgres-database)
+14. [Logs](#logs)
+15. [Backups](#backups)
+16. [Known gaps](#known-gaps)
+17. [Quick reference](#quick-reference)
 
 ---
 
@@ -45,7 +47,7 @@ The process:
 - listens for plain HTTP, by default on `127.0.0.1:8090`. HTTPS comes from a
   reverse proxy in front of it (nginx, Caddy, Apache, a hosting service).
 - needs no database server: its own state is in an SQLite file in the app
-  folder.
+  folder, and so is the app's database, unless you give it a Postgres one.
 - reads its settings from files in the app folder, and picks up changes to
   them on its own.
 - loads new site code only when told to (see
@@ -79,6 +81,12 @@ On Linux, the server needs libcurl at run time (on Debian or Ubuntu, the
 `libcurl4` package; `libcurl4-openssl-dev` brings it in on a build machine).
 On macOS it's part of the system.
 
+**Postgres support** is built in if the build machine has libpq (on Debian
+or Ubuntu, `libpq-dev`; with Homebrew, `postgresql` or `libpq`); the server
+then needs libpq at run time (`libpq5`). Without it, everything else works,
+and an app that asks for Postgres is refused at startup. The CMake output
+says which: "Postgres support: yes".
+
 ---
 
 ## The app folder
@@ -87,6 +95,8 @@ On macOS it's part of the system.
 myapp/
   code/            the site: pages, templates, code, images (the author's)
   data/            what the site stores while running (the app's)
+    .fourfold/     the app's SQLite database (app.sqlite), and which migrations
+                   have run on these files
   dropbox/         the app's own output: print.log, reports (the app's)
   private/
     config/        app.ms and secrets.ms: settings and passwords
@@ -94,6 +104,7 @@ myapp/
       state.db     sessions, users, roles, sign-in links (SQLite)
       secret.key   the key that signs CSRF tokens
       logs/        the engine log, one file per day
+      backups/     backups (unless config.backups.folder puts them elsewhere)
 ```
 
 If any of these folders is missing, `fourfold serve` creates it. The ones
@@ -139,6 +150,8 @@ fourfold serve /srv/club --host club.example.com
 | `--host NAME` | none | a host name the site answers to; give it more than once for several (`example.com`, `www.example.com`) |
 | `--plain-http` | off | the site is reached over plain HTTP, not HTTPS (see below) |
 | `--server-config FILE` | none | limits on the app's settings (see [Server limits](#server-limits---server-config)) |
+| `--migrate` | off | apply pending migrations before serving (see [Migrations](#migrations-fourfold-migrate)) |
+| `--allow-older-code` | off | the emergency override: serve code older than the data's migrations |
 
 **Host names.** Fourfold answers only requests for its own host names, the
 `--host` names and the app's `config.domain` (from
@@ -162,6 +175,10 @@ visitor's session cookie.
 - mail is set up but `config.domain` isn't (sign-in links need it).
 - it's listening beyond `localhost` with no host name.
 - the server config (`--server-config`) can't be read or has an error.
+- the app has migrations that haven't been applied (a fresh install has all
+  of them): run `fourfold migrate` first, or start with `--migrate`. See
+  [Migrations](#migrations-fourfold-migrate).
+- another Fourfold (`serve` or `dev`) is already running the same app.
 
 If the site's code doesn't compile, the server still starts, and serves an
 error until a deploy fixes it. The errors are in the engine log.
@@ -460,6 +477,100 @@ guide.
 A deploy doesn't touch `data/`, `dropbox/`, sessions or users. Config changes
 need no deploy.
 
+A deploy that brings new migrations compiles, but the old version keeps
+serving until you apply them; see the next section.
+
+---
+
+## Migrations: `fourfold migrate`
+
+An app's migrations (`code/migrations/`) change the shape of its data: new
+tables and columns, reshaped data files. Fourfold applies them only when you
+say so:
+
+```sh
+fourfold migrate /srv/club
+```
+
+If the app's server is running, the command asks it to apply them (through a
+request file in `private/state/control/`) and waits. The server:
+
+1. holds new requests (they wait, rather than fail), and lets those running
+   finish;
+2. takes a backup, `private/state/backups/<time>-before-migrations/`;
+3. runs the pending migrations, in order, all their database work in one
+   transaction;
+4. switches to the new version of the code, and lets the held requests go
+   on to it.
+
+If a migration fails, nothing changes: the database work is undone, the data
+files are put back from the backup, the old version goes on serving, and the
+command prints the error (as does the engine log). If no server is running,
+the command does all this itself, holding the app's lock so no server starts
+meanwhile.
+
+Requests that would wait longer than `deploy.migrationWaitSeconds` (30) get a
+503 page instead. A migration may run for `deploy.migrationBudgetSeconds`
+(600).
+
+**A fresh install** has every migration pending, so `fourfold serve` won't
+start until they're applied: run `fourfold migrate` once, or start with
+`fourfold serve --migrate` (for scripted deploys).
+
+**Code older than the data** (the database has migration 7, the code only
+knows 1 to 5, say after deploying an old copy by mistake) won't run: the
+deploy is refused, as if it didn't compile, and the old version keeps
+serving. The fix is to deploy code that includes the migrations, or to
+restore a backup from before them. In an emergency,
+`fourfold serve --allow-older-code` (or `fourfold migrate --allow-older-code`)
+runs it anyway, with a warning; the old code may then break on data it
+doesn't understand.
+
+**An applied migration that was edited** is refused the same way. Its author
+should write a new migration instead.
+
+**Sessions** keep whatever shape old code gave them. If that's a problem,
+`config.deploy = {"clearAnonymousSessions": true}` signs out every anonymous
+visitor after migrations run.
+
+---
+
+## A Postgres database
+
+An app's database is SQLite unless its config names a Postgres server. The
+app's code and queries are the same either way (a query or migration may
+have a `.pg.sql` variant where the two differ).
+
+```
+// private/config/app.ms
+config = {}
+config.db = {"url": "postgres://fourfold@db.internal/club", "passwordSecret": "dbPassword"}
+```
+
+```
+// private/config/secrets.ms
+secrets = {}
+secrets.dbPassword = {"value": "..."}
+```
+
+- **Give each app its own database (or schema) and its own role**, with
+  rights to that database only. `config.db.schema` makes the app work in one
+  schema (`search_path`), for apps sharing a database.
+- **The password goes in `secrets.ms`**, never in the URL: a URL with a
+  password in it is an error. The app's code never sees it.
+- `db.pool` (4) is how many connections the app keeps; `db.queryTimeoutSeconds`
+  (the request budget, 10) how long one query may run.
+- Changing `config.db` takes a restart.
+- **Back up a Postgres database with its own tools** (`pg_dump`, or your
+  provider's backups): Fourfold's backups have the app's files, users and
+  sessions, but not a Postgres database. Before each `fourfold migrate`,
+  take one yourself. If a migration fails, its transaction undoes it.
+- Several servers sharing one database coordinate migrations themselves:
+  one migrates while the others wait, then finds the work done.
+- An app moving from SQLite to Postgres starts with an empty database: its
+  migrations make the tables, but copying the rows over is up to you, for
+  now.
+
 ---
 
 ## Logs
@@ -487,6 +598,8 @@ The word after the time says what kind of event it is:
 | `session` | session problems, like one too big to save |
 | `auth` | sign-in links sent, refused, throttled or failed to send; sign-ins and sign-outs; new users |
 | `mail` | the whole message, when `mail.transport` is `"log"` |
+| `migrate` | migrations applied, or why they failed |
+| `backup` | scheduled and requested backups |
 
 Control characters in a message are escaped, so nothing logged can fake a
 line. The app can't write to this log. Old log files aren't removed yet;
@@ -500,30 +613,52 @@ may want to see these.
 
 ## Backups
 
-Back up the whole app folder. What matters most:
+```sh
+fourfold backup /srv/club
+```
 
-- `data/`: the site's own data. Each file is replaced whole when it changes,
-  so copying the folder at any moment gets complete files (though a file
-  changed during the copy may be newer than its neighbors).
-- `private/state/state.db`: users and their roles. Copy it with SQLite's own
-  backup, which is safe while Fourfold is running:
+takes a backup of the app: everything in `data/` (with its SQLite database),
+and `private/state/` (users, roles, sessions, the CSRF key), but not the
+engine logs. If the server is running, it asks the server, which holds
+requests for the moment it takes; SQLite files are copied with SQLite's own
+backup, which is consistent even while they're written. Each backup is a
+folder, named for its time and reason:
 
-  ```sh
-  sqlite3 /srv/club/private/state/state.db ".backup /backups/club-state.db"
-  ```
+```
+private/state/backups/
+  20261105-140212-manual/
+    backup.json      when, why, and which migrations had run
+    data/
+    state/
+```
 
-  A plain file copy while it's running can miss recent changes, which are in
-  `state.db-wal` beside it.
-- `private/config/`: the settings, and `secrets.ms`. Keep its backups as
-  private as the original.
-- `code/`: usually also kept elsewhere by the author, but cheap to keep.
+Fourfold also takes one **before every batch of migrations**, and, if
+`config.backups.everyHours` is set, **on a schedule**. Of these automatic
+ones, it keeps the newest `backups.keep` (10); the ones you take, and those
+taken before a restore, it never removes.
 
-`secret.key` needn't be backed up: if it's lost, a new one is made, and the
-only effect is that forms open in browsers at that moment have to be
-reloaded. Sessions are in `state.db`, so restoring an old copy signs everyone
-out who signed in since.
+**Keep backups somewhere else too.** `private/state/backups/` is on the same
+disk as the app. `config.backups.folder` can put them elsewhere (a full path;
+it can't be inside `code/`, `data/`, `dropbox/` or `private/config/`, since a
+backup holds users and sessions). Either way, copy them off the machine
+regularly, and keep them as private as `private/state/` itself.
 
-To restore: stop Fourfold, put the files back, start it.
+**To restore**, stop the server, then:
+
+```sh
+fourfold restore /srv/club --list                 # the backups, newest first
+fourfold restore /srv/club 20261105-140212-manual
+```
+
+It first backs up what's there now (`...-before-restore`), so a restore can
+be undone too, then replaces `data/` and `private/state/` with the backup's.
+`--data-only` restores `data/` alone, keeping today's users and sessions.
+Restoring an old backup signs out everyone who signed in since, and takes
+the data back to the migrations of that time: deploy matching code.
+
+What a backup doesn't have: `code/` (the author's, usually kept elsewhere
+too), `private/config/` (settings and `secrets.ms`: back them up yourself,
+as privately), and a Postgres database (use `pg_dump`).
 
 ---
 
@@ -545,6 +680,8 @@ Fourfold site behind a proxy, and expect to watch it.
   (M11).
 - **No graceful shutdown, and no log rotation** (M11).
 - **CGI and FastCGI hosting**, for shared web hosts, aren't ready yet (M10).
+- **Moving an app from SQLite to Postgres** gives it an empty database:
+  copying its rows over is up to you.
 
 ---
 
@@ -556,6 +693,9 @@ Fourfold site behind a proxy, and expect to watch it.
 |---|---|
 | `fourfold serve <folder> [options]` | serve an app (see [Running](#running-fourfold-serve)) |
 | `fourfold dev <folder> [--port N]` | serve an app on `localhost`, for its author |
+| `fourfold migrate <folder>` | apply the app's pending migrations (see [Migrations](#migrations-fourfold-migrate)) |
+| `fourfold backup <folder>` | back up the app (see [Backups](#backups)) |
+| `fourfold restore <folder> [NAME] [--data-only]` | list the backups, or restore one, with the server stopped |
 | `fourfold version` | print the version |
 | `fourfold help` | list the commands |
 
@@ -569,6 +709,8 @@ Fourfold site behind a proxy, and expect to watch it.
 | `private/state/state.db` | sessions, users, roles, sign-in links, rate-limit counters |
 | `private/state/secret.key` | signs CSRF tokens, form timestamps and puzzles; made if missing |
 | `private/state/logs/` | the engine log |
+| `private/state/backups/` | backups |
+| `data/.fourfold/app.sqlite` | the app's SQLite database |
 | `dropbox/print.log` | the app's `print` output |
 | the `--server-config` file | ceilings on the app's settings (the `server` map) |
 
@@ -590,3 +732,7 @@ in the user guide's [Configuration](../user/user_guide.md#configuration-privatec
 | `mail.postmarkTokenSecret`, `postmarkStream` | `"outbound"` | Postmark |
 | `proxy.trust` | `[]` | your reverse proxy's addresses (see [Behind a reverse proxy](#behind-a-reverse-proxy)) |
 | `limits.anonymous`, `limits.signedIn` | `"60/minute"`, `"300/minute"` | default rate limits (see [Rate limits](#rate-limits)) |
+| `db.url`, `passwordSecret`, `schema`, `pool` | SQLite | a Postgres database (see [A Postgres database](#a-postgres-database)) |
+| `deploy.migrationWaitSeconds`, `migrationBudgetSeconds` | 30, 600 | how long requests wait for migrations; how long one may run |
+| `deploy.clearAnonymousSessions` | `false` | sign out anonymous visitors after migrations |
+| `backups.folder`, `everyHours`, `keep` | `private/state/backups/`, none, 10 | where backups go, how often, how many automatic ones to keep |

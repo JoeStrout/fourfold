@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "compiledapp/sql.h"
 #include "partition/paths.h"
 #include "template/template.h"
 
@@ -273,6 +274,47 @@ private:
     FragmentMap fragments_;
 };
 
+// --- Databases (overview §3, Middle tier, Tier 2, SQL dialects) ---
+
+// A named query: one SQL statement from code/queries/ (or a folder
+// migration's own), prepared for the app's database. The only SQL app code
+// can run, so SQL injection can't happen: values are always bound.
+struct NamedQuery {
+    std::string name;   // "findUser", or "admin/users" for queries/admin/users.sql
+    RelPath source;     // the file used: "queries/findUser.pg.sql"
+    PreparedSql sql;
+};
+
+// Named queries by name.
+using QuerySet = std::map<std::string, std::shared_ptr<const NamedQuery>>;
+
+// A migration in code/migrations/ (overview §3, Schema changes and
+// migrations), as the compiler found it for the app's database.
+struct Migration {
+    enum class Kind {
+        Sql,      // 004_add_index.sql (or its .sqlite.sql or .pg.sql variant)
+        Script,   // 005_split_log.ms: data files only, no database
+        Folder,   // 003_backfill/: migrate.ms, its own queries and helpers
+    };
+
+    int number = 0;
+    std::string name;   // "003_backfill_entry_time", without extension
+    Kind kind = Kind::Sql;
+    // The file applied (the variant for the app's database), the .ms file,
+    // or the folder.
+    RelPath source;
+    // Of what's applied: the file's name and contents, or every file in the
+    // folder the database uses. Recorded when applied; a later change is a
+    // compile error.
+    std::string checksum;
+    std::string sql;      // Sql: the statements, run as they are
+    QuerySet queries;     // Folder: what its db.query can name
+
+    bool usesDatabase() const { return kind != Kind::Script; }
+    // "003_backfill_entry_time.sql", "005_split_log.ms", "003_backfill_entry_time/"
+    std::string fileLabel() const;
+};
+
 struct CompiledApp {
     uint64_t generation = 0;
     RouteTable routes;
@@ -291,9 +333,22 @@ struct CompiledApp {
     std::optional<RelPath> notFoundPage;    // pages/404.html, if present
     std::optional<RelPath> errorPage;       // pages/500.html, if present
     std::optional<RelPath> tooManyPage;     // pages/429.html, if present
+    // pages/503.html, if present: "down for maintenance", while migrations
+    // run longer than requests may wait.
+    std::optional<RelPath> unavailablePage;
     // Every form declaration, by FormSpec::key() ("pages/guestbook.ms#sign"),
     // for formState().
     std::map<std::string, std::shared_ptr<const FormSpec>> forms;
+    // The database the app's SQL was prepared for (from the config; SQLite
+    // unless config.db names Postgres).
+    SqlDialect dialect = SqlDialect::Sqlite;
+    QuerySet queries;                       // code/queries/
+    std::vector<Migration> migrations;      // code/migrations/, by number
+    // code/seed.ms (overview §3, Dev mode), if present: run in dev mode after
+    // "reset dev data".
+    std::optional<RelPath> seed;
+    // The app has queries or database migrations, so it uses a database.
+    bool usesDatabase() const;
     // Null if the app has no .ms files. Shared by every request on this
     // generation; the bytecode is released when the last one lets go.
     std::shared_ptr<const ScriptBundle> scripts;

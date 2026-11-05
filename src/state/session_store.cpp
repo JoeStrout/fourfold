@@ -192,6 +192,14 @@ Status SessionStore::removeForUser(const std::string& userId) {
     return stmt.value()->run();
 }
 
+Result<int64_t> SessionStore::removeAnonymous() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto stmt = db_->statement("DELETE FROM sessions WHERE user_id IS NULL");
+    if (!stmt) return stmt.error();
+    if (Status s = stmt.value()->run(); !s) return s.error();
+    return db_->changes();
+}
+
 Result<int64_t> SessionStore::sweepExpired() {
     std::lock_guard<std::mutex> lock(mutex_);
     int64_t now = clock_.nowMillis();

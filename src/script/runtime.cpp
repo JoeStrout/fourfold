@@ -67,7 +67,7 @@ void disableGc() {
 // A request run that may park, or null (with `error` set) if this run can't.
 Run* parkableRun(Context& ctx, const char* name, IntrinsicResult& error) {
     Run* run = Run::of(ctx);
-    if (!run || run->kind != Run::Kind::Request) {
+    if (!run || !run->canPark()) {
         error = errorResult(std::string(name) + " can't be used at a page's top level");
         return nullptr;
     }
@@ -353,6 +353,7 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addUsers();
     addForms();
     addRateLimit();
+    addDb();
     addTestSlowWork();
     addTestWithValue();
     g_callbackStub = compileCallbackStub();

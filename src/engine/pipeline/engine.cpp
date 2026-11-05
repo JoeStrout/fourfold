@@ -15,6 +15,11 @@ const char* const kNotCompiledPage =
     "<body><h1>The app hasn't compiled yet</h1>\n"
     "<p>Fix the errors listed where Fourfold is running, and this page will load.</p></body></html>\n";
 
+const char* const kUnavailablePage =
+    "<!DOCTYPE html>\n<html><head><title>Down for maintenance</title></head>\n"
+    "<body><h1>Down for maintenance</h1>\n"
+    "<p>The site is being updated, and will be back shortly. Please try again in a minute.</p></body></html>\n";
+
 const char* const kForbiddenPage =
     "<!DOCTYPE html>\n<html><head><title>Forbidden</title></head>\n"
     "<body><h1>This form has expired</h1>\n"
@@ -247,10 +252,54 @@ void Engine::handle(const HttpRequest& request, Done done) const {
         return;
     }
 
+    f->request = request;
+    // The schema lock (overview §3, Applying migrations): held shared for
+    // the whole request. While migrations run, requests wait here, and
+    // then go on to whichever version is current.
+    if (SchemaGate* schema = options.schema) {
+        Done inner = std::move(f->done);
+        f->done = [schema, inner](HttpResponse response) {
+            schema->leave();
+            inner(std::move(response));
+        };
+        schema->enter([this, f, inner](bool admitted) {
+            if (admitted) {
+                proceed(f);
+                return;
+            }
+            f->done = inner;   // never inside, so nothing to leave
+            f->app = this->app();
+            f->send(unavailable(f->app.get(), f->render.nonce), false);
+        });
+        return;
+    }
+    proceed(std::move(f));
+}
+
+HttpResponse Engine::unavailable(const CompiledApp* app, const std::string& nonce) const {
+    HttpResponse r;
+    if (app && app->unavailablePage) {
+        if (const CompiledTemplate* t = app->templates.find(*app->unavailablePage)) {
+            RenderOptions quiet = renderOptionsFor(*app, nonce);
+            quiet.warnings = false;
+            r.body = render(*t, EmptyFields(), quiet).html.str();
+        }
+    }
+    if (r.body.empty()) r.body = kUnavailablePage;
+    r.status = 503;
+    r.headers.set("Content-Type", "text/html; charset=utf-8");
+    r.headers.set("Retry-After", "30");
+    r.headers.set("Cache-Control", "no-store");
+    return r;
+}
+
+void Engine::proceed(std::shared_ptr<Flow> f) const {
+    const EngineOptions& options = *options_;
+    const HttpRequest& request = f->request;
+    const std::string& path = f->admitted.path.path;
     // Pin this generation of the app, and the config, for the whole request.
     f->app = this->app();
     f->config = this->config();
-    f->request = request;
     bool auth = hasPrefix(path, "/__auth");
     if (!f->app && !auth) {
         HttpResponse response;
@@ -565,6 +614,10 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
     context.render = f->render;
     context.data = options.data;
     context.dropbox = options.dropbox;
+    if (options.db && app.usesDatabase()) {
+        context.db = options.db;
+        context.queries = &app.queries;   // the app pinned with the run keeps it alive
+    }
     context.users = users_.get();
     context.rates = rates_.get();
     std::string group = addressGroup(f->client);

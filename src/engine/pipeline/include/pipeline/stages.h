@@ -17,6 +17,7 @@
 #include "partition/paths.h"
 #include "pipeline/auth_routes.h"
 #include "pipeline/hooks.h"
+#include "pipeline/schema_gate.h"
 #include "script/script_host.h"
 #include "state/auth_store.h"
 #include "state/engine_log.h"
@@ -71,6 +72,14 @@ struct EngineOptions {
     // TLS): cookies get Secure and the __Host- prefix, and a request's own
     // origin is https://<Host>. Off for dev mode's plain HTTP on localhost.
     bool https = false;
+    // The app's database (the `db` module): the app's queries run on it.
+    // Null: none. Must outlive the engine.
+    QueryRunner* db = nullptr;
+    // The schema lock: every request holds it shared, so migrations can
+    // wait for them and hold new ones back (overview §3). Null: no lock
+    // (an app without migrations, or tests). Must outlive the engine.
+    SchemaGate* schema = nullptr;
+
     // The engine's secret key, for CSRF tokens (loadOrCreateEngineKey). If
     // empty, a random one is made for this engine, so tokens last only as
     // long as the process.

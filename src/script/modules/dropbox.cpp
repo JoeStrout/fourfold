@@ -26,7 +26,7 @@ void addDropbox() {
             if (result && result->error) return intrinsicError("dropbox.write: " + result->error->message);
             return IntrinsicResult(Value::Null);
         }
-        if (!run || run->kind != Run::Kind::Request) {
+        if (!run || !run->canPark()) {
             return intrinsicError("dropbox.write can't be used at a page's top level");
         }
         const Dropbox* dropbox = run->context.dropbox;

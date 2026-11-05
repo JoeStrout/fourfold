@@ -1,0 +1,11 @@
+<li class="{{class}}">
+  <form method="post" action="/toggle" hx-post="/toggle" hx-target="#board" hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{id}}">
+    <button class="mark" title="Done, or not">{{mark}}</button>
+  </form>
+  <span class="title">{{title}}</span>
+  <form method="post" action="/remove" hx-post="/remove" hx-target="#board" hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{id}}">
+    <button class="remove" title="Delete">×</button>
+  </form>
+</li>

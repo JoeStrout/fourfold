@@ -3,6 +3,7 @@
 // above, never following a symbolic link.
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -66,6 +67,25 @@ Result<std::optional<FileInfo>> info(int rootFd, const RelPath& path, const std:
 // (temporary files, .fourfold/), links, and anything else that isn't a
 // regular file or a folder. A missing folder lists as empty.
 Result<std::vector<DirEntry>> list(int rootFd, const RelPath& dir, const std::string& partition);
+
+// Copies every regular file in the partition (dot-names included; links
+// never) into `toHostFolder`, a backup's folder, which is created.
+Status copyTreeOut(int fromFd, const std::string& toHostFolder, const TreeSkip& skip, const std::string& partition);
+
+// The reverse: makes the partition hold what `fromHostFolder` holds. What
+// `skip` names is left alone, on both sides; everything else in the
+// partition is removed first.
+Status copyTreeIn(const std::string& fromHostFolder, int toFd, const TreeSkip& skip, const std::string& partition);
+
+// An engine file `name` in folder `folderFd` (trusted names, which may be
+// dot-names): read whole (nullopt if missing), or replaced atomically.
+Result<std::optional<std::string>> readEngineFile(int folderFd, const std::string& name, size_t maxBytes,
+                                                  const std::string& what);
+Status writeEngineFile(int folderFd, const std::string& name, std::string_view bytes, mode_t mode,
+                       const std::string& what);
+
+// Removes everything in the partition except what `skip` names.
+Status clearTree(int fd, const TreeSkip& skip, const std::string& partition);
 
 // Opens (creating) file `name` in an engine folder, for locking.
 Result<Fd> openLockFile(int folderFd, const std::string& name, const std::string& what);

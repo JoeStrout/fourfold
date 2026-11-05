@@ -9,6 +9,7 @@
 // - users: the engine's users (users.get, users.grant, ...).
 // - formState, reshow: showing a declared form again, with its errors.
 // - ratelimit: rate limits from code.
+// - db: the app's database (db.query).
 #pragma once
 
 #include <string>
@@ -29,6 +30,7 @@ void addDropbox();
 void addUsers();
 void addForms();
 void addRateLimit();
+void addDb();
 
 // An intrinsic's error result.
 MiniScript::IntrinsicResult intrinsicError(const std::string& message);

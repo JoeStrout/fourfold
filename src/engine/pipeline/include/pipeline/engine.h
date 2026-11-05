@@ -45,6 +45,10 @@ public:
     struct Flow;   // private: one request past Admit
 
 private:
+    // The rest of handle(), once the request is past the schema lock.
+    void proceed(std::shared_ptr<Flow> flow) const;
+    // The 503 for a request that waited too long for migrations.
+    HttpResponse unavailable(const CompiledApp* app, const std::string& nonce) const;
     void identify(std::shared_ptr<Flow> flow, std::function<void(std::shared_ptr<Flow>)> next) const;
     void serveAuth(std::shared_ptr<Flow> flow) const;
     void serveRoute(std::shared_ptr<Flow> flow) const;

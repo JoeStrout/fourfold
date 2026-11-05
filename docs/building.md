@@ -5,6 +5,7 @@
 - CMake 3.21 or later, and Ninja
 - A C++17 compiler: Clang 10+ (including Apple Clang) or GCC 9+
 - libcurl, for sending email (M6): part of the macOS SDK; on Debian/Ubuntu, `apt install libcurl4-openssl-dev`
+- Optional: libpq, for Postgres databases (M8). Found through `pg_config` (or set `FOURFOLD_PG_CONFIG`); without it, Fourfold builds with SQLite only. On macOS, `brew install libpq` (or `postgresql`); on Debian/Ubuntu, `apt install libpq-dev`. CMake prints "Postgres support: yes" or "no".
 - [MiniScript 2](https://github.com/JoeStrout/miniscript2), checked out next to this repository as `../miniscript2` (or set `FOURFOLD_MS2_DIR`). Configuring fails without it.
 
 On macOS: `xcode-select --install`, then `brew install cmake ninja`. On Debian/Ubuntu: `apt install build-essential cmake ninja-build libcurl4-openssl-dev`.
@@ -26,9 +27,18 @@ To run a sample app:
 ./build/dev/bin/fourfold dev examples/guestbook       # templates, fragments, Markdown, HTMX (M4); forms, uploads, spam rules (M7)
 ./build/dev/bin/fourfold dev examples/markdown-site   # a site made only of .md files, with code (M4, M6.1)
 ./build/dev/bin/fourfold dev examples/clubhouse       # sign-in and access rules (M6)
+./build/dev/bin/fourfold dev examples/tasks           # a database, queries and migrations (M8)
 ```
 
 `fourfold dev` watches `code/`: save a file, and open pages reload (or, for a stylesheet, swap it in place). Compile errors show as an overlay on open pages, while the last version that compiled keeps serving. Touching `code/.deploy` recompiles at once.
+
+The Postgres tests run only when `FOURFOLD_TEST_PG_URL` names a database they may use, such as a scratch one on your own machine (`createdb fourfold_test`):
+
+```sh
+FOURFOLD_TEST_PG_URL=postgres://localhost/fourfold_test ctest --preset dev
+```
+
+Each test works in a schema of its own (`ff_test_...`), made for it and dropped afterward. Without the variable, those tests are skipped, and say so.
 
 Benchmarks are built with the tests but not run by ctest; use a release build for meaningful numbers:
 

@@ -54,6 +54,7 @@ private:
     struct Folders {
         Fd code, data, dropbox, config, state;
         std::string stateReal;   // private/state/'s real path, for SQLite
+        std::string dataReal;    // data/'s, for the app's SQLite database
     };
     AppFolder(std::string root, Folders folders) : root_(std::move(root)), folders_(std::move(folders)) {}
 

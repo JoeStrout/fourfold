@@ -279,7 +279,7 @@ Three tiers, all following the core rule (data is inert; executable things live 
 
 ### Middle tier: SQLite
 
-A single file in `data/`: real transactions, no separate server. Probably the right choice for most apps that outgrow plain files. It uses the same query API as Tier 2, so moving to Postgres later is mostly a configuration change.
+A single file in `data/`: real transactions, no separate server. Probably the right choice for most apps that outgrow plain files. *As built in M8:* `data/.fourfold/app.sqlite`, made on first use, where the path sandbox keeps `file` and `data` from reaching it (so app code can't damage it except through queries). It uses the same query API as Tier 2, so moving to Postgres later is mostly a configuration change, plus a variant file for any SQL that differs between the two (SQL dialects, below).
 
 ### Tier 2: PostgreSQL or a key-value store
 
@@ -292,8 +292,47 @@ A single file in `data/`: real transactions, no separate server. Probably the ri
   ```
 
   The engine only runs SQL from the code partition, which makes SQL injection structurally impossible. It also extends the code/design separation: someone who knows SQL can review or tune `queries/` without reading app logic.
-- Dynamic SQL (user-chosen sort column, optional filters) gets a narrow, clearly marked escape hatch, such as identifier slots checked against an allowlist declared alongside the query. Never raw strings.
+- Dynamic SQL (user-chosen sort column, optional filters) gets a narrow, clearly marked escape hatch, such as identifier slots checked against an allowlist declared alongside the query. Never raw strings. *Decided and built in M8:* a **name slot** carries its allowlist inline, `ORDER BY {{sort: title, created, stars}} {{dir: asc, desc}}`; the value must be one of the names (matched ignoring case), which goes into the SQL as written. Each name is checked at compile time to be a plain name (or two joined by a dot), so inserting it is the same as the developer having typed it.
+- *As built in M8* ([m8-results.md](m8-results.md)): `db.query(name, values)` returns the rows as a list of maps by column name (an empty list for a statement without rows; `RETURNING` gives new ids). Each call is its own transaction; several from one request as one transaction aren't available yet. Results are capped (10,000 rows, the request's time). Binary columns can't be returned. The connection pool is per app, opened on first use. No key-value store yet.
 - A key-value store is likewise a host-provided handle with a namespace per app, offering the same atomic operations.
+
+### SQL dialects
+
+*Decided 2026-11-05; built in M8.* SQLite and Postgres disagree on placeholders, auto-increment keys, types, date functions, `ALTER TABLE` and more, so the same SQL won't always run on both. Fourfold doesn't translate SQL or enforce a portable subset. Instead:
+
+- **One placeholder syntax on both databases**, in queries and migrations alike: `{{key}}`, the same brackets as template fields, where the key is a name or an index. Spaces inside are optional, as in templates: `{{ title }}`.
+  - **Names** are a letter or `_`, then letters, digits and `_`: `{{title}}`, `{{user_id}}`.
+  - **Indexes** are a plain integer counting from 0: `{{0}}`, `{{1}}`. A leading zero (`{{01}}`), a mix of digits and letters (`{{1a}}`), or anything else between the brackets is a compile error.
+
+  Values are passed as a map or a list:
+  - **A map works for every query.** `db.query("addPost", {"title": t, "body": b, "user": u})`. An index looks for a number key first, then the matching string: `{{0}}` finds `0`, or else `"0"`.
+  - **A list works when every key is an index.** `db.query("findUser", [email])` for `WHERE email = {{0}}`. `{{n}}` takes item `n` of the list. A list passed to a query with any named key returns an error value.
+
+  A key can appear more than once (`WHERE owner = {{user}} OR editor = {{user}}`), and indexes can appear in any order. That lets a dialect variant take the same values in a different order (`{{1}} … {{0}}` in one file, `{{0}} … {{1}}` in the other) while the caller passes the same list to both. A missing key or an index past the end of the list is an error. Extra keys and extra list items are ignored, so a handler can pass `req.form`, a session map or a row it already has. A misspelled key still shows up, as a missing key for the real name.
+
+  A placeholder binds a value; it never pastes text into the SQL. So a placeholder can't stand for a table or column name (that's what identifier slots are for), and `{{` inside a string literal of any kind (`'…'`, `E'…'`, Postgres's `$tag$ … $tag$`) or a quoted identifier is a compile error ("placeholders can't go inside quotes; write `{{name}}` without them"), since `'{{name}}'` almost always means someone expected substitution. The rare SQL that needs a literal `{{` can write `'{' || '{'`. In comments, `{{` is ignored.
+
+  Neither database uses braces in SQL syntax outside strings, so nothing else needs an exception: `?` (including Postgres's JSON operators `?`, `?|`, `?&`), `:`, `::` casts, array slices like `arr[1:2]`, and `$1` or `$$` are all ordinary SQL text. The engine rewrites placeholders for both databases (`?NNN` on SQLite, `$1`, `$2`, … on Postgres) and builds the value list. Its scanner understands each dialect's string literals, quoted identifiers and comments, including Postgres's `E'…'` and dollar-quoted strings. This removes the most common difference without any extra files.
+- **Per-dialect variants.** A plain `.sql` file is used for every database. A file with a dialect suffix replaces it for that database only:
+
+  ```
+  code/queries/findUser.sql           used by both
+  code/queries/recentPosts.sqlite.sql used on SQLite
+  code/queries/recentPosts.pg.sql     used on Postgres
+  code/migrations/001_create_guestbook.sqlite.sql
+  code/migrations/001_create_guestbook.pg.sql
+  code/migrations/002_add_entry_time.sql
+  ```
+
+  The suffixes are `.sqlite.sql` and `.pg.sql`. Most files stay plain; variants are for the statements that really differ, typically the early `CREATE TABLE` migrations.
+- **Compile-time rules:**
+  - A variant for a dialect the app isn't using is ignored (it's not compiled or checked).
+  - A query or migration that has variants, but none for the active dialect and no plain file, is a compile error.
+  - A query or migration name can't end in `.sqlite` or `.pg`.
+  - All variants of a query or migration (with its plain file, if there is one) must use the same set of placeholder keys, so a variant can't expect values its caller doesn't pass. Order doesn't matter.
+- **Checksums cover the file actually applied.** The `fourfold_migrations` record keeps that file's name and checksum. Adding a variant for the active dialect after its migration was applied therefore counts as changing an applied migration (a compile error). Editing the other dialect's variant isn't detected, since that file was never applied here.
+- **Identifiers** filled into name slots are inserted as written in the slot's list, not quoted (decided in M8). Quoting would change their meaning on Postgres, which folds unquoted names to lowercase; each name is checked at compile time to be plain, so it's safe as written.
+- **The docs include a "portable SQL" guide** (for example: use `STRICT` tables on SQLite so types behave more like Postgres, store times as ISO text or integers, avoid `ILIKE`), so that most apps need few or no variants. The engine doesn't enforce it.
 
 ### Schema changes and migrations
 
@@ -307,17 +346,27 @@ Migrations live in `code/migrations/`, numbered, and run in order:
 code/migrations/
   001_create_guestbook.sql
   002_add_entry_time.sql
-  003_backfill_entry_time.ms
+  003_backfill_entry_time/
+    migrate.ms
+    missingTimes.sql
+    setTime.sql
+    setTime.pg.sql
   004_add_likes_index.sql
+  005_split_guestbook_log.ms
 ```
 
-- **`.sql` migrations** run against the app's database (SQLite or Postgres). They're ordinary SQL files: SQL from the code partition, like named queries.
+- **`.sql` migrations** run against the app's database (SQLite or Postgres). They're ordinary SQL files: SQL from the code partition, like named queries, with the same `{{…}}` placeholders and per-dialect variants (`001_create_guestbook.pg.sql`; SQL dialects, above).
 - **`.ms` migrations** handle what SQL can't: reshaping Tier 1 data files, or backfills that need logic. Each defines `migrate = function()`; returning an `error` value fails the migration. They run in a fresh VM like a job, with `data`, `db`, and file access, but **no `http`, `mail`, `publish`, or `enqueue`**: a migration should change data and nothing else, so that a failed migration can be undone completely.
+- **A migration brings its own SQL** (decided 2026-11-05). App queries in `code/queries/` will change over time, but a fresh install runs every migration years later. So a `.ms` migration never uses them:
+  - A `.ms` migration that uses the database is a **folder** (`003_backfill_entry_time/` above). It holds `migrate.ms`, which defines `migrate`, and its own `.sql` queries. Inside the migration, `db.query("setTime", …)` finds `setTime.sql` in that folder and nowhere else; naming an app query is an error. The folder's queries are named queries in every other way: the same `{{…}}` placeholders, `.sqlite.sql` and `.pg.sql` variants, and compile-time rules.
+  - A `.ms` migration that only reshapes data files (`005_split_guestbook_log.ms`) can be a single file. A single-file migration that names `db` is a compile error: make it a folder.
+  - **A migration can't import app code.** Importing anything outside the migration's own folder (`code/lib/` or anywhere else in `code/`) is a compile error, since that code may change later too. A helper the migration needs is copied into its folder as another `.ms` file, which `migrate.ms` imports. A single-file migration imports nothing.
+  - **All of a migration's database work runs in one transaction,** on SQLite as well as Postgres, so a failure undoes it even before the backup is restored.
 - Numbers must be unique; a duplicate is a compile error. Gaps are fine.
 - **Forward only; there are no "down" migrations.** Down migrations are rarely tested and often wrong. Undoing a migration means restoring the backup taken just before it (below), or writing a new forward migration.
-- **An applied migration can't change.** The engine stores each applied migration's checksum; if the file is edited afterward, that's a compile error ("003 was changed after it was applied; write a new migration instead"). Dev mode offers "redo the last migration" for the edit-and-retry loop while a migration is being written.
+- **An applied migration can't change.** The engine stores each applied migration's checksum; if the file is edited afterward, that's a compile error ("003 was changed after it was applied; write a new migration instead"). For a folder migration the checksum covers every file in the folder the active dialect uses (names and contents), so editing, adding or removing any of them counts as a change. Dev mode offers "redo the last migration" for the edit-and-retry loop while a migration is being written.
 - **A new migration numbered below one already applied** (typically from merging two lines of work) is a compile error: renumber it.
-- A fresh install runs every migration from the start, so the migrations folder *is* the schema's history. This also means `.ms` migrations that call named queries can break later if those queries change. The docs recommend keeping migrations self-contained.
+- A fresh install runs every migration from the start, so the migrations folder *is* the schema's history. That's why a migration brings its own SQL and can't import app code: it has to run the same way years from now.
 
 #### Where the record lives
 
@@ -328,20 +377,28 @@ The record of applied migrations is stored **with the data it describes**, so re
 
 #### Applying migrations: drain, migrate, swap
 
-Pending migrations are applied as part of the whole-app compile and swap (§8):
+**In production, migrations wait for an explicit `fourfold migrate`** (decided 2026-11-05). A deploy that brings new migrations shouldn't change the data until someone has decided it's time, and has seen that the new version compiles:
+
+- A new version with pending migrations compiles, but **isn't swapped in**. The old version keeps serving, and the engine log says how many migrations are pending and to run `fourfold migrate`.
+- **`fourfold migrate ./myapp`** applies them. If the app's server is running, the command asks it to (through a request file in `private/state/`), waits, and prints the outcome; the server does the drain, backup, migrate and swap below. If no server is running, the command applies them itself, taking the backup first.
+- **`fourfold serve` won't start an app with pending migrations** (a fresh install has all of them pending), and says to run `fourfold migrate` first. `fourfold serve --migrate` applies them before it starts serving, for scripted deploys.
+- **In dev mode**, migrations are applied automatically after each recompile (Dev mode, below).
+- **In CGI mode** there's no old version to keep serving, so requests get a 503 (with `pages/503.html` if it exists) until `fourfold migrate` has run.
+
+Applying them follows the whole-app compile and swap (§8):
 
 1. The new version compiles. If it fails, nothing else happens; the old version keeps serving.
 2. If it has no pending migrations, it's swapped in as usual. Most deploys stop here.
-3. Otherwise the engine **stops starting new requests and jobs**. New requests wait in a queue instead of failing.
+3. Otherwise, once migrating is asked for, the engine **stops starting new requests and jobs**. New requests wait in a queue instead of failing.
 4. It **waits for in-flight requests and jobs** on the old version to finish (each is bounded by its budget).
 5. It **takes a backup** (below).
-6. It **runs the pending migrations in order.** Each `.sql` migration runs in its own transaction; SQLite and Postgres both support transactional schema changes.
+6. It **runs the pending migrations in order.** *Decided in M8:* all their database work is **one transaction**, with their records, so a failure undoes the whole batch in the database (SQLite and Postgres both support transactional schema changes). Without that, a Postgres batch failing at its second migration would leave the first applied while the old version resumed.
 7. **On success:** the new version is swapped in and the queued requests proceed on it.
-   **On failure:** the database and data files are restored to the pre-migration backup, the old version resumes, and the error goes to the engine log (and the dev overlay). The site never runs old code against a new schema, or new code against an old one.
+   **On failure:** the database and data files are restored to the pre-migration backup, the old version resumes, and the error goes to the engine log (and the dev overlay). The site never runs old code against a new schema, or new code against an old one. *As built:* the database by the batch's transaction, the data files from the backup.
 
 - **No request on the old version ever sees the new schema**, because there are none left running when migration starts. That's the simplest rule that's always correct, and the pause is a second or less for typical hobby-scale migrations.
 - **If a migration runs long**, queued requests wait up to a configured limit (e.g. 30 seconds), then get a 503 with `pages/503.html` if it exists ("down for maintenance; back shortly"). Long migrations (an index on a big table) get their own generous budget, separate from requests and jobs.
-- **The same lock works in every hosting mode.** Every request and job holds a shared "schema lock" while it runs; the migrator takes it exclusively. In standalone mode this is in memory; in CGI mode it's a file lock in `private/state/`, so independent CGI processes coordinate too. In CGI mode, the first request that sees new code runs the migrations while later ones wait.
+- **The same lock works in every hosting mode.** Every request and job holds a shared "schema lock" while it runs; the migrator takes it exclusively. In standalone mode this is in memory; in CGI mode it's a file lock in `private/state/`, so independent CGI processes coordinate too, and `fourfold migrate` takes it while it works.
 - **Rolling back code past a migration is refused.** If the database is at migration 7 and the new version only knows 1–5 (an older version of the code was deployed), the swap is refused with a clear error, since old code would run against a schema it doesn't understand. The fix is to restore a backup, or deploy code that includes the migrations. An explicit override exists for emergencies.
 
 **Considered: online ("expand/contract") migrations**, where migrations run while the old version is still serving and must therefore be compatible with both old and new code (add a column in one deploy, start using it in the next, drop the old one in a third). This avoids the pause but asks for discipline most hobby apps don't need. It may come later as an opt-in deploy mode for large apps.
@@ -358,19 +415,23 @@ Migrations depend on reliable backups, and so does everything else.
 - **`fourfold backup ./myapp`** makes a consistent snapshot of `data/` and `private/state/`. SQLite files are copied with SQLite's online backup API, not a file copy, so a write in progress can't corrupt the copy. Data files are copied under a brief write lock. Sessions can optionally be left out.
 - **Automatic backups:** before every migration batch (always), and on a schedule if configured, with a retention limit. They go to `private/state/backups/` by default, or a configured directory **outside every partition**. A backup holds the auth store, so it must never end up somewhere app code or the web can reach.
 - **`fourfold restore`** puts a snapshot back while the app is stopped (or paused, as for migrations).
-- **Postgres** is backed up by its own tools (`pg_dump`, or the provider's backups). Fourfold records the migration state but doesn't own Postgres backups. Without a Fourfold-made backup, a failed Postgres migration is undone by its transaction alone, which covers `.sql` migrations; an `.ms` migration on Postgres runs its database work in one transaction for the same reason.
+- **Postgres** is backed up by its own tools (`pg_dump`, or the provider's backups). Fourfold records the migration state but doesn't own Postgres backups. Without a Fourfold-made backup, a failed Postgres migration is undone by its transaction alone, which covers `.sql` migrations; an `.ms` migration runs its database work in one transaction for the same reason.
+
+*As built in M8:* a backup is a folder, `<time>-<reason>/`, with `data/` (and the SQLite database, through SQLite's backup API), `state/` (without logs) and `backup.json`; taken while requests are held, then put back with `fourfold restore` (which backs up what's there first). Automatic ones ("before-migrations", "scheduled") are pruned to `config.backups.keep`; others are kept. Sessions can't be left out of a backup yet.
 
 #### Dev mode
 
 - Pending migrations are applied automatically after each successful recompile (after the usual wait for files to stop changing), with a backup each time.
 - A **migrations panel** shows which migrations are applied, pending, or failed, with "redo last" and "reset dev data" (recreate the database from scratch and rerun every migration).
 - **Seed data:** if `code/seed.ms` exists, it runs after "reset dev data" (and on a fresh dev database) to fill in sample content and test users' data. It never runs in production.
+- *As built in M8:* the panel is `/__dev/migrations`. "Redo last" restores the latest "before-migrations" backup (data and database) and lets the recompile apply what's there now; "reset dev data" empties `data/` (after a backup) and recompiles, so every migration and the seed run. Both work with SQLite only, since a Postgres database isn't in Fourfold's backups.
 
 #### Still open
 
-- **SQL dialects.** SQLite and Postgres differ, so "moving to Postgres is mostly a configuration change" (Middle tier, above) isn't quite true for migrations. Options include per-dialect variants (`004_x.sqlite.sql`, `004_x.pg.sql`) or a restricted portable subset.
-- Whether production should apply migrations automatically on deploy (the default above) or optionally wait for an explicit `fourfold migrate`.
-- How `.ms` migrations should reach the database without depending on named queries that may change later.
+- Copying an existing SQLite database's data into Postgres when an app moves. Running the migrations on Postgres creates the schema, but not the rows. This could be a `fourfold` command, or left to the developer.
+- Several queries from one request as one transaction (`db.transaction(@f)`, perhaps). Migrations have it; requests don't yet.
+- Binary columns (BLOB, `bytea`) in and out of `db.query`, perhaps as `RawData`.
+- Leaving sessions out of a backup (`fourfold backup --no-sessions`).
 
 ---
 
@@ -1148,7 +1209,7 @@ No VM lives beyond its request, so the core security property still holds. WebSo
 ## 8. Deployment
 
 - The developer uploads files with plain **scp/rsync**. No special tooling is required.
-- **Whole-app compile and swap:** the engine compiles the entire code tree into a single compiled app, then swaps it in atomically. If anything fails to compile, it keeps serving the old version and logs the error, so a broken or partial upload never takes the site down. Requests already running finish on the old version; new requests get the new one. If the new version has pending migrations, the swap waits for them (see §3, [Schema changes and migrations](#schema-changes-and-migrations)).
+- **Whole-app compile and swap:** the engine compiles the entire code tree into a single compiled app, then swaps it in atomically. If anything fails to compile, it keeps serving the old version and logs the error, so a broken or partial upload never takes the site down. Requests already running finish on the old version; new requests get the new one. If the new version has pending migrations, it isn't swapped in until `fourfold migrate` applies them (in dev mode, automatically; see §3, [Schema changes and migrations](#schema-changes-and-migrations)).
 - **Wait for quiet:** the engine watches `code/` and recompiles only once files have stopped changing for a second or two. Optionally, touching a trigger file (e.g. `code/.deploy`) means "load now."
 - An optional `fourfold deploy` wrapper could rsync to a staging folder and then swap directories atomically.
 - **Deploys should only touch `code/`.** The docs must warn that, for example, `rsync --delete` of the whole tree from a laptop would wipe production data.

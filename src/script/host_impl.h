@@ -36,6 +36,8 @@ struct Run {
         Request,     // a handler, for one request; may park
         Discovery,   // a page's top level at compile time; may not park
         Data,        // a declaration or config file, evaluated as data; may not park or import
+        Migration,   // a migration: its top level, then migrate(); may park
+        Seed,        // code/seed.ms's top level; may park
     };
     enum class Phase { TopLevel, Handler };
 
@@ -51,6 +53,7 @@ struct Run {
     const ScriptBundle* bundle = nullptr;
     const PageProgram* page = nullptr;
     const HandlerStub* stub = nullptr;
+    const MigrationProgram* migration = nullptr;   // Migration runs
     HandlerRef handler;
     RunContext context;                       // the request, render options, and services
     std::vector<RenderWarning> warnings;      // from frag(), so far
@@ -82,6 +85,8 @@ struct Run {
 
     // The run's state, for intrinsics: they reach it through hostData.
     static Run* of(MiniScript::Context& ctx);
+    // A request, migration or seed: it may park (wait for the worker pool).
+    bool canPark() const { return kind == Kind::Request || kind == Kind::Migration || kind == Kind::Seed; }
 };
 
 struct ScriptHost::Impl {
@@ -99,6 +104,11 @@ struct ScriptHost::Impl {
     // Starting and finishing request runs (scheduler.cpp).
     void startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RunContext context,
                   ScriptHost::Done done);
+    // A migration's run, or the seed's (`number` < 0).
+    void startMigration(std::shared_ptr<const CompiledApp> app, int number, RunContext context,
+                        ScriptHost::Done done);
+    // The budget for `run`: its own, or the host's.
+    const ScriptBudget& budgetOf(const Run& run) const;
     // Schedules a prepared run (a request or a discovery run), with its
     // wall-clock deadline.
     void schedule(std::unique_ptr<Run> run);
@@ -123,8 +133,7 @@ struct ScriptHost::Impl {
     // task, with each page's top level run as a scheduled discovery run, so
     // requests keep being served during a long compile. `done` is called on
     // the script thread. The files must stay alive until then.
-    void compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs,
-                 std::function<void(CompiledScripts)> done);
+    void compile(const ScriptSources& sources, std::function<void(CompiledScripts)> done);
 
     // Evaluating a file as data (evaluate.cpp). `done` is called on the
     // script thread.

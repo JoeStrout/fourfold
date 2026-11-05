@@ -83,6 +83,7 @@ std::string callFor(const std::string& target, Value function) {
 // names the `session` global, and which libs it imports.
 struct References {
     bool session = false;
+    bool db = false;              // names the `db` global
     std::set<std::string> imports;
     bool dynamicImport = false;   // import of something other than a string literal
 };
@@ -136,6 +137,7 @@ References scanReferences(const std::string& source) {
             bool member = prevSignificant == '.';   // x.session isn't the global
             // formState and reshow keep a form's state in the session.
             if (!member && (word == "session" || word == "formState" || word == "reshow")) refs.session = true;
+            if (!member && word == "db") refs.db = true;
             afterImport = !member && word == "import";
             prevSignificant = 'a';
             continue;
@@ -158,6 +160,8 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
     ScriptHost::Impl* host = nullptr;
     const std::vector<CodeFile>* pages = nullptr;
     const std::vector<CodeFile>* libs = nullptr;
+    const std::vector<MigrationScript>* migrations = nullptr;
+    const std::optional<CodeFile>* seed = nullptr;
     std::function<void(CompiledScripts)> done;
 
     CompiledScripts out;
@@ -165,7 +169,7 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
     std::map<std::string, References> libRefs;   // by import name
     std::map<std::string, List<FuncDef>> stubCache;
     bool failed = false;
-    size_t next = 0;   // the next step: libs first, then pages
+    size_t next = 0;   // the next step: libs first, then pages, then migrations and the seed
 
     void error(ScriptError e) {
         out.diagnostics.push_back(diagnosticFrom(e));
@@ -184,6 +188,12 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
             postNext();
         } else if (i - libs->size() < pages->size()) {
             compilePage((*pages)[i - libs->size()]);   // posts the next step when it's done
+        } else if (i - libs->size() - pages->size() < migrations->size()) {
+            compileMigration((*migrations)[i - libs->size() - pages->size()]);
+            postNext();
+        } else if (i - libs->size() - pages->size() == migrations->size() && seed->has_value()) {
+            compileSeed(**seed);
+            postNext();
         } else {
             if (!failed) out.bundle = makeBundlePtr(std::move(bundle));
             bundle.reset();
@@ -211,6 +221,87 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         bundle->root(module);
         bundle->libs[importName] = module;
         libRefs[importName] = scanReferences(source);
+    }
+
+    // A migration: compiled now, run only when it's applied. It may import
+    // only its folder's helpers (never code/lib/, which may change after it
+    // was applied); a single file imports nothing, and can't use `db`.
+    void compileMigration(const MigrationScript& m) {
+        std::string mainName = codeFileName(m.main.path());
+        MigrationProgram program;
+        program.fileName = mainName;
+        std::set<std::string> helperNames;
+        std::vector<std::pair<std::string, References>> refs;   // by file name
+        bool ok = true;
+        for (const CodeFile& helper : m.helpers) {
+            std::string fileName = codeFileName(helper.path());
+            std::string_view base = helper.path().name();
+            std::string importName(base.substr(0, base.size() - 3));
+            Value compileError;
+            const std::string& source = helper.contents();
+            FuncDef module = MiniScript::Interpreter::CompileToFunc(String(source.data(), source.size()),
+                                                                    String(fileName.c_str()), &compileError);
+            if (!compileError.IsNull()) {
+                error(scriptErrorFrom(compileError, fileName));
+                ok = false;
+                continue;
+            }
+            bundle->root(module);
+            program.helpers[importName] = module;
+            helperNames.insert(importName);
+            refs.emplace_back(fileName, scanReferences(source));
+        }
+        Value compileError;
+        program.functions = compileProgram(m.main.contents(), mainName, &compileError);
+        if (!compileError.IsNull()) {
+            error(scriptErrorFrom(compileError, mainName));
+            return;
+        }
+        bundle->root(program.functions[0]);
+        refs.emplace_back(mainName, scanReferences(m.main.contents()));
+        for (const auto& [fileName, r] : refs) {
+            if (!m.folder && r.db) {
+                error({"uses db: a migration that uses the database must be a folder, with migrate.ms and its own "
+                       "queries (code/migrations/" + m.name + "/)",
+                       fileName, 0});
+                ok = false;
+            }
+            if (r.dynamicImport) {
+                error({"a migration's import must name one of its folder's files, in quotes", fileName, 0});
+                ok = false;
+            }
+            for (const std::string& name : r.imports) {
+                if (helperNames.count(name)) continue;
+                error({m.folder ? "imports \"" + name + "\", which isn't in its folder: a migration can't import "
+                                  "app code (it may change later); copy what it needs into code/migrations/" +
+                                  m.name + "/"
+                                : "imports \"" + name + "\": a single-file migration can't import anything; make it a "
+                                  "folder, and copy what it needs into it",
+                       fileName, 0});
+                ok = false;
+            }
+        }
+        const List<FuncDef>* stub = stubFor("migrate", *bundle, stubCache);
+        if (!ok || !stub) return;
+        program.stub = {*stub};
+        bundle->migrations.emplace(m.number, std::move(program));
+    }
+
+    // code/seed.ms: its top level is the seed. Like a page, it may import
+    // code/lib/.
+    void compileSeed(const CodeFile& file) {
+        std::string fileName = codeFileName(file.path());
+        Value compileError;
+        List<FuncDef> functions = compileProgram(file.contents(), fileName, &compileError);
+        if (!compileError.IsNull()) {
+            error(scriptErrorFrom(compileError, fileName));
+            return;
+        }
+        bundle->root(functions[0]);
+        PageProgram program;
+        program.fileName = fileName;
+        program.functions = functions;
+        bundle->seed = std::move(program);
     }
 
     // Whether code with these references can reach `session`,
@@ -368,12 +459,13 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
 
 }  // namespace
 
-void ScriptHost::Impl::compile(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs,
-                               std::function<void(CompiledScripts)> done) {
+void ScriptHost::Impl::compile(const ScriptSources& sources, std::function<void(CompiledScripts)> done) {
     auto job = std::make_shared<CompileJob>();
     job->host = this;
-    job->pages = &pages;
-    job->libs = &libs;
+    job->pages = &sources.pages;
+    job->libs = &sources.libs;
+    job->migrations = &sources.migrations;
+    job->seed = &sources.seed;
     job->done = std::move(done);
     job->step();
 }

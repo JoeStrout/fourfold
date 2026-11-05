@@ -106,6 +106,9 @@ public:
     Status remove(const std::string& idHash);
     // Every session of this user ("sign out everywhere").
     Status removeForUser(const std::string& userId);
+    // Every anonymous session (after migrations, if the config asks: their
+    // contents may have the old shapes). Returns how many.
+    Result<int64_t> removeAnonymous();
 
     // Removes expired sessions; returns how many.
     Result<int64_t> sweepExpired();

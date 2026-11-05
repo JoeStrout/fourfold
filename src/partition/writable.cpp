@@ -331,6 +331,41 @@ Result<std::vector<DirEntry>> list(int rootFd, const RelPath& dir, const std::st
     return out;
 }
 
+Result<std::optional<std::string>> readEngineFile(int folderFd, const std::string& name, size_t maxBytes,
+                                                  const std::string& what) {
+    Fd fd(openat(folderFd, name.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+    if (!fd.valid()) {
+        if (errno == ENOENT) return std::optional<std::string>();
+        return fileError(errno, what);
+    }
+    std::string out;
+    char buffer[16 * 1024];
+    while (true) {
+        ssize_t n = ::read(fd.get(), buffer, sizeof buffer);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return fileError(errno, what);
+        }
+        if (n == 0) break;
+        out.append(buffer, static_cast<size_t>(n));
+        if (out.size() > maxBytes) return makeError(ErrorCode::TooLarge, what + ": too large");
+    }
+    return std::optional<std::string>(std::move(out));
+}
+
+Status writeEngineFile(int folderFd, const std::string& name, std::string_view bytes, mode_t mode,
+                       const std::string& what) {
+    auto temp = writeTemp(folderFd, bytes, mode, what);
+    if (!temp) return temp.error();
+    if (renameat(folderFd, temp.value().c_str(), folderFd, name.c_str()) < 0) {
+        int err = errno;
+        unlinkat(folderFd, temp.value().c_str(), 0);
+        return fileError(err, what);
+    }
+    ::fsync(folderFd);
+    return {};
+}
+
 Result<Fd> openLockFile(int folderFd, const std::string& name, const std::string& what) {
     Fd fd = openCreating(folderFd, name, O_RDWR, 0600);
     if (!fd.valid()) return fileError(errno, what);
