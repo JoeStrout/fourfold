@@ -14,7 +14,7 @@ std::string full(const std::string& text) {
     return r.html.str();
 }
 
-std::string comment(const std::string& text) {
+std::string limited(const std::string& text) {
     MarkdownResult r = renderMarkdown(text);
     REQUIRE(r.ok());
     return r.html.str();
@@ -30,16 +30,16 @@ std::string fullInner(const std::string& text) {
     return inner(full(text));
 }
 
-std::string commentInner(const std::string& text) {
-    return inner(comment(text));
+std::string limitedInner(const std::string& text) {
+    return inner(limited(text));
 }
 
 }  // namespace
 
 TEST_CASE("markdown: the wrapper, and the profiles' names") {
     CHECK_EQ(full("hi"), "<div class=\"markdown\">\n<p>hi</p>\n</div>\n");
-    CHECK_EQ(comment("hi"), "<div class=\"markdown comment\">\n<p>hi</p>\n</div>\n");
-    CHECK_EQ(markdownProfileNamed("comment"), MarkdownProfile::Comment);
+    CHECK_EQ(limited("hi"), "<div class=\"markdown limited\">\n<p>hi</p>\n</div>\n");
+    CHECK_EQ(markdownProfileNamed("limited"), MarkdownProfile::Limited);
     CHECK_EQ(markdownProfileNamed("full"), MarkdownProfile::Full);
     CHECK_FALSE(markdownProfileNamed("raw"));
     CHECK(renderMarkdown("x").html.hasMarkdown());
@@ -48,7 +48,7 @@ TEST_CASE("markdown: the wrapper, and the profiles' names") {
 
 TEST_CASE("markdown: both profiles share the basics") {
     for (bool f : {true, false}) {
-        auto r = [&](const std::string& t) { return f ? fullInner(t) : commentInner(t); };
+        auto r = [&](const std::string& t) { return f ? fullInner(t) : limitedInner(t); };
         CHECK_EQ(r("a\nb"), "<p>a\nb</p>\n");
         CHECK_EQ(r("a  \nb"), "<p>a<br>\nb</p>\n");
         CHECK_EQ(r("**b** *i* ~~s~~ `c<d>`"), "<p><strong>b</strong> <em>i</em> <del>s</del> <code>c&lt;d&gt;</code></p>\n");
@@ -70,17 +70,17 @@ TEST_CASE("markdown: both profiles share the basics") {
 }
 
 TEST_CASE("markdown: raw HTML is shown as text") {
-    CHECK_EQ(commentInner("<script>alert(1)</script>"), "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>\n");
+    CHECK_EQ(limitedInner("<script>alert(1)</script>"), "<p>&lt;script&gt;alert(1)&lt;/script&gt;</p>\n");
     CHECK_EQ(fullInner("<div onclick=\"x\">hi</div>"), "<p>&lt;div onclick=&quot;x&quot;&gt;hi&lt;/div&gt;</p>\n");
-    CHECK_EQ(commentInner("a <img src=x onerror=alert(1)> b"),
+    CHECK_EQ(limitedInner("a <img src=x onerror=alert(1)> b"),
              "<p>a &lt;img src=x onerror=alert(1)&gt; b</p>\n");
-    CHECK_EQ(commentInner("<!-- comment -->"), "<p>&lt;!-- comment --&gt;</p>\n");
+    CHECK_EQ(limitedInner("<!-- comment -->"), "<p>&lt;!-- comment --&gt;</p>\n");
 }
 
 TEST_CASE("markdown: links follow the URL rule") {
     CHECK_EQ(fullInner("[x](https://example.com/a?b=1)"), "<p><a href=\"https://example.com/a?b=1\">x</a></p>\n");
     CHECK_EQ(fullInner("[x](/a \"T<\")"), "<p><a href=\"/a\" title=\"T&lt;\">x</a></p>\n");
-    CHECK_EQ(commentInner("[x](https://e.com)"), "<p><a href=\"https://e.com\" rel=\"nofollow ugc\">x</a></p>\n");
+    CHECK_EQ(limitedInner("[x](https://e.com)"), "<p><a href=\"https://e.com\" rel=\"nofollow ugc\">x</a></p>\n");
     const char* bad[] = {
         "[click](javascript:alert(1))",
         "[click](JAVASCRIPT:alert(1))",
@@ -100,7 +100,7 @@ TEST_CASE("markdown: links follow the URL rule") {
     }
     CHECK_EQ(fullInner("[click](javascript:alert(1))"), "<p>click</p>\n");
     // Autolinks.
-    CHECK_EQ(commentInner("see https://e.com/x"), "<p>see <a href=\"https://e.com/x\" rel=\"nofollow ugc\">https://e.com/x</a></p>\n");
+    CHECK_EQ(limitedInner("see https://e.com/x"), "<p>see <a href=\"https://e.com/x\" rel=\"nofollow ugc\">https://e.com/x</a></p>\n");
     CHECK_EQ(fullInner("www.e.com"), "<p><a href=\"http://www.e.com\">www.e.com</a></p>\n");
     CHECK_EQ(fullInner("me@e.com"), "<p><a href=\"mailto:me@e.com\">me@e.com</a></p>\n");
     // Quotes and spaces in a destination are encoded.
@@ -110,10 +110,10 @@ TEST_CASE("markdown: links follow the URL rule") {
 TEST_CASE("markdown: images") {
     CHECK_EQ(fullInner("![a *b*](/i.png \"t\")"), "<p><img src=\"/i.png\" alt=\"a b\" title=\"t\"></p>\n");
     CHECK_EQ(fullInner("![x\"y](javascript:x)"), "<p>x&quot;y</p>\n");
-    // In comments, a link to the image instead.
-    CHECK_EQ(commentInner("![cat](https://e.com/c.png)"),
+    // In Limited Markdown, a link to the image instead.
+    CHECK_EQ(limitedInner("![cat](https://e.com/c.png)"),
              "<p><a href=\"https://e.com/c.png\" rel=\"nofollow ugc\">cat</a></p>\n");
-    CHECK_EQ(commentInner("![](https://e.com/c.png)"),
+    CHECK_EQ(limitedInner("![](https://e.com/c.png)"),
              "<p><a href=\"https://e.com/c.png\" rel=\"nofollow ugc\">https://e.com/c.png</a></p>\n");
 }
 
@@ -122,7 +122,7 @@ TEST_CASE("markdown: headings") {
              "<h1 id=\"hello-world\">Hello, World!</h1>\n<h2 id=\"hello-world-1\">Hello, World!</h2>\n"
              "<h3 id=\"café--code\">Café &amp; <code>code</code></h3>\n");
     // Comments get no headings and no ids, so they can't clobber the page's.
-    CHECK_EQ(commentInner("# entries\n## two"), "<p>entries</p>\n<p>two</p>\n");
+    CHECK_EQ(limitedInner("# entries\n## two"), "<p>entries</p>\n<p>two</p>\n");
     MarkdownOptions o;
     o.profile = MarkdownProfile::Full;
     CHECK_EQ(renderMarkdown("intro\n\n# The *Title*\n# Second", o).title, "The Title");
@@ -145,7 +145,7 @@ TEST_CASE("markdown: rewriting URLs (full profile)") {
     CHECK_EQ(seen, std::vector<std::string>{"setup.md#x", "gone.md", "i.png (image)"});
     CHECK_EQ(r.warnings, std::vector<std::string>{"links to gone.md, which doesn't exist"});
     // Comments aren't rewritten.
-    o.profile = MarkdownProfile::Comment;
+    o.profile = MarkdownProfile::Limited;
     seen.clear();
     renderMarkdown("[a](setup.md)", o);
     CHECK(seen.empty());
@@ -162,7 +162,7 @@ TEST_CASE("markdown: the size cap") {
 }
 
 TEST_CASE("markdown: NUL and invalid input don't break it") {
-    CHECK_EQ(commentInner(std::string("a\0b", 3)), "<p>a\xEF\xBF\xBD" "b</p>\n");
+    CHECK_EQ(limitedInner(std::string("a\0b", 3)), "<p>a\xEF\xBF\xBD" "b</p>\n");
     CHECK(renderMarkdown("\xFF\xFE [x](\xC0)").ok());
     CHECK(renderMarkdown("").ok());
 }

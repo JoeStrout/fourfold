@@ -2,7 +2,7 @@
 // template that breaks the field rules never deploys.
 //
 //   frags/**/*.html   fragments, by name ("entry", "auth/login")
-//   frags/**/*.md     Markdown fragments, rendered now (no fields)
+//   frags/**/*.md     Markdown fragments (Dynamic Markdown, with fields)
 //   frags/layout/markdown.html   the wrapper for Markdown pages: a whole document
 //   frags/auth/layout.html       the wrapper for the engine's sign-in pages: a whole document
 //   pages/**/*.html   pages
@@ -66,14 +66,9 @@ void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp
             continue;
         }
         if (extension == ".md") {
-            MarkdownOptions options;
-            options.profile = MarkdownProfile::Full;
-            MarkdownResult md = renderMarkdown(file.value().contents(), options);
-            if (!md.ok()) {
-                diagnostics.error(fileName, *md.error);
-                continue;
-            }
-            fragments.emplace(name, CompiledTemplate::fromMarkdown(entry.path, std::move(md.html)));
+            ParsedTemplate parsed = parseMarkdownTemplate(file.value(), TemplateKind::Fragment);
+            report(parsed.errors, diagnostics);
+            if (parsed.ok()) fragments.emplace(name, std::move(parsed.compiled));
             continue;
         }
         // The layouts wrap whole pages, so each is a page itself.

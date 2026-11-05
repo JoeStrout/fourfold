@@ -361,7 +361,7 @@ TEST_CASE("AppServer: the guestbook example, with HTMX") {
                                       csrf + "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: " +
                                           std::to_string(body.size()) + "\r\n\r\n" + body);
     CHECK(contains(signed_, "HTTP/1.1 200 OK\r\n"));
-    CHECK(contains(signed_, "<li><b>&lt;img src=x onerror=alert(1)&gt;</b>: <div class=\"markdown comment\">\n"
+    CHECK(contains(signed_, "<li><b>&lt;img src=x onerror=alert(1)&gt;</b>: <div class=\"markdown limited\">\n"
                             "<p><strong>hi</strong></p>\n</div>\n</li>"));
     CHECK_FALSE(contains(signed_, "/__dev/client.js"));   // a fragment, not a page
     // Without HTMX, a redirect back.
@@ -377,6 +377,65 @@ TEST_CASE("AppServer: the guestbook example, with HTMX") {
     CHECK(contains(get(port, "/news.md"), "404 Not Found"));
     std::string htmx = get(port, "/__fourfold/htmx.js");
     CHECK(contains(htmx, "htmx.config.allowEval = false;"));
+
+    server->loop().stop();
+    serving.join();
+}
+
+// M6.1's exit criterion: a visitor counter and a guestbook listing written
+// entirely in Markdown, at /x as HTML and at /x.md as Markdown.
+TEST_CASE("AppServer: the Markdown site example, as HTML and as Markdown") {
+    std::ostringstream out, err;
+    test::TempDir dir;
+    auto server = AppServer::startDev(copyApp(dir, FOURFOLD_TESTS_DIR "/../examples/markdown-site"), 0, out, err);
+    if (!server && contains(err.str(), "Operation not permitted")) {
+        MESSAGE("skipped: binding a local port isn't permitted here");
+        return;
+    }
+    REQUIRE_MESSAGE(server, err.str());
+    REQUIRE_MESSAGE(server->compiled(), err.str());
+    std::thread serving([&] { server->loop().run(); });
+    uint16_t port = server->port();
+
+    // The counter: the same code, in either format.
+    std::string html = get(port, "/visits");
+    CHECK(contains(html, "Content-Type: text/html; charset=utf-8\r\n"));
+    CHECK(contains(html, "<p>This page has been visited <strong>1</strong> times."));
+    CHECK(contains(html, "You asked for it as HTML."));
+    CHECK(contains(html, "<link rel=\"alternate\" type=\"text/markdown\" href=\"/visits.md\">"));
+    CHECK(contains(html, "<code>{{visits}}</code>"));
+    std::string md = get(port, "/visits.md");
+    CHECK(contains(md, "HTTP/1.1 200 OK\r\n"));
+    CHECK(contains(md, "Content-Type: text/markdown; charset=utf-8; variant=GFM\r\n"));
+    CHECK(contains(md, "\r\n\r\n# Visitor counter\n\nThis page has been visited **2** times. It's a Markdown file with a\n"
+                       "field, `{{visits}}`, filled by"));
+    CHECK(contains(md, "You asked for it as MARKDOWN."));
+    CHECK(contains(md, "[Home](index.md)"));   // links as written
+    CHECK_FALSE(contains(md, "<"));            // no layout, no dev tools
+
+    // The guestbook: an .md fragment per entry, and visitors' messages as
+    // Limited Markdown.
+    html = get(port, "/guestbook");
+    CHECK(contains(html, "<p>4 entries so far."));
+    CHECK(contains(html, "<p><strong>&lt;script&gt;alert(&#39;hi&#39;)&lt;/script&gt;</strong> wrote:</p>"));
+    CHECK(contains(html, "<p>Click me and <a href=\"https://evil.example/pixel.gif\" rel=\"nofollow ugc\">tracker</a></p>"));
+    CHECK(contains(html, "<p>Not a heading, in a message</p>"));
+    CHECK_FALSE(contains(html, "<img"));
+    CHECK_FALSE(contains(html, "href=\"javascript"));
+    md = get(port, "/guestbook.md");
+    CHECK(contains(md, "Content-Type: text/markdown; charset=utf-8; variant=GFM\r\n"));
+    CHECK(contains(md, "4 entries so far."));
+    CHECK(contains(md, "**Ada** wrote:\n\nWhat a **lovely** guestbook. See [the docs](https://example.com).\n"));
+    CHECK(contains(md, "**\\<script\\>alert\\(\\'hi\\'\\)\\<\\/script\\>** wrote:"));
+    CHECK(contains(md, "**\\*\\*Grace\\*\\*** wrote:\n\n- lists\n- `code`\n\nNot a heading, in a message\n"));
+    CHECK(contains(md, "Click me and [tracker](https://evil.example/pixel.gif)\n"));
+    CHECK_FALSE(contains(md, "](javascript"));
+    CHECK_FALSE(contains(md, "!["));
+
+    // Only Markdown pages have a Markdown URL; an index page's is index.md.
+    CHECK(contains(get(port, "/guide/index.md"), "# The guide"));
+    CHECK(contains(get(port, "/index.md"), "# A Markdown site"));
+    CHECK(contains(get(port, "/guide.md"), "404 Not Found"));
 
     server->loop().stop();
     serving.join();

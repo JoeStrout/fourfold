@@ -89,6 +89,8 @@ struct RequestFacts {
     Pairs headers;         // names lowercased; repeated names joined with ", "
     Pairs form;            // decoded url-encoded POST body; raw strings
     std::optional<UserFacts> user;   // the signed-in visitor, looked up for this request
+    // "html", or "markdown" for a Markdown page's /x.md URL (`req.format`).
+    std::string format = "html";
 };
 
 // The engine's users, for the `users` module (overview §5, The user object):
@@ -175,7 +177,7 @@ struct ScriptError {
 // plain data before it leaves the script thread.
 struct HandlerOutcome {
     enum class Kind {
-        Render,      // render returned a map: `body` is its page, filled in
+        Render,      // render returned a map: `body` is its page, filled in (as HTML or Markdown)
         Fragment,    // frag(...), markdown(...) or unsafeHTML(...): `body` is the HTML
         Text,        // a string: text/plain
         Redirect,    // redirect(url): 303
@@ -187,7 +189,9 @@ struct HandlerOutcome {
 
     Kind kind = Kind::NoContent;
     std::string body;          // Render, Fragment, Text, Json, Status
-    std::string contentType;   // Status, when it has a body
+    // Status, when it has a body; Render and Fragment, when the body is
+    // Markdown (kMarkdownContentType). Empty: HTML.
+    std::string contentType;
     // Fragment, or Status with an HTML body: it contains a <script>, which
     // can't be sent on its own (it wouldn't have the page's CSP nonce).
     bool hasScript = false;

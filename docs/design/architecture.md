@@ -76,7 +76,7 @@ Several facts about the MS2 C++ core (`~/svnrepo/miniscript2`) shape the archite
 | **partition** | The four file areas, with access rules as types | `CodeTree`, `DataDir`, `Dropbox`, `ConfigDir`, `StateDir` |
 | **sqlite**, **net**, **threads**, **log** | Thin wrappers over third-party libraries and the OS | |
 | **template** | Parse templates with contextual escaping; render them | `CompiledTemplate`, `FieldSource` |
-| **markdown** | Fourfold Markdown (md4c, two profiles) | `renderMarkdown(text, profile)` |
+| **markdown** | FourFold Flavored Markdown (md4c; Limited, Full and Dynamic) | `renderMarkdown(text, profile)`, `parseMarkdownTemplate`, `writeMarkdown` |
 | **compiledapp** | The data model of a compiled app | `CompiledApp` |
 | **compiler** | `CodeTree` → `CompiledApp` + diagnostics | `compile(CodeTree, …)` |
 | **config** | `private/config` + server config → typed, clamped settings | `AppConfig` |
@@ -203,13 +203,17 @@ The path rules, as built in M1 (several follow raylib-miniscript's `notes/SANDBO
 **`template`.** Two halves sharing one data structure:
 
 - `parseTemplate(CodeFile, kind) → CompiledTemplate | diagnostics`: tokenizes HTML, following the spec's tokenizer states, and classifies each field's context: text, RCDATA (`<title>`, `<textarea>`), quoted attribute, boolean attribute, URL start, URL part, or script; anywhere else is a compile error. It validates page vs. fragment shape, and records every `<script>` and `<form method="post">` (for nonce and CSRF injection) and the end of `<head>` (for `markdown.css`). `resolveIncludes` then splices `{{> includes}}` in, with cycle detection. All the logic in §4's escaping tables lives here; [m4-results.md](m4-results.md) lists every rule.
-- `render(CompiledTemplate, FieldSource, RenderOptions) → RenderResult`: walks the template, asks the `FieldSource` for each field's value, and escapes by context. `RenderOptions` carries the CSP nonce to inject (and, from M5, the CSRF token). The result is `Html`, or an error located at the field, plus missing- and unused-field warnings.
+- `render(CompiledTemplate, FieldSource, RenderOptions) → RenderResult`: walks the template, asks the `FieldSource` for each field's value, and escapes by context. `RenderOptions` carries the CSP nonce to inject (and, from M5, the CSRF token; from M6.1, the output format and the `rel="alternate"` URL). The result is `Html`, or an error located at the field, plus missing- and unused-field warnings.
+- Markdown templates (M6.1) are `CompiledTemplate`s too, built by `markdown`'s `parseMarkdownTemplate`, with two part lists: the HTML form and the Markdown form (the source, split at its fields), plus the page title's parts. `render` writes either, by `RenderOptions::format` (`OutputFormat::Html` or `Markdown`), with two more contexts, `MarkdownText` and `MarkdownBlock`, and the Markdown escapers (`escapeMarkdownText`, `markdownDestination`). `renderMarkdownPage` wraps a page's HTML in the layout (or the built-in page), and `renderFragment` gives `frag` its result with a Markdown form when the output is Markdown. `resolveIncludes` splices both forms, and refuses an HTML fragment in a Markdown template.
 
 `FieldSource` is an interface returning a small variant (missing, `null`, number, string, `Html`, `Datum` for JSON-in-script, or an error). The script bindings implement it over a `Value` map (`ValueFields`); pages with no code use an empty one; tests use a literal one (`MapFields`). **`template` therefore doesn't depend on MS2**, and the hardest-to-get-right security code can be tested in isolation with tables of inputs and expected outputs.
 
-`Html` is the C++ type for rendered, trusted HTML. Only `render`, `renderMarkdown`, and the `unsafeHTML` intrinsic produce it. In scripts it's wrapped as a handle (§4, Return values).
+`Html` is the C++ type for rendered, trusted HTML. Only `render`, `renderMarkdown`, and the `unsafeHTML` intrinsic produce it. In scripts it's wrapped as a handle (§4, Return values). Html made from Markdown also carries a `MarkdownForm` (ready, deferred, or not made), so it can go in a Markdown template and be written in either format; HTML fragments and `unsafeHTML` have none.
 
-**`markdown`.** `renderMarkdown(text, options) → MarkdownResult`, over md4c's parser (with raw HTML off) and a renderer of our own, which applies the profile rules, the URL rule (shared with `template`), heading ids, link rewriting (through a callback the compiler supplies), and the size cap. Pure, and MS2-free.
+**`markdown`.** `renderMarkdown(text, options) → MarkdownResult`, over md4c's parser (with raw HTML off) and a renderer of our own, which applies the profile rules, the URL rule (shared with `template`), heading ids, link rewriting (through a callback the compiler supplies), and the size cap. Pure, and MS2-free. From M6.1 it also has:
+
+- `parseMarkdownTemplate(CodeFile, kind, options) → ParsedTemplate`: Dynamic Markdown. Each `{{...}}` (and reserved `[[`) becomes a placeholder of Unicode noncharacters before md4c parses, the renderer reports where each landed, and both forms of the template come from that one parse; every placement rule is checked here. ([m6.1-results.md](m6.1-results.md))
+- `writeMarkdown(text, profile)`: the Markdown writer, which writes text back out as Markdown under the profile's rules, for `markdown()` values in a Markdown output; `markdownValue` attaches it, deferred, to `markdown()`'s result.
 
 **`compiledapp`.** The data model of a compiled app, with no logic beyond lookups. Described in §6, since it's the most important seam.
 
@@ -332,8 +336,9 @@ An immutable, self-contained description of one version of the app. It's the onl
 ```cpp
 struct CompiledApp {
     uint64_t generation;
-    RouteTable routes;                    // canonical path → RouteEntry; plus parameterized routes
-    TemplateSet templates;                // pages/ and frags/, by name
+    RouteTable routes;                    // canonical path → RouteEntry; plus parameterized routes,
+                                          // and each Markdown page's /x.md alias (M6.1)
+    TemplateSet templates;                // pages/ and frags/, HTML and Markdown, by name
     ScriptUnits scripts;                  // compiled .ms files (see below)
     std::vector<NamedQuery> queries;
     OutboundPolicy outbound;              // allowlist from outbound.ms
@@ -458,7 +463,7 @@ Some examples of changes, and what each one touches:
 | A new intrinsic module, e.g. `mail` | one file in `script/modules/`, one pointer in `RunContext`, the service itself |
 | HTTP/2 | `http-server` only |
 | A new dev panel | `devtools` only, plus any new `Observer` event |
-| Fields in Markdown (still open, §4) | `markdown`, `template`, and one `compiler` pass; not the engine |
+| Fields in Markdown (built in M6.1) | `markdown`, `template`, and the `compiler`'s Markdown pass; in the engine, only the `/x.md` route and `req.format` |
 | Per-thread GC in MS2 | `ScriptHost` internals |
 | Passkeys | `authflow`, `AuthStore`, `config` |
 

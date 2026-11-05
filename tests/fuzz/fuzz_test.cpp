@@ -6,6 +6,12 @@
 // - Mutated Markdown must only ever produce the tags and attributes the
 //   renderer writes, with safe URLs.
 // - Adversarial inputs must take time linear in their size.
+// - The Markdown writer (M6.1) must write nothing that a GFM client, which
+//   renders raw HTML, would read as HTML, and in Limited Markdown no
+//   headings or images, with safe URLs only.
+// - Mutated Markdown templates must parse or be refused without crashing,
+//   and when filled with hostile values, their Markdown output must keep the
+//   values out of HTML and URLs.
 
 #include <cctype>
 #include <chrono>
@@ -19,6 +25,7 @@
 #include "../template/helpers.h"
 #include "doctest.h"
 #include "markdown/markdown.h"
+#include "md4c.h"
 
 using namespace fourfold;
 using namespace fourfold::test;
@@ -164,6 +171,12 @@ const std::set<std::string> kAllowedTags = {"div", "p",  "h1",    "h2",    "h3",
 const std::set<std::string> kAllowedAttributes = {"class", "id",    "href",  "title",    "rel",    "src",
                                                   "alt",   "start", "align", "type",     "disabled", "checked"};
 
+// The URL rule's replacement, perhaps with the rest of a template's URL
+// after it: inert.
+bool startsInvalid(const std::string& url) {
+    return url.compare(0, std::char_traits<char>::length(kInvalidUrl), kInvalidUrl) == 0;
+}
+
 // Every tag in the renderer's output is one it writes, with only its
 // attributes, and URLs that pass the rule.
 void checkMarkdownOutput(const std::string& html, const std::string& source) {
@@ -193,7 +206,7 @@ void checkMarkdownOutput(const std::string& html, const std::string& source) {
                 size_t close = attrs.find('"', eq + 2);
                 REQUIRE(close != std::string::npos);
                 std::string value = attrs.substr(eq + 2, close - eq - 2);
-                if (attr == "href" || attr == "src") {
+                if ((attr == "href" || attr == "src") && !startsInvalid(value)) {
                     std::string scheme = urlScheme(value);
                     CHECK_MESSAGE((scheme.empty() || scheme == "http" || scheme == "https" || scheme == "mailto"),
                                   "URL " << value);
@@ -208,19 +221,137 @@ void checkMarkdownOutput(const std::string& html, const std::string& source) {
 }
 
 void checkMarkdown(const std::string& text) {
-    for (auto profile : {MarkdownProfile::Comment, MarkdownProfile::Full}) {
+    for (auto profile : {MarkdownProfile::Limited, MarkdownProfile::Full}) {
         MarkdownOptions options;
         options.profile = profile;
         MarkdownResult r = renderMarkdown(text, options);
         REQUIRE(r.ok());
         checkMarkdownOutput(r.html.str(), text);
-        if (profile == MarkdownProfile::Comment) {
+        if (profile == MarkdownProfile::Limited) {
             CHECK(r.html.str().find("<img") == std::string::npos);
             CHECK(r.html.str().find(" id=") == std::string::npos);
             for (const char* h : {"<h1", "<h2", "<h3", "<h4", "<h5", "<h6"}) {
                 CHECK(r.html.str().find(h) == std::string::npos);
             }
         }
+    }
+}
+
+// --- Markdown output, as a GFM client reads it ---
+
+// What a generic GFM parser, with raw HTML on, finds in a Markdown text.
+struct GfmScan {
+    bool html = false;           // raw HTML, inline or a block
+    bool heading = false;
+    bool image = false;
+    std::vector<std::string> urls;
+    std::string text;            // all of its text
+
+    static std::string attribute(const MD_ATTRIBUTE& a) { return std::string(a.text, a.size); }
+
+    explicit GfmScan(const std::string& markdown) {
+        MD_PARSER p{};
+        p.flags = MD_DIALECT_GITHUB;
+        p.enter_block = [](MD_BLOCKTYPE type, void*, void* user) {
+            auto* s = static_cast<GfmScan*>(user);
+            if (type == MD_BLOCK_HTML) s->html = true;
+            if (type == MD_BLOCK_H) s->heading = true;
+            return 0;
+        };
+        p.leave_block = [](MD_BLOCKTYPE, void*, void*) { return 0; };
+        p.enter_span = [](MD_SPANTYPE type, void* detail, void* user) {
+            auto* s = static_cast<GfmScan*>(user);
+            if (type == MD_SPAN_A) s->urls.push_back(attribute(static_cast<MD_SPAN_A_DETAIL*>(detail)->href));
+            if (type == MD_SPAN_IMG) {
+                s->image = true;
+                s->urls.push_back(attribute(static_cast<MD_SPAN_IMG_DETAIL*>(detail)->src));
+            }
+            return 0;
+        };
+        p.leave_span = [](MD_SPANTYPE, void*, void*) { return 0; };
+        p.text = [](MD_TEXTTYPE type, const MD_CHAR* chars, MD_SIZE size, void* user) {
+            auto* s = static_cast<GfmScan*>(user);
+            if (type == MD_TEXT_HTML) s->html = true;
+            s->text.append(chars, size);
+            return 0;
+        };
+        md_parse(markdown.data(), static_cast<MD_SIZE>(markdown.size()), &p, this);
+    }
+};
+
+bool safeUrl(const std::string& url) {
+    std::string scheme = urlScheme(url);
+    return scheme.empty() || scheme == "http" || scheme == "https" || scheme == "mailto" ||
+           // GFM's own autolinks: "www.x" becomes http://www.x.
+           url.compare(0, 7, "http://") == 0;
+}
+
+void checkWriter(const std::string& text) {
+    for (auto profile : {MarkdownProfile::Limited, MarkdownProfile::Full}) {
+        std::string written = writeMarkdown(text, profile);
+        INFO("markdown: ", text);
+        INFO("written: ", written);
+        GfmScan scan(written);
+        CHECK_FALSE(scan.html);
+        for (const std::string& url : scan.urls) CHECK_MESSAGE(safeUrl(url), "URL " << url);
+        if (profile == MarkdownProfile::Limited) {
+            CHECK_FALSE(scan.heading);
+            CHECK_FALSE(scan.image);
+        }
+        MarkdownOptions options;
+        options.profile = profile;
+        MarkdownResult r = renderMarkdown(written, options);
+        REQUIRE(r.ok());
+        checkMarkdownOutput(r.html.str(), written);
+    }
+}
+
+// --- Markdown templates ---
+
+const char* const kMarkdownHostile = "<img src=x onerror=alert(1)> [a](javascript:alert(1)) ![i](http://evil/i) "
+                                     "</p>\n# h\n    code\n- li\n| a |";
+
+const std::vector<std::string> kMarkdownTemplateSeeds = {
+    "# Hi, {{name}}\n\nYou have **{{count}}** notes.",
+    "[{{label}}]({{url}} \"{{tip}}\") and ![{{alt}}](/i/{{file}})",
+    "- {{a}}\n- *{{b}}*\n\n> {{c}}",
+    "| {{a}} | b |\n|---|---|\n| c | {{d}} |",
+    "Intro\n\n{{entries}}\n\nOutro",
+    "{{> note}}\n\n`{{code}}` and \\{{literal}}",
+    "```\n{{in code}}\n```\n\n{{x}}",
+};
+
+const std::vector<std::string> kMarkdownTemplateTokens = {
+    "{{a}}", "{{u}}", "{{b.c}}", "\\{{", "{{> note}}", "{{", "}}", "[[", "\\[[", "[", "]", "(", ")", "![",
+    "<", ">", "*", "_", "`", "```", "#", "\n", "\n\n", "- ", "1. ", "> ", "|", "|-|", "&", "\\", "\"", " ",
+    "    ", "<b>", "[x]: ", "www.", "@", "://", "javascript:", std::string(1, '\0'), "\xEF\xB7\x90",
+};
+
+void checkMarkdownTemplate(const std::string& text) {
+    ParsedTemplate p = parseMarkdownTemplate(codeFile("frags/m.md", text), TemplateKind::Fragment);
+    if (!p.ok()) return;
+    // (An include stays unresolved here, and renders as nothing.)
+    MapFields fields;
+    for (const std::string& name : p.compiled.fieldNames()) fields.set(name, FieldValue::string(kMarkdownHostile));
+    RenderOptions html, md;
+    md.format = OutputFormat::Markdown;
+    RenderResult h = render(p.compiled, fields, html);
+    RenderResult m = render(p.compiled, fields, md);
+    CHECK_EQ(h.ok(), m.ok());
+    if (!h.ok() || !m.ok()) return;   // e.g. {{b.c}}, with b a string
+    INFO("template: ", text);
+    INFO("markdown: ", m.markdown);
+    checkMarkdownOutput(h.html.str(), text);
+    // The value's tag and link never come out as HTML or a link in either.
+    CHECK(h.html.str().find("<img src=x") == std::string::npos);
+    GfmScan scan(m.markdown);
+    GfmScan source(text);
+    if (!source.html) CHECK_FALSE(scan.html);   // (raw HTML of the template's own is sent as written)
+    // A URL is the template's, or the URL rule's replacement, with any value
+    // in it percent-encoded.
+    for (const std::string& url : scan.urls) {
+        CHECK_MESSAGE((safeUrl(url) || startsInvalid(url)), "URL " << url);
+        CHECK_MESSAGE(url.find("evil/") == std::string::npos, "URL " << url);
     }
 }
 
@@ -311,4 +442,61 @@ TEST_CASE("fuzz: Markdown is linear on adversarial input") {
         return repeat("| a ", k) + "|\n" + repeat("|---", k) + "|\n" + repeat("| b ", k) + "|\n";
     }, run, n / 4);
     checkLinear("table rows", [](size_t k) { return "| a | b |\n|---|---|\n" + repeat("| 1 | 2 |\n", k); }, run, n);
+}
+
+TEST_CASE("fuzz: the Markdown writer") {
+    Rng rng{0xA11CEu};
+    for (const std::string& seed : kMarkdownSeeds) checkWriter(seed);
+    for (int i = 0; i < 10000; i++) {
+        checkWriter(mutate(kMarkdownSeeds[rng.below(kMarkdownSeeds.size())], rng, kMarkdownTokens));
+    }
+    for (int i = 0; i < 1000; i++) {
+        std::string noise;
+        size_t n = rng.below(200);
+        for (size_t k = 0; k < n; k++) noise += static_cast<char>(rng.below(256));
+        checkWriter(noise);
+    }
+}
+
+TEST_CASE("fuzz: mutated Markdown templates") {
+    Rng rng{0xD1A10u};
+    int parsed = 0, total = 0;
+    for (const std::string& seed : kMarkdownTemplateSeeds) checkMarkdownTemplate(seed);
+    for (int i = 0; i < 5000; i++) {
+        std::string text =
+            mutate(kMarkdownTemplateSeeds[rng.below(kMarkdownTemplateSeeds.size())], rng, kMarkdownTemplateTokens);
+        checkMarkdownTemplate(text);
+        total++;
+        parsed += parseMarkdownTemplate(codeFile("frags/m.md", text), TemplateKind::Fragment).ok();
+    }
+    MESSAGE(parsed << " of " << total << " mutated Markdown templates parsed");
+}
+
+TEST_CASE("fuzz: the Markdown writer and Markdown templates are linear") {
+    auto write = [](const std::string& text) { writeMarkdown(text, MarkdownProfile::Full); };
+    const size_t n = 5000;
+    checkLinear("write [", [](size_t k) { return repeat("[", k) + "a"; }, write, n);
+    checkLinear("write *a", [](size_t k) { return repeat("*a", k); }, write, n);
+    checkLinear("write **_", [](size_t k) { return repeat("**_a", k); }, write, n);
+    checkLinear("write `", [](size_t k) { return repeat("`a", k); }, write, n);
+    checkLinear("write <", [](size_t k) { return repeat("<a ", k); }, write, n);
+    checkLinear("write > nesting", [](size_t k) { return repeat(">", k) + " a"; }, write, n);
+    checkLinear("write lists", [](size_t k) { return repeat("- a\n  ", k); }, write, n);
+    checkLinear("write digits", [](size_t k) { return repeat("1", k) + ". a"; }, write, n);
+    checkLinear("write www", [](size_t k) { return repeat("www.", k); }, write, n);
+    checkLinear("write code fences", [](size_t k) { return "```\n" + repeat("`", k) + "\n```"; }, write, n);
+    checkLinear("write table", [](size_t k) { return "| a | b |\n|---|---|\n" + repeat("| 1 | 2 |\n", k); }, write,
+                n);
+
+    auto parse = [](const std::string& text) {
+        parseMarkdownTemplate(codeFile("frags/m.md", text), TemplateKind::Fragment);
+    };
+    checkLinear("template fields", [](size_t k) { return repeat("{{a}} ", k); }, parse, n);
+    checkLinear("template {{", [](size_t k) { return repeat("{{", k); }, parse, n);
+    checkLinear("template [[", [](size_t k) { return repeat("\\[[", k); }, parse, n);
+    checkLinear("template brackets", [](size_t k) { return repeat("[", k) + "{{a}}"; }, parse, n);
+    checkLinear("template links", [](size_t k) { return repeat("[a](/x?{{a}}) ", k); }, parse, n);
+    checkLinear("template link lines", [](size_t k) { return "x" + repeat(" ", k) + "](/{{a}})"; }, parse, n);
+    checkLinear("template runs", [](size_t k) { return repeat("{{a}}x", k); }, parse, n / 4);
+    checkLinear("template blocks", [](size_t k) { return repeat("{{a}}\n\n", k); }, parse, n);
 }

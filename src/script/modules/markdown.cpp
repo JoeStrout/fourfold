@@ -1,8 +1,10 @@
-// markdown(text, profile="comment"): renders Markdown and returns the HTML
+// markdown(text, profile="limited"): renders Markdown and returns the HTML
 // (overview §4, Rendering Markdown from code). `text` may also be a list of
-// lines, as file.readLines returns them. The default profile is the
-// restricted one, since text that reaches this at runtime is usually a
-// visitor's; "full" is an explicit, grep-able opt-in.
+// lines, as file.readLines returns them. The default is Limited Markdown,
+// since text that reaches this at runtime is usually a visitor's; "full" is
+// an explicit, grep-able opt-in. The result is Markdown too, so it can go in
+// a Markdown page; its Markdown form is written only if a Markdown output
+// needs it.
 
 #include "../bridge.h"
 #include "markdown/markdown.h"
@@ -25,7 +27,7 @@ constexpr size_t kMaxMarkdownBytes = 256 * 1024;
 void addMarkdown() {
     MiniScript::Intrinsic f = MiniScript::Intrinsic::Create("markdown");
     f.AddParam("text");
-    f.AddParam("profile", Value(MiniScript::String("comment")));
+    f.AddParam("profile", Value(MiniScript::String("limited")));
     f.set_Code([](Context ctx, IntrinsicResult) {
         Value textValue = ctx.GetArg(0);
         std::string text;
@@ -46,11 +48,11 @@ void addMarkdown() {
         Value profileValue = ctx.GetArg(1);
         std::optional<MarkdownProfile> profile =
             profileValue.IsString() ? markdownProfileNamed(toStdString(profileValue)) : std::nullopt;
-        if (!profile) return intrinsicError("markdown's profile must be \"comment\" (the default) or \"full\"");
+        if (!profile) return intrinsicError("markdown's profile must be \"limited\" (the default) or \"full\"");
         MarkdownOptions options;
         options.profile = *profile;
         options.maxBytes = kMaxMarkdownBytes;
-        MarkdownResult r = renderMarkdown(text, options);
+        MarkdownResult r = markdownValue(std::move(text), options);
         if (!r.ok()) return intrinsicError("markdown: " + *r.error);
         return IntrinsicResult(makeHtmlHandle(std::move(r.html)));
     });

@@ -97,12 +97,35 @@ std::string HandlerRef::label() const {
 }
 
 bool RouteTable::add(std::string path, RouteEntry entry) {
+    if (aliases_.count(path)) return false;
     return routes_.emplace(std::move(path), std::move(entry)).second;
 }
 
 const RouteEntry* RouteTable::find(const std::string& path) const {
     auto it = routes_.find(path);
     return it == routes_.end() ? nullptr : &it->second;
+}
+
+RouteEntry* RouteTable::findForUpdate(const std::string& path) {
+    auto it = routes_.find(path);
+    return it == routes_.end() ? nullptr : &it->second;
+}
+
+bool RouteTable::addMarkdownAlias(std::string alias, std::string path) {
+    if (routes_.count(alias) || !routes_.count(path)) return false;
+    return aliases_.emplace(std::move(alias), std::move(path)).second;
+}
+
+const RouteEntry* RouteTable::findMarkdown(const std::string& alias, std::string* path) const {
+    auto it = aliases_.find(alias);
+    if (it == aliases_.end()) return nullptr;
+    if (path) *path = it->second;
+    return find(it->second);
+}
+
+std::string markdownUrlFor(const std::string& path, bool trailingSlash) {
+    if (path == "/") return "/index.md";
+    return path + (trailingSlash ? "/index.md" : ".md");
 }
 
 void StaticIndex::add(RelPath source, StaticFile file) {
@@ -136,17 +159,19 @@ std::string describe(const CompiledApp& app) {
         if (entry.kind == RouteKind::Static) {
             if (const StaticFile* f = app.statics.find(entry.source)) s += "  " + f->contentType;
         }
-        if (entry.kind == RouteKind::Page) {
+        if (entry.kind == RouteKind::Markdown) s += "  " + markdownUrlFor(path, entry.trailingSlash);
+        if (entry.kind == RouteKind::Page || entry.kind == RouteKind::Markdown) {
             if (const CompiledTemplate* t = app.templates.find(entry.source)) {
                 if (t->hasFields()) {
                     s += "  fields:";
                     for (const std::string& f : t->fieldNames()) s += " " + f;
                 }
+                std::string title;
+                for (const CompiledTemplate::Part& p : t->titleParts()) {
+                    title += p.kind == CompiledTemplate::Part::Kind::Field ? "{{" + p.field.label() + "}}" : p.text;
+                }
+                if (!title.empty()) s += "  title: " + title;
             }
-        }
-        if (entry.kind == RouteKind::Markdown) {
-            auto md = app.markdownPages.find(entry.source);
-            if (md != app.markdownPages.end() && !md->second.title.empty()) s += "  title: " + md->second.title;
         }
         for (const std::optional<HandlerRef>* h : {&entry.render, &entry.get, &entry.post}) {
             if (*h) s += "  " + (*h)->label() + " in " + (*h)->source.str();

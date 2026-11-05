@@ -11,6 +11,11 @@
 // - \{{ : a literal "{{", anywhere.
 // - {{> header}}: frags/header.html (or .md), pasted in at compile time.
 //
+// Markdown files in code/ are templates too (Dynamic Markdown, M6.1): the
+// markdown component parses them (parseMarkdownTemplate), into an HTML form
+// and a Markdown form with the same fields, and they're rendered here, in
+// either format.
+//
 // Templates are parsed only from CodeFile, so only from code/ (Arch §7).
 // Nothing here depends on MiniScript: values come through a FieldSource.
 #pragma once
@@ -41,7 +46,19 @@ enum class FieldContext {
     UrlPart,     // href="/a?b={{x}}": percent-encoded
     Script,      // <script> const c = {{x}};: a JSON literal
     Boolean,     // checked="{{x}}": the attribute is there if x is truthy
+    // In Markdown templates. (UrlStart, UrlPart and Attribute are used there
+    // too: a link's destination, and an image's alt text or a link's title.)
+    MarkdownText,    // *{{x}}*: text, escaped for the output; a rendered value is an error
+    MarkdownBlock,   // {{x}} alone on a line, at the top level: a string is a
+                     // paragraph; a rendered Markdown value is its own blocks
 };
+
+// What a render writes: HTML, or Markdown (a Markdown template's Markdown
+// form, for /about.md).
+enum class OutputFormat { Html, Markdown };
+
+// The Content-Type of a Markdown response.
+extern const char* const kMarkdownContentType;   // "text/markdown; charset=utf-8; variant=GFM"
 
 const char* fieldContextName(FieldContext context);
 
@@ -51,6 +68,10 @@ struct TemplateField {
     std::string file;                // where the field is written: "pages/about.html"
     int line = 0;
     std::string attribute;           // the attribute's name, in attribute contexts
+    // Markdown output only: the text after the field starts with '.', so a
+    // value ending in "www" would make a web address there (see
+    // escapeMarkdownText).
+    bool followedByDot = false;
 
     std::string label() const;       // "user.name"
 };
@@ -91,19 +112,23 @@ public:
         int line = 0;
     };
 
-    // A fragment made from rendered Markdown (frags/intro.md).
-    static CompiledTemplate fromMarkdown(RelPath source, Html html);
-
     const RelPath& source() const { return source_; }
     TemplateKind kind() const { return kind_; }
+    // The HTML form.
     const std::vector<Part>& parts() const { return parts_; }
+    // A Markdown template's Markdown form: its source, split at its fields
+    // (and with its includes in place). Empty for an HTML template.
+    const std::vector<Part>& markdownParts() const { return markdownParts_; }
+    // A Markdown page's title: the text of its first # heading, as Literal
+    // parts (plain text, not HTML) and Field parts.
+    const std::vector<Part>& titleParts() const { return titleParts_; }
     // Each top-level field name, once: the template's own in order of first
     // use, then those of included fragments.
     const std::vector<std::string>& fieldNames() const { return fieldNames_; }
     bool hasFields() const { return !fieldNames_.empty(); }
     bool hasScript() const { return hasScript_; }
     bool hasMarkdown() const { return hasMarkdown_; }
-    // A .md fragment: it has no fields, so it takes no value.
+    // A Markdown template (.md), with both forms.
     bool isMarkdown() const { return isMarkdown_; }
     size_t postForms() const { return postForms_; }
     // Its literal links, including those of included fragments.
@@ -112,10 +137,13 @@ public:
 private:
     friend struct TemplateParser;
     friend struct IncludeResolver;
+    friend struct MarkdownTemplateBuilder;   // in the markdown component
 
     RelPath source_;
     TemplateKind kind_ = TemplateKind::Fragment;
     std::vector<Part> parts_;
+    std::vector<Part> markdownParts_;
+    std::vector<Part> titleParts_;
     std::vector<std::string> fieldNames_;
     bool hasScript_ = false;
     bool hasMarkdown_ = false;
@@ -146,7 +174,9 @@ ParsedTemplate parseTemplate(const CodeFile& file, TemplateKind kind);
 using FragmentMap = std::map<std::string, CompiledTemplate>;
 
 // Resolves the includes inside the fragments themselves, in place. A cycle
-// is an error naming the chain; a fragment in one is left unresolved.
+// is an error naming the chain; a fragment in one is left unresolved. A
+// Markdown template includes only Markdown fragments; an HTML one includes
+// either (a Markdown fragment's HTML form).
 std::vector<TemplateProblem> resolveIncludes(FragmentMap& fragments);
 
 // Resolves a page's includes against fragments already resolved.
@@ -155,11 +185,16 @@ std::vector<TemplateProblem> resolveIncludes(CompiledTemplate& page, const Fragm
 // --- Rendering ---
 
 struct RenderOptions {
+    // HTML, or Markdown: only Markdown templates have a Markdown form.
+    OutputFormat format = OutputFormat::Html;
     // The response's CSP nonce, added to every <script>. Empty adds none.
     std::string nonce;
     // The stylesheet linked at the end of <head> when the output contains
     // rendered Markdown. Empty links none.
     std::string markdownCss;
+    // A Markdown page's /x.md URL, linked at the end of <head> in its HTML
+    // output (rel="alternate"). Empty links none.
+    std::string markdownAlternate;
     // Report missing and unused fields. Off for pages with no code, whose
     // fields render empty on purpose (overview §4).
     bool warnings = true;
@@ -186,14 +221,41 @@ struct RenderError {
 };
 
 struct RenderResult {
-    Html html;
+    Html html;              // the HTML output
+    std::string markdown;   // the Markdown output, when the format is Markdown
     std::vector<RenderWarning> warnings;
     std::optional<RenderError> error;   // set if the render failed; html is then empty
 
     bool ok() const { return !error; }
 };
 
+// Renders the template in options.format. A Markdown output from an HTML
+// template is an error.
 RenderResult render(const CompiledTemplate& compiled, const FieldSource& fields,
                     const RenderOptions& options = {});
+
+// A fragment, as frag() returns it, in `html`. A Markdown fragment's result
+// is Markdown, with its Markdown form rendered too when options.format is
+// Markdown (otherwise left unmade: the run's output is HTML).
+RenderResult renderFragment(const CompiledTemplate& compiled, const FieldSource& fields,
+                            const RenderOptions& options = {});
+
+// Nothing, rendered from `compiled`: what frag(name, []) returns. It's
+// Markdown if the fragment is.
+Html emptyRendering(const CompiledTemplate& compiled, const RenderOptions& options = {});
+
+// A Markdown page's title, with its fields filled: what the layout's
+// {{title}} shows. Empty if it has no # heading.
+std::string pageTitle(const CompiledTemplate& page, const FieldSource& fields);
+
+// The page a Markdown page's HTML output is when the app has no
+// frags/layout/markdown.html: a minimal document around `content`.
+std::string builtinMarkdownPage(const std::string& title, const Html& content, const RenderOptions& options);
+
+// A Markdown page in options.format: as HTML, its HTML form wrapped in
+// `layout` (frags/layout/markdown.html, filling {{content}} and {{title}};
+// or the built-in page if null); as Markdown, its Markdown form alone.
+RenderResult renderMarkdownPage(const CompiledTemplate& page, const CompiledTemplate* layout,
+                                const FieldSource& fields, const RenderOptions& options = {});
 
 }  // namespace fourfold

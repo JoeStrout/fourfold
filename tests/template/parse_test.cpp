@@ -299,17 +299,4 @@ TEST_CASE("parse: include problems") {
     refused("<script>", "unclosed <script>");
 }
 
-TEST_CASE("parse: Markdown fragments") {
-    FragmentMap frags;
-    frags["intro"] = CompiledTemplate::fromMarkdown(RelPath::parse("frags/intro.md").value(),
-                                                    unsafeHtml("<div class=\"markdown\"><p>Hi</p></div>"));
-    ParsedTemplate page = parsePage("<!DOCTYPE html><html><head></head><body>{{> intro}}</body></html>");
-    REQUIRE(page.ok());
-    CHECK(resolveIncludes(page.compiled, frags).empty());
-    CHECK(page.compiled.hasMarkdown());
-    RenderOptions o;
-    o.markdownCss = "/__fourfold/markdown.css";
-    CHECK_EQ(render(page.compiled, EmptyFields(), o).html.str(),
-             "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">\n</head>"
-             "<body><div class=\"markdown\"><p>Hi</p></div></body></html>");
-}
+// Markdown fragments in HTML pages: tests/markdown/markdown_template_test.cpp.

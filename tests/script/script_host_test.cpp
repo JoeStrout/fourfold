@@ -7,6 +7,7 @@
 #include <thread>
 
 #include "doctest.h"
+#include "markdown/markdown.h"
 #include "test_gate.h"
 #include "partition/app_folder.h"
 #include "template/template.h"
@@ -49,7 +50,8 @@ struct Scripts {
     void write(const std::string& path, const std::string& text) { dir.write("code/" + path, text); }
 
     // Compiles every .ms file written so far, and parses the templates
-    // (pages/*.html and frags/*.html) into the app, as the compiler would.
+    // (pages/*.html, pages/*.md, frags/*.html and frags/*.md) into the app,
+    // as the compiler would.
     void compile() {
         std::vector<CodeFile> pages, libs;
         readFiles(pages, libs);
@@ -68,14 +70,16 @@ struct Scripts {
         FragmentMap frags;
         std::vector<std::pair<RelPath, CompiledTemplate>> pageTemplates;
         for (const CodeEntry& e : listing.value().files) {
-            if (e.path.extension() != ".html") continue;
+            bool md = e.path.extension() == ".md";
+            if (e.path.extension() != ".html" && !md) continue;
             bool isFrag = e.path.str().compare(0, 6, "frags/") == 0;
-            ParsedTemplate p = parseTemplate(code.value().read(e.path).value(),
-                                             isFrag ? TemplateKind::Fragment : TemplateKind::Page);
+            TemplateKind kind = isFrag ? TemplateKind::Fragment : TemplateKind::Page;
+            ParsedTemplate p = md ? parseMarkdownTemplate(code.value().read(e.path).value(), kind)
+                                  : parseTemplate(code.value().read(e.path).value(), kind);
             REQUIRE_MESSAGE(p.ok(), (e.path.str() + ": " + (p.ok() ? "" : p.errors[0].message)));
             if (isFrag) {
                 std::string name = e.path.str().substr(6);
-                frags[name.substr(0, name.size() - 5)] = std::move(p.compiled);
+                frags[name.substr(0, name.size() - e.path.extension().size())] = std::move(p.compiled);
             } else {
                 pageTemplates.emplace_back(e.path, std::move(p.compiled));
             }
@@ -778,21 +782,24 @@ TEST_CASE("ScriptHost: frag's errors") {
     }
 }
 
-TEST_CASE("ScriptHost: Markdown fragments take no value") {
+TEST_CASE("ScriptHost: Markdown fragments have fields") {
     Scripts s;
-    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"intro\", {\"a\": 1})\nend function\n");
+    s.write("frags/intro.md", "Hi, *{{name}}*!");
+    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"intro\", {\"name\": \"<Ann>\"})\nend function\n"
+                          "get.y = function(req)\n  return frag(\"intro\", [{\"name\": \"a\"}, {\"name\": \"b\"}])\n"
+                          "end function\n");
     s.compile();
-    FragmentMap frags;
-    frags["intro"] = CompiledTemplate::fromMarkdown(RelPath::parse("frags/intro.md").value(), unsafeHtml("<p>hi</p>"));
-    s.app->templates.setFragments(std::move(frags));
     HandlerOutcome o = s.call("pages/h.ms", "get.x");
-    REQUIRE(o.kind == HandlerOutcome::Kind::Error);
-    CHECK(contains(o.error.message, "is Markdown, which has no fields"));
-    s.write("pages/h.ms", "get.x = function(req)\n  return frag(\"intro\")\nend function\n");
-    s.compile();
-    frags["intro"] = CompiledTemplate::fromMarkdown(RelPath::parse("frags/intro.md").value(), unsafeHtml("<p>hi</p>"));
-    s.app->templates.setFragments(std::move(frags));
-    CHECK_EQ(s.call("pages/h.ms", "get.x").body, "<p>hi</p>");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Fragment, describe(o));
+    CHECK_EQ(o.body, "<div class=\"markdown\">\n<p>Hi, <em>&lt;Ann&gt;</em>!</p>\n</div>\n");
+    CHECK_EQ(s.call("pages/h.ms", "get.y").body,
+             "<div class=\"markdown\">\n<p>Hi, <em>a</em>!</p>\n</div>\n<div class=\"markdown\">\n<p>Hi, <em>b</em>!</p>\n</div>\n");
+    // Asked for as Markdown (a Markdown page's /x.md), a Markdown value is Markdown.
+    RenderOptions md;
+    md.format = OutputFormat::Markdown;
+    o = s.call("pages/h.ms", "get.y", {}, md);
+    CHECK_EQ(o.body, "Hi, *a*!\n\nHi, *b*!\n");
+    CHECK_EQ(o.contentType, kMarkdownContentType);
 }
 
 TEST_CASE("ScriptHost: rendered HTML goes into a page's fields") {
@@ -812,7 +819,7 @@ TEST_CASE("ScriptHost: rendered HTML goes into a page's fields") {
     REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
     CHECK_EQ(o.body,
              "<!DOCTYPE html><html><head><link rel=\"stylesheet\" href=\"/m.css\">\n</head><body><ul><li>a</li></ul>"
-             "<div class=\"markdown comment\">\n<p><em>hi</em></p>\n</div>\n<i>raw</i>"
+             "<div class=\"markdown limited\">\n<p><em>hi</em></p>\n</div>\n<i>raw</i>"
              "<script nonce=\"N0nce\">go({\"a\":[1,\"\\u003c\\u002fscript\\u003e\"]})</script></body></html>");
 }
 
@@ -855,9 +862,9 @@ TEST_CASE("ScriptHost: markdown()") {
     };
     HandlerOutcome o = md("markdown(\"# Title\")");
     REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Fragment, describe(o));
-    CHECK_EQ(o.body, "<div class=\"markdown comment\">\n<p>Title</p>\n</div>\n");
+    CHECK_EQ(o.body, "<div class=\"markdown limited\">\n<p>Title</p>\n</div>\n");
     CHECK_EQ(md("markdown(\"# Title\", \"full\")").body, "<div class=\"markdown\">\n<h1 id=\"title\">Title</h1>\n</div>\n");
-    CHECK_EQ(md("markdown(null)").body, "<div class=\"markdown comment\">\n</div>\n");
+    CHECK_EQ(md("markdown(null)").body, "<div class=\"markdown limited\">\n</div>\n");
     CHECK(contains(md("markdown(\"x\", \"raw\")").error.message, "profile must be"));
     CHECK(contains(md("markdown(42)").error.message, "needs a string"));
     CHECK(contains(md("markdown(\"x\" * 300000)").error.message, "over the limit"));
@@ -1095,4 +1102,67 @@ TEST_CASE("ScriptHost: the users module") {
     o = s.call("pages/u.ms", "get.noUser");
     REQUIRE(o.kind == HandlerOutcome::Kind::Error);
     CHECK(contains(o.error.message, "no such user"));
+}
+
+TEST_CASE("ScriptHost: render fills a Markdown page, in the request's format") {
+    Scripts s;
+    s.write("pages/m.md", "# Hi, {{name}}\n\n{{body}}\n\nFormat: {{format}}.\n");
+    s.write("pages/m.ms", "render = function(req)\n"
+                          "  return {\"name\": \"<Ann>\", \"body\": markdown(\"# x\" + char(10) + \"*y*\"), "
+                          "\"format\": req.format}\n"
+                          "end function\n");
+    s.compile();
+    RequestFacts request;
+    HandlerOutcome o = s.call("pages/m.ms", "render", request);
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
+    CHECK_EQ(o.contentType, "");
+    // No layout here (the app has none): the built-in page.
+    CHECK(contains(o.body, "<title>Hi, &lt;Ann&gt;</title>"));
+    CHECK(contains(o.body, "<h1 id=\"hi-\">Hi, &lt;Ann&gt;</h1>\n<div class=\"markdown limited\">\n<p>x</p>\n"
+                           "<p><em>y</em></p>\n</div>\n<p>Format: html.</p>"));
+
+    RenderOptions md;
+    md.format = OutputFormat::Markdown;
+    request.format = "markdown";
+    o = s.call("pages/m.ms", "render", request, md);
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Render, describe(o));
+    CHECK_EQ(o.contentType, kMarkdownContentType);
+    CHECK_EQ(o.body, "# Hi, \\<Ann\\>\n\nx\n\n*y*\n\nFormat: markdown.\n");
+}
+
+TEST_CASE("ScriptHost: a Markdown page takes only Markdown") {
+    Scripts s;
+    s.write("frags/row.html", "<li>{{x}}</li>");
+    s.write("pages/m.md", "{{rows}}\n");
+    for (const char* rows : {"frag(\"row\", {\"x\": 1})", "unsafeHTML(\"<b>x</b>\")"}) {
+        INFO(rows);
+        s.write("pages/m.ms", std::string("render = function(req)\n  return {\"rows\": ") + rows + "}\nend function\n");
+        s.compile();
+        for (OutputFormat format : {OutputFormat::Html, OutputFormat::Markdown}) {
+            RenderOptions options;
+            options.format = format;
+            HandlerOutcome o = s.call("pages/m.ms", "render", {}, options);
+            REQUIRE(o.kind == HandlerOutcome::Kind::Error);
+            CHECK_MESSAGE(contains(o.error.message, "which takes only Markdown"), o.error.message);
+            CHECK_EQ(o.error.file, "code/pages/m.md");
+        }
+    }
+}
+
+TEST_CASE("ScriptHost: a fragment returned for /x.md is Markdown, if it is") {
+    Scripts s;
+    s.write("frags/e.md", "*{{x}}*");
+    s.write("pages/h.ms", "get.a = function(req)\n  return frag(\"e\", {\"x\": 1})\nend function\n"
+                          "get.b = function(req)\n  return markdown(\"**b**\")\nend function\n"
+                          "get.c = function(req)\n  return frag(\"e\", [])\nend function\n");
+    s.compile();
+    RenderOptions md;
+    md.format = OutputFormat::Markdown;
+    HandlerOutcome a = s.call("pages/h.ms", "get.a", {}, md);
+    CHECK_EQ(a.body, "*1*");
+    CHECK_EQ(a.contentType, kMarkdownContentType);
+    CHECK_EQ(s.call("pages/h.ms", "get.b", {}, md).body, "**b**\n");
+    CHECK_EQ(s.call("pages/h.ms", "get.c", {}, md).body, "");
+    CHECK_EQ(s.call("pages/h.ms", "get.c").body, "");
+    CHECK_EQ(s.call("pages/h.ms", "get.a").body, "<div class=\"markdown\">\n<p><em>1</em></p>\n</div>\n");
 }

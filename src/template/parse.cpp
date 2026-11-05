@@ -127,6 +127,8 @@ const char* fieldContextName(FieldContext context) {
         case FieldContext::UrlPart: return "url-part";
         case FieldContext::Script: return "script";
         case FieldContext::Boolean: return "boolean";
+        case FieldContext::MarkdownText: return "markdown-text";
+        case FieldContext::MarkdownBlock: return "markdown-block";
     }
     return "?";
 }
@@ -138,18 +140,6 @@ std::string TemplateField::label() const {
         s += p;
     }
     return s;
-}
-
-CompiledTemplate CompiledTemplate::fromMarkdown(RelPath source, Html html) {
-    CompiledTemplate t;
-    t.source_ = std::move(source);
-    t.kind_ = TemplateKind::Fragment;
-    t.isMarkdown_ = true;
-    t.hasMarkdown_ = true;
-    CompiledTemplate::Part part;
-    part.text = html.str();
-    t.parts_.push_back(std::move(part));
-    return t;
 }
 
 struct TemplateParser {
@@ -1029,34 +1019,46 @@ struct IncludeResolver {
 
     std::vector<TemplateProblem> problems;
 
+    static void appendLiteral(std::vector<Part>& parts, const std::string& text) {
+        if (text.empty()) return;
+        if (!parts.empty() && parts.back().kind == Part::Kind::Literal) {
+            parts.back().text += text;
+        } else {
+            Part p;
+            p.text = text;
+            parts.push_back(std::move(p));
+        }
+    }
+
     // Splices included fragments into `t`, which must not be one of them.
     // `get` returns a resolved fragment, or null (having reported why).
     template <typename Get>
     void splice(CompiledTemplate& t, Get get) {
+        // The fragments, by name, as the HTML form found them; the Markdown
+        // form has the same includes in the same order.
+        std::map<std::string, const CompiledTemplate*> found;
         std::vector<Part> parts;
-        auto appendLiteral = [&](const std::string& text) {
-            if (!parts.empty() && parts.back().kind == Part::Kind::Literal) {
-                parts.back().text += text;
-            } else {
-                Part p;
-                p.text = text;
-                parts.push_back(std::move(p));
-            }
-        };
         for (Part& part : t.parts_) {
             if (part.kind != Part::Kind::Include) {
                 if (part.kind == Part::Kind::Literal) {
-                    appendLiteral(part.text);
+                    appendLiteral(parts, part.text);
                 } else {
                     parts.push_back(std::move(part));
                 }
                 continue;
             }
             const CompiledTemplate* frag = get(part.text, t.source_.str(), part.line);
+            if (frag && t.isMarkdown_ && !frag->isMarkdown_) {
+                problems.push_back({t.source_.str(), part.line,
+                                    "{{> " + part.text + "}} is HTML (code/" + frag->source_.str() +
+                                        "), but a Markdown file includes only Markdown fragments (.md)"});
+                frag = nullptr;
+            }
+            found[part.text] = frag;
             if (!frag) continue;
             for (const Part& p : frag->parts_) {
                 if (p.kind == Part::Kind::Literal) {
-                    appendLiteral(p.text);
+                    appendLiteral(parts, p.text);
                 } else if (p.kind == Part::Kind::HeadEnd) {
                     continue;   // a fragment has no head
                 } else {
@@ -1074,11 +1076,51 @@ struct IncludeResolver {
             t.links_.insert(t.links_.end(), frag->links_.begin(), frag->links_.end());
         }
         t.parts_ = std::move(parts);
+
+        // The Markdown form: each include's line becomes the fragment's
+        // Markdown, as blocks of their own (a blank line before them; the
+        // include's own line end after).
+        if (!t.isMarkdown_) return;
+        std::vector<Part> mdParts;
+        for (Part& part : t.markdownParts_) {
+            if (part.kind != Part::Kind::Include) {
+                if (part.kind == Part::Kind::Literal) {
+                    appendLiteral(mdParts, part.text);
+                } else {
+                    mdParts.push_back(std::move(part));
+                }
+                continue;
+            }
+            auto it = found.find(part.text);
+            const CompiledTemplate* frag = it == found.end() ? nullptr : it->second;
+            if (!frag || frag->markdownParts_.empty()) continue;
+            const std::string* before = !mdParts.empty() && mdParts.back().kind == Part::Kind::Literal
+                                            ? &mdParts.back().text
+                                            : nullptr;
+            bool blank = mdParts.empty() || (before && before->size() >= 2 &&
+                                             before->compare(before->size() - 2, 2, "\n\n") == 0);
+            if (!blank) appendLiteral(mdParts, "\n");
+            for (const Part& p : frag->markdownParts_) {
+                if (p.kind == Part::Kind::Literal) {
+                    appendLiteral(mdParts, p.text);
+                } else {
+                    mdParts.push_back(p);
+                }
+            }
+            // Its last line is ended by the include's own line end.
+            if (mdParts.back().kind == Part::Kind::Literal) {
+                std::string& last = mdParts.back().text;
+                while (!last.empty() && last.back() == '\n') last.pop_back();
+                if (last.empty()) mdParts.pop_back();
+            }
+        }
+        t.markdownParts_ = std::move(mdParts);
     }
 
     void missing(const std::string& name, const std::string& file, int line) {
         problems.push_back({file, line, "there's no code/frags/" + name + ".html (or .md) to include"});
     }
+
 
     // Fragments, resolved depth first.
     FragmentMap* fragments = nullptr;

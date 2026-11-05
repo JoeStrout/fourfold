@@ -64,10 +64,18 @@ HttpResponse respond(const HandlerOutcome& outcome, const RouteEntry& entry, con
                      const EngineOptions& options, const RenderOptions& render, bool htmx) {
     switch (outcome.kind) {
         case HandlerOutcome::Kind::Render:
-            return withBody(200, "text/html; charset=utf-8", outcome.body);
-        case HandlerOutcome::Kind::Fragment:
-            if (outcome.hasScript) return errorResponse(fragmentScriptError(entry), app, options, render);
-            return withBody(200, "text/html; charset=utf-8", outcome.body);
+        case HandlerOutcome::Kind::Fragment: {
+            if (outcome.kind == HandlerOutcome::Kind::Fragment && outcome.hasScript) {
+                return errorResponse(fragmentScriptError(entry), app, options, render);
+            }
+            // A Markdown page's Markdown output, or HTML.
+            HttpResponse r;
+            r.status = 200;
+            r.headers.set("Content-Type", outcome.contentType.empty() ? "text/html; charset=utf-8"
+                                                                       : outcome.contentType);
+            r.body = outcome.body;
+            return r;
+        }
         case HandlerOutcome::Kind::Text:
             return withBody(200, "text/plain; charset=utf-8", outcome.body);
         case HandlerOutcome::Kind::Redirect: {

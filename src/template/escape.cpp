@@ -80,6 +80,22 @@ std::string urlScheme(std::string_view url) {
     return scheme;
 }
 
+std::string normalizeUrlPiece(std::string_view url) {
+    std::string out;
+    out.reserve(url.size());
+    for (size_t i = 0; i < url.size(); i++) {
+        auto c = static_cast<unsigned char>(url[i]);
+        if (c == '%' && i + 2 < url.size() && isHexDigit(url[i + 1]) && isHexDigit(url[i + 2])) {
+            out += '%';   // an existing escape
+        } else if (isUrlChar(c)) {
+            out += url[i];
+        } else {
+            appendPercent(out, c);
+        }
+    }
+    return out;
+}
+
 std::optional<std::string> filterUrl(std::string_view url) {
     // Browsers drop leading spaces and control characters before parsing.
     size_t start = 0;
@@ -91,17 +107,63 @@ std::optional<std::string> filterUrl(std::string_view url) {
     }
     std::string scheme = urlScheme(url);
     if (!scheme.empty() && scheme != "http" && scheme != "https" && scheme != "mailto") return std::nullopt;
+    return normalizeUrlPiece(url);
+}
+
+namespace {
+
+bool isAsciiPunctuation(unsigned char c) {
+    return (c >= 0x21 && c <= 0x2F) || (c >= 0x3A && c <= 0x40) || (c >= 0x5B && c <= 0x60) ||
+           (c >= 0x7B && c <= 0x7E);
+}
+
+}  // namespace
+
+std::string escapeMarkdownText(std::string_view value, bool followedByDot) {
+    // Line breaks and tabs become spaces first, so the space rules see them.
+    std::string flat;
+    flat.reserve(value.size());
+    for (size_t i = 0; i < value.size(); i++) {
+        char c = value[i];
+        if (c == '\r' && i + 1 < value.size() && value[i + 1] == '\n') continue;   // CRLF: one space
+        flat += (c == '\r' || c == '\n' || c == '\t') ? ' ' : c;
+    }
+    size_t lead = 0;
+    while (lead < flat.size() && flat[lead] == ' ') lead++;
+    size_t trail = flat.size();
+    while (trail > lead && flat[trail - 1] == ' ') trail--;
 
     std::string out;
+    out.reserve(flat.size() + flat.size() / 4);
+    for (size_t i = 0; i < lead; i++) out += "&#32;";
+    for (size_t i = lead; i < trail; i++) {
+        auto c = static_cast<unsigned char>(flat[i]);
+        if (isAsciiPunctuation(c)) out += '\\';
+        out += flat[i];
+    }
+    if (followedByDot && trail - lead >= 3) {
+        std::string_view end(flat.data() + trail - 3, 3);
+        bool www = true;
+        for (char c : end) www = www && (c == 'w' || c == 'W');
+        if (www) {
+            char last = out.back();
+            out.pop_back();
+            out += last == 'w' ? "&#119;" : "&#87;";
+        }
+    }
+    for (size_t i = trail; i < flat.size(); i++) out += "&#32;";
+    return out;
+}
+
+std::string markdownDestination(std::string_view url) {
+    std::string out;
     out.reserve(url.size());
-    for (size_t i = 0; i < url.size(); i++) {
-        auto c = static_cast<unsigned char>(url[i]);
-        if (c == '%' && i + 2 < url.size() && isHexDigit(url[i + 1]) && isHexDigit(url[i + 2])) {
-            out += '%';   // an existing escape
-        } else if (isUrlChar(c)) {
-            out += url[i];
+    for (char c : url) {
+        if (c == '(' || c == ')' || c == ' ' || c == '<' || c == '>' || static_cast<unsigned char>(c) < 0x20 ||
+            c == 0x7F) {
+            appendPercent(out, static_cast<unsigned char>(c));
         } else {
-            appendPercent(out, c);
+            out += c;
         }
     }
     return out;

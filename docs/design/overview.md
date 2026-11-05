@@ -669,14 +669,20 @@ Because the engine parses templates at compile time, and `form` declarations are
 
 GitHub-flavored Markdown (GFM) is a first-class format alongside HTML: for whole pages, for fragments, and as a value that code can render. It has become a quasi-standard (READMEs, dev.to, Discord, LLM output), it's easy to write, and it's readable even as source.
 
-#### Fourfold Markdown: GFM, made safe
+#### FourFold Flavored Markdown: GFM, made safe
 
-Plain GFM is **not** safe: it passes raw HTML through, and GitHub is safe only because it sanitizes the output afterward. Fourfold Markdown is GFM with these changes, applied by the engine's renderer everywhere:
+Plain GFM is **not** safe: it passes raw HTML through, and GitHub is safe only because it sanitizes the output afterward. FourFold Flavored Markdown is GFM with these changes, applied by the engine's renderer everywhere. (The user-facing reference is [docs/user/MARKDOWN.md](../user/MARKDOWN.md).)
 
 - **No raw HTML.** HTML tags in Markdown are shown as escaped text, in developer files too. That's one rule and one renderer configuration; anyone who wants HTML writes an HTML fragment.
 - **Link and image URLs follow the template URL rule** (see [contextual escaping](#where-fields-are-allowed-contextual-escaping)): http(s), mailto, or relative only. `[click](javascript:…)` renders as plain text.
 - **Linear-time parser, capped input.** Rendering runs in native code, outside the VM's instruction budget, so the parser must not slow down on pathological input (nested brackets, emphasis runs). md4c and cmark-gfm are both designed for this, and md4c has a built-in no-HTML flag. Text rendered at runtime is also capped in size.
 - Task-list checkboxes are rendered `disabled`.
+
+It comes in three levels (named 2026-11-05):
+
+- **Limited Markdown:** the restricted level for visitor-entered text such as comments and posts (see [Two profiles](#two-profiles)). The default for `markdown()`.
+- **Full Markdown:** everything above, with no dynamic extensions. `markdown(text, "full")`, and what `/x.md` sends.
+- **Dynamic Markdown:** Full Markdown plus fields and includes, so code can change what the visitor sees. Only `.md` files in `code/`.
 
 Markdown with no raw HTML can't execute anything. Markdown that reaches `markdown()` at runtime, or is kept in `data/`, has no fields or includes either, so it is **inert data** under the core rule. It can be rendered from anywhere, including `data/`: a wiki or blog stored as data can be shown with `markdown(file.readLines(path), "full")` (`markdown` takes a list of lines as well as a string; M5.1). Markdown files in `code/` can have fields and includes (see [Fields in Markdown](#fields-in-markdown)), which makes them templates, like HTML files in `code/`.
 
@@ -711,9 +717,9 @@ Store the Markdown source, not the rendered result. Handles aren't inert, so the
 
 #### Two profiles
 
-Text that reaches `markdown()` at runtime is usually visitor input, so **the default is the restricted `"comment"` profile**. Full Markdown is an explicit, grep-able opt-in: `markdown(text, "full")`. Files in `code/` are developer-authored and always use `"full"`.
+Text that reaches `markdown()` at runtime is usually visitor input, so **the default is the restricted `"limited"` profile** (Limited Markdown; called `"comment"` before M6.1). Full Markdown is an explicit, grep-able opt-in: `markdown(text, "full")`. Files in `code/` are developer-authored and always use `"full"` (as Dynamic Markdown).
 
-| | `"comment"` (default for `markdown()`) | `"full"` (`.md` files; opt-in from code) |
+| | `"limited"` (default for `markdown()`) | `"full"` (`.md` files; opt-in from code) |
 |---|---|---|
 | Paragraphs, line breaks | yes | yes |
 | Bold, italic, strikethrough, inline code | yes | yes |
@@ -733,7 +739,7 @@ Text that reaches `markdown()` at runtime is usually visitor input, so **the def
 
 Styling rendered Markdown should take no effort:
 
-- All rendered Markdown is wrapped in an element with a class, `<div class="markdown">` (with `markdown comment` for the comment profile), so CSS can target `.markdown h2`, `.markdown table`, or `.markdown.comment` without affecting the rest of the page.
+- All rendered Markdown is wrapped in an element with a class, `<div class="markdown">` (with `markdown limited` for Limited Markdown), so CSS can target `.markdown h2`, `.markdown table`, or `.markdown.limited` without affecting the rest of the page.
 - **Stylesheet by convention:** if `pages/markdown.css` exists, the engine adds a `<link>` to it in the `<head>` of every page that contains rendered Markdown, the same way it injects CSRF tokens. If it doesn't exist, the engine links its own built-in default stylesheet (at a reserved URL such as `/__fourfold/markdown.css`), so Markdown looks decent out of the box. A config setting turns injection off for developers who'd rather link their styles themselves.
 - Code blocks render as `<pre><code class="language-x">`, so any CSS/JS syntax highlighter works. (Server-side highlighting could come later.)
 - Live reload already swaps changed CSS in place (see §9), so tuning Markdown styles is immediate.
@@ -750,14 +756,15 @@ Styling rendered Markdown should take no effort:
 
 | Where the field is | HTML output | Markdown output |
 |---|---|---|
-| Text (paragraphs, headings, emphasis, list items, table cells, link text, image alt text) | escaped as HTML text | every ASCII punctuation character backslash-escaped (CommonMark allows this for all of them, so `*`, `_`, `#`, `[`, `<`, `&` and the rest stay literal, and `\|` keeps a table cell whole); CR, LF and tab become spaces; leading spaces at the start of a line written as `&#32;`, so they can't start a code block |
+| Text (paragraphs, headings, emphasis, list items, table cells, link text, image alt text, link titles) | escaped as HTML text (or attribute) | every ASCII punctuation character backslash-escaped (CommonMark allows this for all of them, so `*`, `_`, `#`, `[`, `<`, `&` and the rest stay literal, and `\|` keeps a table cell whole); CR, LF and tab become spaces; leading and trailing spaces written as `&#32;`, so they can't start a code block or make a hard line break; a final `www` before a literal `.` written with an entity, so it can't make a web address (M6.1) |
 | Start of a link or image destination: `[profile]({{url}})` | the template URL rule (http, https, mailto, or relative; anything else becomes a dead link) | the same URL rule, then spaces, `( ) < >` and control characters percent-encoded |
 | Later in a destination: `[next](list.md?page={{n}})` | percent-encoded | percent-encoded |
 
-- **Where fields can't go** (compile errors, with a message saying what to do instead): link reference definitions and labels (`[x]: …`, `[text][{{ref}}]`), autolinks (`<{{url}}>`), and fenced-code info strings. A heading's `id` comes from its text with the fields left out, so it doesn't change with the values.
+- **Where fields can't go** (compile errors, with a message saying what to do instead): link reference definitions and labels (`[x]: …`, `[text][{{ref}}]`), autolinks (`<{{url}}>`), and fenced-code info strings. Added in M6.1, each because the Markdown output could otherwise mean something the HTML doesn't: inside literal `[brackets]` that aren't a link (`[{{name}}]` could match a reference definition); in the same run of text as `://`, `www.` or an unescaped `@` (a client would make a bare address into a link, with the value in its URL); right after `<`; inside raw HTML, as a GFM client with HTML on would parse it; and in a destination whose literal start breaks the URL rule. A heading's `id` comes from its text with the fields left out, so it doesn't change with the values.
+- **`[[` is reserved** (decided 2026-11-05) for possible inline form inputs later (`[[age:type=int,width=5]]`). Wherever `{{` would be a field, `[[` is a compile error; `\[[` is a literal `[[`. Text in Limited and Full Markdown is unaffected. Reserving it now means form syntax won't change the meaning of existing pages.
 - **Values:** a string is escaped, a number is written as MiniScript prints it, null is empty, and a map or list is an error, as in HTML text.
-- **Includes and rendered values are blocks.** `{{> name}}` and a field holding a rendered value (from `frag` or `markdown`) must stand alone on a line, at the top level (not inside a list item or block quote), and stand for whole blocks: never wrapped in a `<p>`. A Markdown template includes and takes only **Markdown**: an `.md` fragment, or a `markdown()` result. An HTML fragment or `unsafeHTML` in a Markdown template is an error (at compile time for an include, at render time for a value), in both outputs, so `/about` and `/about.md` never disagree about what works.
-- **Rendered values are rendered late.** `frag` and `markdown` return a handle that records what to render (the fragment and its values, or the text and its profile), and the handle is rendered in the format of the template it lands in. An `.md` fragment renders as either; an HTML fragment only as HTML. In the Markdown output, `markdown(text)` is parsed and written back out as Markdown, applying its profile (comment headings become paragraphs and images become links; raw HTML stays escaped text), so visitor text reaches a Markdown client under the same rules as a browser. Handles are still not inert, and still can't be saved.
+- **Includes and rendered values are blocks.** `{{> name}}` and a field holding a rendered value (from `frag` or `markdown`) must be a paragraph of their own: alone on their line, at the top level (not inside a list item, block quote or table), with a blank line before and after (the line after would otherwise continue the paragraph). They stand for whole blocks: never wrapped in a `<p>`. A field alone on its line may hold a string too, which is then a paragraph. A Markdown template includes and takes only **Markdown**: an `.md` fragment, or a `markdown()` result. An HTML fragment or `unsafeHTML` in a Markdown template is an error (at compile time for an include, at render time for a value), in both outputs, so `/about` and `/about.md` never disagree about what works.
+- **Rendered values carry both formats.** `frag` and `markdown` return a handle that can be written in the format of the template it lands in. An `.md` fragment renders as either; an HTML fragment only as HTML. (As built in M6.1: `frag` of an `.md` fragment renders its HTML, and its Markdown too when the run's output is Markdown; `markdown(text)` renders its HTML, and writes its Markdown only if a Markdown output asks for it. A handle's fields can't be kept to render later, since they're MiniScript values.) In the Markdown output, `markdown(text)` is parsed and written back out as Markdown, applying its level (Limited Markdown's headings become paragraphs and images become links; links that break the URL rule become their text; raw HTML stays escaped text; reference links become inline), so visitor text reaches a Markdown client under the same rules as a browser. Handles are still not inert, and still can't be saved.
 
 #### Markdown as Markdown
 
@@ -768,7 +775,7 @@ Styling rendered Markdown should take no effort:
 - **One route, two formats.** `/about.md` is the same `RouteEntry` as `/about`: the same access rules, the same gate, the same code. `req.format` is `"html"` or `"markdown"`, for the rare handler that cares. It exists only for Markdown pages: `/contact.md` for an HTML page is a 404.
 - **Filled, not raw.** The response is the page's Markdown form with its fields filled and its includes in place, never the source with `{{visits}}` in it. A page with no fields is sent as written, and is the same on every request.
 - **No layout.** The Markdown output is the page alone; `frags/layout/markdown.html` wraps only the HTML. The HTML output gets `<link rel="alternate" type="text/markdown" href="/about.md">` in its `<head>`, so clients can find the Markdown.
-- **Raw HTML in the source** is sent as written, since it's the developer's own file. Fourfold's renderer shows it as text, and a client that follows Fourfold Markdown (as Mini Micro's will) does the same; a generic GFM client might render it.
+- **Raw HTML in the source** is sent as written, since it's the developer's own file. Fourfold's renderer shows it as text, and a client that follows FourFold Flavored Markdown (as Mini Micro's will) does the same; a generic GFM client might render it. (A field inside it is a compile error.)
 - **Reading only.** Markdown has no forms, so a Markdown client can follow links (including ones with query strings, `list.md?page=2`) but not post. A restricted page needs a session cookie, and signing in is an HTML flow; Markdown clients that sign in belong to [non-browser clients](#open-questions).
 
 ---

@@ -1,8 +1,8 @@
 routes:
-  /  markdown  pages/index.md  title: Markdown Site
-  /about  markdown  pages/about.md  title: About
-  /docs/  markdown  pages/docs/index.md  title: Docs
-  /docs/setup  markdown  pages/docs/setup.md  title: Setup
+  /  markdown  pages/index.md  /index.md  title: Markdown Site
+  /about  markdown  pages/about.md  /about.md  title: About
+  /docs/  markdown  pages/docs/index.md  /docs/index.md  title: Docs
+  /docs/setup  markdown  pages/docs/setup.md  /docs/setup.md  title: Setup
   /logo.svg  static  pages/logo.svg  image/svg+xml
 fragments:
   nav  frags/nav.html

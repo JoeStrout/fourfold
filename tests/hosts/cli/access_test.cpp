@@ -132,11 +132,11 @@ TEST_CASE("access: every route of the clubhouse, as each kind of visitor") {
         levels[r.asMap().at("url").asString()] = r.asMap().at("access").asString();
     }
     const std::map<std::string, std::string> expectedLevels = {
-        {"/", "public"},           {"/about", "public"},
+        {"/", "public"},           {"/about", "public"},       {"/about.md", "public"},
         {"/admin/", "admin"},      {"/admin/grant", "admin"},
         {"/admin/revoke", "admin"}, {"/board", "public"},
         {"/board/post", "login"},  {"/members/", "login"},
-        {"/members/badge.svg", "login"}, {"/members/handbook", "login"},
+        {"/members/badge.svg", "login"}, {"/members/handbook", "login"}, {"/members/handbook.md", "login"},
         {"/mod/", "admin or moderator"}, {"/style.css", "public"},
     };
     CHECK_EQ(levels, expectedLevels);
@@ -159,6 +159,8 @@ TEST_CASE("access: every route of the clubhouse, as each kind of visitor") {
         {"GET", "/board", "", 200},
         {"GET", "/members/", "", 200},
         {"GET", "/members/handbook", "", 200},
+        {"GET", "/members/handbook.md", "", 200},   // the same route, as Markdown
+        {"GET", "/about.md", "", 200},
         {"GET", "/members/badge.svg", "", 200},
         {"GET", "/mod/", "", 200},
         {"GET", "/admin/", "", 200},

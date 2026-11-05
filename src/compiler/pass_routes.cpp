@@ -7,7 +7,9 @@
 //   pages/guestbook.ms        →  /guestbook/sign  for post.sign; /guestbook/more for get.more
 //   pages/docs/index.ms       →  /docs/more       for get.more
 //   pages/api.ms              →  /api             if it has a render but there's no api.html
-//   pages/guide.md            →  /guide           rendered Markdown (see the markdown pass)
+//   pages/guide.md            →  /guide           a Markdown page (see the markdown pass), with
+//                                                 render from guide.ms, if it has one; and
+//                             →  /guide.md        the same route, as Markdown
 //   pages/404.html            →  the not-found page (not a route)
 //   pages/500.html            →  the error page (not a route)
 
@@ -97,10 +99,15 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
     const RelPath pages = RelPath::parse("pages").value();
     bool anyPages = false;
 
-    std::set<RelPath> htmlFiles;
+    // Page templates, which a .ms file's render fills.
+    std::set<RelPath> templateFiles;
     for (const CodeEntry& file : listing.files) {
-        if (file.path.isWithin(pages) && lowerExtension(file.path) == ".html") htmlFiles.insert(file.path);
+        std::string extension = lowerExtension(file.path);
+        if (file.path.isWithin(pages) && (extension == ".html" || extension == ".md")) {
+            templateFiles.insert(withExtension(file.path, ".ms"));
+        }
     }
+    std::vector<std::string> markdownRoutes;
 
     for (const CodeEntry& file : listing.files) {
         if (!file.path.isWithin(pages)) continue;
@@ -151,7 +158,7 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                 }
                 continue;
             }
-            bool hasHtml = htmlFiles.count(withExtension(file.path, ".html")) > 0;
+            bool hasHtml = templateFiles.count(file.path) > 0;
             if (h.render && !hasHtml) {
                 // A page made only of code: its render returns text, JSON, a redirect...
                 std::string url = urlFor(segments, isIndex ? std::string_view() : stem);
@@ -171,7 +178,15 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                 continue;
             }
             std::string url = urlFor(segments, isIndex ? std::string_view() : stem);
-            addRoute(app, diagnostics, url, {RouteKind::Markdown, file.path, isIndex && url != "/"});
+            RouteEntry entry{RouteKind::Markdown, file.path, isIndex && url != "/"};
+            auto code = handlers.find(withExtension(file.path, ".ms"));
+            if (code != handlers.end() && code->second.render) {
+                entry.render = HandlerRef{HandlerRef::Kind::Render, code->first, "render"};
+                entry.usesSession = code->second.usesSession;
+            }
+            // (A {{flash}} field is found by the markdown pass, which parses it.)
+            if (!app.routes.find(url)) markdownRoutes.push_back(url);
+            addRoute(app, diagnostics, url, std::move(entry));
         } else if (const char* type = contentTypeForExtension(extension)) {
             addRoute(app, diagnostics, urlFor(segments, name), {RouteKind::Static, file.path});
             app.statics.add(file.path, {type, file.size, file.modifiedNs});
@@ -180,6 +195,18 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                                               ? "file has no extension, so no known type; not served"
                                               : "unknown file type " + extension + "; not served");
         }
+    }
+
+    // Each Markdown page's Markdown URL, now that every other route is known.
+    for (const std::string& url : markdownRoutes) {
+        const RouteEntry* entry = app.routes.find(url);
+        std::string alias = markdownUrlFor(url, entry->trailingSlash);
+        if (const RouteEntry* other = app.routes.find(alias)) {
+            diagnostics.error(codeFileName(entry->source), "its Markdown URL, " + alias + ", is also served by " +
+                                                               codeFileName(other->source));
+            continue;
+        }
+        app.routes.addMarkdownAlias(alias, url);
     }
 
     if (!anyPages) diagnostics.warning("code/pages", "no pages found; the app serves nothing");

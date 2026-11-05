@@ -51,7 +51,8 @@ std::optional<RelPath> codeFileOf(const RouteEntry& entry) {
     for (const std::optional<HandlerRef>* h : {&entry.render, &entry.get, &entry.post}) {
         if (*h) return (*h)->source;
     }
-    if (entry.kind == RouteKind::Page) return codeFor(entry.source);
+    // A page with no render may still have an .ms file with `access =`.
+    if (entry.kind == RouteKind::Page || entry.kind == RouteKind::Markdown) return codeFor(entry.source);
     return std::nullopt;
 }
 
@@ -164,6 +165,7 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
         }
         routes.add(url, std::move(entry));
     }
+    for (const auto& [alias, url] : app.routes.markdownAliases()) routes.addMarkdownAlias(alias, url);
     app.routes = std::move(routes);
 
     for (const Rule& rule : rules) {

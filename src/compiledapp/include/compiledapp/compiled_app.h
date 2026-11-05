@@ -2,8 +2,8 @@
 // (Arch §6). It's the only thing the engine knows about the app's code.
 // Plain data and lookups, no logic; the compiler builds it.
 //
-// It holds routes, static files, templates (pages and fragments), Markdown
-// pages, and the compiled scripts. Queries, access rules and the rest arrive
+// It holds routes, static files, templates (pages and fragments, HTML and
+// Markdown), and the compiled scripts. Queries, access rules and the rest arrive
 // with their milestones.
 #pragma once
 
@@ -40,7 +40,7 @@ enum class RouteKind {
     Page,      // a page: an .html template, its .ms file's render, or both
     Static,    // a static file, served with its content type from StaticIndex
     Handler,   // get.x and/or post.x in a page's .ms file
-    Markdown,  // a .md page, rendered at compile time and served in its layout
+    Markdown,  // a .md page: as HTML in its layout, or as Markdown at /x.md
 };
 
 const char* routeKindName(RouteKind kind);
@@ -111,11 +111,24 @@ struct RouteEntry {
 // Canonical URL path (see canonicalUrlPath, which reports the trailing slash
 // separately) → route. Lookups are exact: no patterns, no case folding
 // (overview §5).
+//
+// A Markdown page's route also answers at its Markdown URL (/about.md for
+// /about; overview §4, Markdown as Markdown): an alias for the same entry,
+// so the same access rules, gate and code apply.
 class RouteTable {
 public:
-    // False if `path` is already taken.
+    // False if `path` is already taken (by a route or an alias).
     bool add(std::string path, RouteEntry entry);
     const RouteEntry* find(const std::string& path) const;
+    // For the compiler, while it builds the table.
+    RouteEntry* findForUpdate(const std::string& path);
+
+    // False if `alias` is already taken, or `path` isn't a route.
+    bool addMarkdownAlias(std::string alias, std::string path);
+    // The route `alias` is the Markdown URL of, or null; `path` gets its path.
+    const RouteEntry* findMarkdown(const std::string& alias, std::string* path = nullptr) const;
+    // Alias → route path.
+    const std::map<std::string, std::string>& markdownAliases() const { return aliases_; }
 
     size_t size() const { return routes_.size(); }
     std::map<std::string, RouteEntry>::const_iterator begin() const { return routes_.begin(); }
@@ -123,7 +136,12 @@ public:
 
 private:
     std::map<std::string, RouteEntry> routes_;
+    std::map<std::string, std::string> aliases_;
 };
+
+// A Markdown page's Markdown URL: /about.md for /about, /docs/index.md for
+// /docs/ (`trailingSlash`), and /index.md for /.
+std::string markdownUrlFor(const std::string& path, bool trailingSlash);
 
 struct StaticFile {
     std::string contentType;   // "image/png", "text/css; charset=utf-8"
@@ -142,9 +160,9 @@ private:
     std::map<RelPath, StaticFile> files_;
 };
 
-// The parsed templates: pages in code/pages/ by source path, and fragments
-// in code/frags/ by name ("entry" for frags/entry.html or entry.md), with
-// their includes resolved.
+// The parsed templates: pages in code/pages/ by source path (.html, and .md
+// as Markdown templates), and fragments in code/frags/ by name ("entry" for
+// frags/entry.html or entry.md), with their includes resolved.
 class TemplateSet {
 public:
     void add(RelPath source, CompiledTemplate compiled);
@@ -160,18 +178,11 @@ private:
     FragmentMap fragments_;
 };
 
-// A .md page in code/pages/, rendered once, at compile time.
-struct MarkdownPage {
-    Html content;
-    std::string title;   // from its first # heading; empty if none
-};
-
 struct CompiledApp {
     uint64_t generation = 0;
     RouteTable routes;
     StaticIndex statics;
     TemplateSet templates;
-    std::map<RelPath, MarkdownPage> markdownPages;
     // frags/layout/markdown.html, which wraps every Markdown page, if the
     // app has one (with {{content}} and {{title}}); else a built-in page.
     std::optional<CompiledTemplate> markdownLayout;

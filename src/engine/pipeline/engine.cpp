@@ -250,6 +250,7 @@ void Engine::handle(const HttpRequest& request, Done done) const {
         return;
     }
     f->decision = route(f->admitted, *f->app);
+    setRenderFormat(f->render, f->decision);
     const RouteEntry* entry = f->decision.entry;
     // Identify: who's asking, if it matters (the route is restricted, or runs
     // code that sees `req.user`).
@@ -424,6 +425,7 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
 
     RunContext context;
     context.request = std::move(facts);
+    context.request.format = decision.markdown ? "markdown" : "html";
     if (f->user) context.request.user = userFacts(*f->user);
     context.render = f->render;
     context.data = options.data;

@@ -1,11 +1,13 @@
-// The Markdown pass: each .md page in code/pages/ is rendered once, here,
-// with the full profile (overview §4, Markdown pages).
+// The Markdown pass: each .md page in code/pages/ is parsed, here, into a
+// template with an HTML form and a Markdown form (Dynamic Markdown; overview
+// §4, Markdown pages and Fields in Markdown), and its includes resolved.
 //
 // Links between .md files are rewritten to their routes, so a folder of
 // Markdown reads correctly on GitHub and when served: [setup](setup.md#x)
 // becomes /setup#x. A relative or site-absolute link (or image) to a route
 // that doesn't exist is a warning.
 
+#include <algorithm>
 #include <cctype>
 
 #include "links.h"
@@ -65,11 +67,11 @@ void markdownPass(const CodeListing& listing, const CodeTree& code, CompiledApp&
         if (!entry.path.isWithin(pages)) continue;
         if (entry.path.str() == "pages/markdown.css") app.hasMarkdownCss = true;
         if (lowerExtension(entry.path) != ".md") continue;
-        const RouteEntry* routed = nullptr;
+        std::optional<std::string> routedUrl;
         for (const auto& [url, route] : app.routes) {
-            if (route.kind == RouteKind::Markdown && route.source == entry.path) routed = &route;
+            if (route.kind == RouteKind::Markdown && route.source == entry.path) routedUrl = url;
         }
-        if (!routed) continue;   // not routed (the routes pass said why)
+        if (!routedUrl) continue;   // not routed (the routes pass said why)
 
         auto file = code.read(entry.path);
         std::string fileName = codeFileName(entry.path);
@@ -87,13 +89,22 @@ void markdownPass(const CodeListing& listing, const CodeTree& code, CompiledApp&
         options.rewriteUrl = [&checker](const std::string& url, bool isImage, std::string& warning) {
             return checker.rewrite(url, isImage, warning);
         };
-        MarkdownResult md = renderMarkdown(file.value().contents(), options);
-        if (!md.ok()) {
-            diagnostics.error(fileName, *md.error);
-            continue;
+        std::vector<std::string> warnings;
+        ParsedTemplate parsed = parseMarkdownTemplate(file.value(), TemplateKind::Page, options, &warnings);
+        for (const TemplateProblem& p : parsed.errors) diagnostics.error("code/" + p.file, p.message, p.line);
+        if (!parsed.ok()) continue;
+        for (const std::string& w : warnings) diagnostics.warning(fileName, w);
+        std::vector<TemplateProblem> problems = resolveIncludes(parsed.compiled, app.templates.fragments());
+        for (const TemplateProblem& p : problems) diagnostics.error("code/" + p.file, p.message, p.line);
+        if (!problems.empty()) continue;
+
+        // A {{flash}} field shows the session's flash message, so the route
+        // uses the session (as for an HTML page).
+        const std::vector<std::string>& fields = parsed.compiled.fieldNames();
+        if (std::find(fields.begin(), fields.end(), "flash") != fields.end()) {
+            if (RouteEntry* route = app.routes.findForUpdate(*routedUrl)) route->usesSession = true;
         }
-        for (const std::string& w : md.warnings) diagnostics.warning(fileName, w);
-        app.markdownPages[entry.path] = MarkdownPage{std::move(md.html), std::move(md.title)};
+        app.templates.add(entry.path, std::move(parsed.compiled));
     }
 }
 

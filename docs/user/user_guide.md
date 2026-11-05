@@ -6,9 +6,12 @@ assumes Fourfold is already installed and serving your app with
 `fourfold serve`; setting that up is covered in the
 [admin guide](../admin/admin_guide.md).
 
-*Status: covers what works as of Milestone 6. Features still to come (form
+*Status: covers what works as of Milestone 6.1. Features still to come (form
 validation, rate limits, uploads, databases, background jobs and more) will be
 added here as they arrive.*
+
+Markdown has its own reference, [FourFold Flavored Markdown](MARKDOWN.md),
+which this guide links to rather than repeats.
 
 MiniScript itself isn't covered here; see [miniscript.org](https://miniscript.org)
 for the language. This guide covers what Fourfold adds to it.
@@ -282,31 +285,99 @@ response: see [HTMX](#htmx-updating-part-of-a-page).
 
 ## Markdown
 
+Markdown is a first-class format: a page or a fragment can be a `.md` file,
+with fields and code like an HTML one, and code can render a visitor's
+Markdown with `markdown(text)`. Every Markdown page is also served *as
+Markdown*, for Markdown clients. [FourFold Flavored Markdown](MARKDOWN.md)
+describes the Markdown itself completely; this section shows how it fits into
+an app.
+
+Markdown comes in three levels:
+
+- **Limited Markdown**, for anything a visitor wrote: `markdown(text)`.
+- **Full Markdown**, for text you trust: `markdown(text, "full")`.
+- **Dynamic Markdown**, your `.md` files in `code/`: Full Markdown plus
+  fields and includes.
+
 ### Markdown pages
 
-`pages/about.md` is served at `/about`, rendered as HTML. A site can be made
-of nothing but `.md` files.
+`pages/about.md` is served at `/about` as HTML, and at `/about.md` as
+Markdown. A site can be made of nothing but `.md` files.
 
 - **The page around it.** If you have `frags/layout/markdown.html`, each
-  Markdown page is put into it: it needs a `{{content}}` field, and can have a
-  `{{title}}` field, which gets the page's first `#` heading. Without that
-  file, Fourfold uses a simple built-in page.
+  Markdown page's HTML is put into it: it needs a `{{content}}` field, and can
+  have a `{{title}}` field, which gets the page's first `#` heading. Without
+  that file, Fourfold uses a simple built-in page. The Markdown at
+  `/about.md` has no layout.
 - **Links between `.md` files work** both in Fourfold and when you read the
-  files on GitHub or in an editor: `[setup](setup.md#install)` becomes
-  `/setup#install`. A link to a page that doesn't exist is a compile warning.
+  files on GitHub or in an editor: in the HTML, `[setup](setup.md#install)`
+  becomes `/setup#install`; in the Markdown, it's kept, and leads to
+  `/setup.md`. A link to a page that doesn't exist is a compile warning.
 - **Headings get ids** in GitHub's style (`## Hello World` gets
   `id="hello-world"`), so `#hello-world` links work.
-- **Markdown pages have no fields and no code.** `{{` in Markdown is just text.
+- `about.md` and `about.html` side by side is a compile error.
+
+### Markdown pages with code
+
+A Markdown page can have fields, like an HTML page, and `about.md` pairs with
+`about.ms`: its `render` fills them, and `get` and `post` work as for any
+page.
+
+```
+# Visitor counter
+
+This page has been visited **{{visits}}** times.
+```
+
+```
+render = function(req)
+    return {"visits": data.increment("visits")}
+end function
+```
+
+Values are escaped for where they are, in both the HTML and the Markdown, so
+a value can't add a link, a heading or anything else. A few places can't
+have fields (a link reference definition, an autolink, inside `[brackets]`
+that aren't a link, and others); each is a compile error saying what to do
+instead. `{{` in a code span or code block is just text, and `[[` is reserved
+(write `\[[`). [Dynamic Markdown](MARKDOWN.md#dynamic-markdown) has the
+details.
+
+**Rendered values and includes are blocks.** `{{> name}}`, or a field holding
+`frag(...)` or `markdown(...)`, must be a paragraph of its own: alone on its
+line, not in a list or quote, with a blank line before and after:
+
+```
+# Guestbook
+
+{{entries}}
+```
+
+A Markdown page takes only Markdown there: an `.md` fragment, or
+`markdown()`. An HTML fragment or `unsafeHTML` is an error.
+
+### Markdown as Markdown
+
+Every Markdown page is also at its name with `.md`: `/about.md`, and
+`/docs/index.md` for `/docs/`. It's the same route, with the same access
+rules and the same code, and its fields are filled the same way; only the
+format differs. A client that reads Markdown, such as a Markdown browser in
+Mini Micro, can read the whole site. See
+[Markdown as Markdown](MARKDOWN.md#markdown-as-markdown-xmd).
+
+`req.format` is `"markdown"` when the request was for the Markdown, and
+`"html"` otherwise. Most pages never need it.
 
 ### Markdown fragments
 
 `frags/intro.md` works like an HTML fragment: `{{> intro}}` includes it, and
-`frag("intro")` renders it. It takes no values. `intro.md` and `intro.html`
-side by side in `frags/` is a compile error.
+`frag("intro", value)` renders it, filling its fields; a list renders it once
+per item. A Markdown fragment can go in an HTML page or a Markdown page.
+`intro.md` and `intro.html` side by side in `frags/` is a compile error.
 
 ### Markdown from code: `markdown(text, profile)`
 
-`markdown(text, profile)` renders a string of Markdown, such as a visitor's comment,
+`markdown(text)` renders a string of Markdown, such as a visitor's comment,
 and returns rendered HTML, like `frag` does. `text` can also be a list of
 lines, as [`file.readLines`](#files-in-data-file-and-rawdata) returns them:
 
@@ -316,9 +387,9 @@ showEntry = function(e)
 end function
 ```
 
-You can render Markdown using either of two profiles:
+The second argument is the level:
 
-| | `"comment"` (the default) | `"full"` |
+| | `"limited"` (the default) | `"full"` |
 |---|---|---|
 | Paragraphs, bold, italic, strikethrough, code, lists, quotes, tables | yes | yes |
 | Links | yes, marked `rel="nofollow ugc"` | yes |
@@ -328,16 +399,20 @@ You can render Markdown using either of two profiles:
 Use the default for anything a visitor wrote: it keeps their text from
 showing tracking images, taking over the page with giant headings, or
 creating ids that clash with yours. Use `markdown(text, "full")` for text you
-trust. `.md` files in `code/` are always rendered in full.
+trust. `{{` in the text is never a field.
+
+In a Markdown page's Markdown (`/x.md`), the value is written out as Markdown,
+under the same rules, so a Markdown client gets nothing a browser wouldn't.
 
 The text is limited to 256 KB.
 
 ### What Markdown can't do (on purpose)
 
 - **No raw HTML.** HTML tags in Markdown are shown as text, even in your own
-  files. For HTML, write an HTML fragment.
+  files. For HTML, write an HTML fragment (in an HTML page).
 - **Links and images follow the URL rule:** `http:`, `https:`, `mailto:` or
   relative. `[click](javascript:...)` is shown as plain text.
+- **No forms.** A Markdown client can read and follow links, but not post.
 - **No footnotes yet.**
 
 Store Markdown source in `data`, not rendered HTML, and render it when you
@@ -346,8 +421,8 @@ show it.
 ### Styling
 
 Rendered Markdown is wrapped in `<div class="markdown">` (or
-`<div class="markdown comment">` for the comment profile), so your CSS can
-target `.markdown h2` or `.markdown.comment p` without touching the rest of
+`<div class="markdown limited">` for Limited Markdown), so your CSS can
+target `.markdown h2` or `.markdown.limited p` without touching the rest of
 the page.
 
 Any page containing rendered Markdown gets a stylesheet link in its `<head>`:
@@ -434,6 +509,7 @@ is **frozen**: you can read it but not change it.
 | `req.headers` | the request headers, with **lowercase** names: `req.headers["user-agent"]` |
 | `req.htmx` | 1 if HTMX sent the request, else 0 |
 | `req.user` | the [signed-in visitor](#signing-in-requser), or `null` |
+| `req.format` | `"html"`, or `"markdown"` when a [Markdown page](#markdown-as-markdown) was asked for as Markdown (`/about.md`) |
 
 Things to know:
 
@@ -1449,7 +1525,7 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 |---|---|
 | `code/pages/x.html` | the page at `/x` |
 | `code/pages/x.ms` | its code: `render`, `get.*`, `post.*` |
-| `code/pages/x.md` | a Markdown page at `/x` |
+| `code/pages/x.md` | a Markdown page at `/x`, and as Markdown at `/x.md` |
 | `code/pages/dir/index.html` | the page at `/dir/` |
 | `code/pages/404.html`, `500.html` | the error pages |
 | `code/pages/markdown.css` | styles for rendered Markdown |
@@ -1471,13 +1547,14 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `{{> header}}` | include `frags/header` |
 | `{{flash}}` | `session.flash`, if any; showing it removes it |
 | `\{{` | a literal `{{` |
+| `[[` | reserved in `.md` files in `code/`; write `\[[` |
 
 ### Functions
 
 | Call | Returns |
 |---|---|
 | `frag(name, value)` | rendered HTML; a list of maps renders it once each |
-| `markdown(text, profile="comment")` | rendered HTML (`text` can be a list of lines) |
+| `markdown(text, profile="limited")` | rendered Markdown, Limited or `"full"` (`text` can be a list of lines) |
 | `unsafeHTML(text)` | `text`, as HTML, unchecked |
 | `redirect(url)` | a redirect response |
 | `json(value)` | a JSON response |

@@ -42,6 +42,13 @@ RouteDecision fileNameRedirect(const AdmittedRequest& request, const CompiledApp
 RouteDecision route(const AdmittedRequest& request, const CompiledApp& app) {
     RouteDecision decision;
     const RouteEntry* entry = app.routes.find(request.path.path);
+    // A Markdown page's Markdown URL: the same route, as Markdown. Its one
+    // canonical form has no trailing slash.
+    bool markdown = false;
+    if (!entry) {
+        entry = app.routes.findMarkdown(request.path.path);
+        markdown = entry != nullptr;
+    }
     if (!entry) return fileNameRedirect(request, app);   // or NotFound
 
     // Which methods this route answers, and what handles each.
@@ -70,11 +77,12 @@ RouteDecision route(const AdmittedRequest& request, const CompiledApp& app) {
     // turn it into a GET), just not found. The Location is rebuilt from the
     // canonical path, never copied from the request, so "//evil.com" can't
     // become an off-site redirect.
-    if (entry->trailingSlash != request.path.trailingSlash) {
+    bool trailingSlash = entry->trailingSlash && !markdown;
+    if (trailingSlash != request.path.trailingSlash) {
         if (!isGet(request.method)) return decision;   // NotFound
         decision.kind = RouteDecision::Kind::Redirect;
         decision.location = encodeUrlPath(request.path.path);
-        if (entry->trailingSlash) decision.location += "/";
+        if (trailingSlash) decision.location += "/";
         if (request.hasQuery) decision.location += "?" + request.query;
         return decision;
     }
@@ -82,6 +90,10 @@ RouteDecision route(const AdmittedRequest& request, const CompiledApp& app) {
     decision.kind = RouteDecision::Kind::Found;
     decision.entry = entry;
     decision.handler = handler;
+    decision.markdown = markdown;
+    if (entry->kind == RouteKind::Markdown) {
+        decision.markdownUrl = markdown ? request.path.path : markdownUrlFor(request.path.path, entry->trailingSlash);
+    }
     return decision;
 }
 

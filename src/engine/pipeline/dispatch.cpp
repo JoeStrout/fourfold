@@ -6,6 +6,8 @@ namespace {
 
 const char* const kHtmlType = "text/html; charset=utf-8";
 
+
+
 HttpResponse html(int status, std::string body) {
     HttpResponse r;
     r.status = status;
@@ -31,29 +33,33 @@ HttpResponse notFound(const CompiledApp& app, const RenderOptions& render) {
     return HttpResponse::text(404, "Not Found\n");
 }
 
-// A Markdown page, in the app's layout or the built-in one.
-HttpResponse markdownPage(const MarkdownPage& md, const CompiledApp& app, const RenderOptions& render) {
-    if (app.markdownLayout) {
-        MapFields fields;
-        fields.set("content", FieldValue::markup(md.content));
-        fields.set("title", md.title.empty() ? FieldValue::null() : FieldValue::string(md.title));
-        RenderOptions quiet = render;
-        quiet.warnings = false;
-        RenderResult r = fourfold::render(*app.markdownLayout, fields, quiet);
-        if (r.ok()) return html(200, r.html.str());
-        return HttpResponse::text(500, "Internal Server Error\n");
+// A Markdown page with no code: as HTML, in the app's layout or the
+// built-in one; or as Markdown. Its fields render empty (or as `fields` has
+// them), on purpose.
+HttpResponse markdownPage(const CompiledTemplate& page, const CompiledApp& app, const RenderOptions& render,
+                          const FieldSource* fields) {
+    RenderOptions quiet = render;
+    quiet.warnings = false;
+    EmptyFields none;
+    const CompiledTemplate* layout = app.markdownLayout ? &*app.markdownLayout : nullptr;
+    RenderResult r = renderMarkdownPage(page, layout, fields ? *fields : none, quiet);
+    if (!r.ok()) return HttpResponse::text(500, "Internal Server Error\n");
+    if (render.format == OutputFormat::Markdown) {
+        HttpResponse response;
+        response.headers.set("Content-Type", kMarkdownContentType);
+        response.body = std::move(r.markdown);
+        return response;
     }
-    std::string body = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\">\n"
-                       "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<title>" +
-                       escapeHtml(md.title) + "</title>\n<link rel=\"stylesheet\" href=\"" +
-                       escapeHtml(render.markdownCss) +
-                       "\">\n<style>body{max-width:46rem;margin:2rem auto;padding:0 1rem;"
-                       "font-family:system-ui,sans-serif}</style>\n</head>\n<body>\n" +
-                       md.content.str() + "</body></html>\n";
-    return html(200, std::move(body));
+    return html(200, r.html.str());
 }
 
 }  // namespace
+
+void setRenderFormat(RenderOptions& render, const RouteDecision& decision) {
+    render.format = decision.markdown ? OutputFormat::Markdown : OutputFormat::Html;
+    render.markdownAlternate =
+        decision.markdown || decision.markdownUrl.empty() ? "" : encodeUrlPath(decision.markdownUrl);
+}
 
 RenderOptions renderOptionsFor(const CompiledApp& app, std::string nonce) {
     RenderOptions o;
@@ -93,8 +99,8 @@ HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, con
         return t ? page(200, *t, render, fields) : notFound(app, render);
     }
     if (entry.kind == RouteKind::Markdown) {
-        auto md = app.markdownPages.find(entry.source);
-        return md != app.markdownPages.end() ? markdownPage(md->second, app, render) : notFound(app, render);
+        const CompiledTemplate* t = app.templates.find(entry.source);
+        return t ? markdownPage(*t, app, render, fields) : notFound(app, render);
     }
 
     // The file was listed when the app was compiled; it may have gone since

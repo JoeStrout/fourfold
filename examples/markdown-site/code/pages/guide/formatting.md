@@ -4,10 +4,11 @@
 
 ## Tables
 
-| Profile | Used for |
+| Level | Used for |
 |---|---|
-| full | `.md` files in `code/` |
-| comment | `markdown()` from code (the default) |
+| Dynamic Markdown | `.md` files in `code/`, with `{{fields}}` |
+| Full Markdown | `markdown(text, "full")` from code |
+| Limited Markdown | `markdown(text)` from code (the default) |
 
 ## Task lists
 

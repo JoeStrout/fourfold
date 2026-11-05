@@ -232,10 +232,18 @@ Datum DevTools::accessReport(const CompiledApp& app) {
     for (const auto& [url, entry] : app.routes) {
         Datum::ListItems sources;
         for (const std::string& source : entry.accessSources) sources.push_back(str(source));
-        routes.push_back(Datum::map({{"url", str(url + (entry.trailingSlash && url != "/" ? "/" : ""))},
-                                     {"kind", str(routeKindName(entry.kind))},
-                                     {"access", str(entry.access.describe())},
-                                     {"sources", Datum::list(std::move(sources))}}));
+        Datum row = Datum::map({{"url", str(url + (entry.trailingSlash && url != "/" ? "/" : ""))},
+                                {"kind", str(routeKindName(entry.kind))},
+                                {"access", str(entry.access.describe())},
+                                {"sources", Datum::list(sources)}});
+        routes.push_back(std::move(row));
+        // A Markdown page's Markdown URL: the same route, so the same access.
+        if (entry.kind == RouteKind::Markdown) {
+            routes.push_back(Datum::map({{"url", str(markdownUrlFor(url, entry.trailingSlash))},
+                                         {"kind", str("markdown (as Markdown)")},
+                                         {"access", str(entry.access.describe())},
+                                         {"sources", Datum::list(std::move(sources))}}));
+        }
     }
     Datum::ListItems warnings;
     for (const Diagnostic& d : app.diagnostics) {

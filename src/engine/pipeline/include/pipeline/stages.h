@@ -97,7 +97,13 @@ struct RouteDecision {
     const HandlerRef* handler = nullptr;   // when Found, if script code handles it
     std::string location;                  // when Redirect
     std::string allow;                     // when MethodNotAllowed: "GET, HEAD, POST"
+    // When Found, for a Markdown page: the response is its Markdown (the
+    // request was for /about.md, not /about).
+    bool markdown = false;
+    // When Found, for a Markdown page: its Markdown URL ("/about.md").
+    std::string markdownUrl;
 };
+
 
 RouteDecision route(const AdmittedRequest& request, const CompiledApp& app);
 
@@ -129,9 +135,14 @@ extern const char* const kBuiltinMarkdownCssUrl;   // "/__fourfold/markdown.css"
 // has one, else the built-in one).
 RenderOptions renderOptionsFor(const CompiledApp& app, std::string nonce);
 
+// The render options adjusted for the route found: Markdown output for a
+// /x.md request, and the rel="alternate" link for a Markdown page's HTML.
+void setRenderFormat(RenderOptions& render, const RouteDecision& decision);
+
 // --- Dispatch: produce the response content without running code. ---
 
-// Static files, pages with no code, Markdown pages, redirects and errors.
+// Static files, pages with no code, Markdown pages (as HTML or Markdown, by
+// render.format), redirects and errors.
 // Not for routes with a handler (decision.handler set), which go to the
 // ScriptHost.
 // `fields` fills a page template's fields (a code-less page's {{flash}});

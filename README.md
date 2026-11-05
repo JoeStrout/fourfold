@@ -23,4 +23,4 @@ Fourfold is written in C++17 and built with CMake:
 cmake --preset dev && cmake --build --preset dev && ctest --preset dev
 ```
 
-See [docs/building.md](docs/building.md) for requirements, the repository layout, and coding conventions. To write a site, see the [user guide](docs/user/user_guide.md); to set up and run a server, the [admin guide](docs/admin/admin_guide.md).
+See [docs/building.md](docs/building.md) for requirements, the repository layout, and coding conventions. To write a site, see the [user guide](docs/user/user_guide.md), and [FourFold Flavored Markdown](docs/user/MARKDOWN.md) for writing it in Markdown; to set up and run a server, the [admin guide](docs/admin/admin_guide.md).

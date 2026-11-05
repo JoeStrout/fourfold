@@ -47,9 +47,10 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
 void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app,
                 Diagnostics& diagnostics);
 
-// Renders the .md pages in code/pages/ into app.markdownPages, rewriting
-// links between them and warning about links to routes that don't exist.
-// After the routes pass, which it checks links against.
+// Parses the .md pages in code/pages/ into app.templates, rewriting links
+// between them and warning about links to routes that don't exist. After the
+// routes pass, which it checks links against, and the templates pass, whose
+// fragments they include.
 void markdownPass(const CodeListing& listing, const CodeTree& code, CompiledApp& app, Diagnostics& diagnostics);
 
 // Each route's effective access, from code/access.ms (evaluated by

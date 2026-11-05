@@ -250,6 +250,7 @@ Value makeRequestValue(const RequestFacts& facts) {
     for (const auto& [name, value] : facts.headers) htmx = htmx || (name == "hx-request" && value == "true");
     req.MapSet("htmx", htmx ? Value::one : Value::zero);
     req.MapSet("user", facts.user ? userValue(*facts.user) : Value::Null);
+    req.MapSet("format", toValue(facts.format));
     req.Freeze();   // deep: handlers can read req, never change it
     return req;
 }
@@ -296,11 +297,14 @@ void addWarnings(Run& run, const std::vector<RenderWarning>& more) {
 
 namespace {
 
-// The page template a render fills: pages/x.html for pages/x.ms.
-RelPath pairedTemplate(const RelPath& source) {
+// The page template a render fills: pages/x.html (or x.md) for pages/x.ms.
+RelPath pairedTemplate(const RelPath& source, const CompiledApp* app) {
     std::string s = source.str();
     s.resize(s.size() - source.extension().size());
-    return RelPath::parse(s + ".html").value();
+    RelPath html = RelPath::parse(s + ".html").value();
+    RelPath md = RelPath::parse(s + ".md").value();
+    if (app && !app->templates.find(html) && app->templates.find(md)) return md;
+    return html;
 }
 
 // A render's fields, plus `flash` from the session when the map doesn't
@@ -323,11 +327,11 @@ private:
 };
 
 HandlerOutcome renderPage(Run& run, Value fields) {
-    RelPath page = pairedTemplate(run.handler.source);
+    RelPath page = pairedTemplate(run.handler.source, run.app.get());
     const CompiledTemplate* t = run.app ? run.app->templates.find(page) : nullptr;
     if (!t) {
         return errorOutcome(run, "render returned a map of fields, but there's no code/" + page.str() +
-                                     " template to fill; return a string or json(...) instead");
+                                     " (or .md) template to fill; return a string or json(...) instead");
     }
     // A page with a {{flash}} field shows `session.flash`, unless render
     // filled that field itself; either way, the message has had its showing,
@@ -336,7 +340,10 @@ HandlerOutcome renderPage(Run& run, Value fields) {
     bool hasFlashField = std::find(names.begin(), names.end(), "flash") != names.end();
     Value session = run.context.session ? run.interp.GetGlobalValue("session") : Value::Null;
     WithFlash source(fields, hasFlashField ? session : Value::Null);
-    RenderResult r = render(*t, source, run.context.render);
+    const CompiledApp& app = *run.app;
+    RenderResult r = t->isMarkdown() ? renderMarkdownPage(*t, app.markdownLayout ? &*app.markdownLayout : nullptr,
+                                                          source, run.context.render)
+                                     : render(*t, source, run.context.render);
     if (hasFlashField && session.IsMap() && r.ok()) session.MapRemove(toValue(std::string("flash")));
     addWarnings(run, r.warnings);
     HandlerOutcome o;
@@ -348,7 +355,12 @@ HandlerOutcome renderPage(Run& run, Value fields) {
         return o;
     }
     o.kind = HandlerOutcome::Kind::Render;
-    o.body = r.html.str();
+    if (run.context.render.format == OutputFormat::Markdown) {
+        o.body = std::move(r.markdown);
+        o.contentType = kMarkdownContentType;
+    } else {
+        o.body = r.html.str();
+    }
     return o;
 }
 
@@ -373,6 +385,13 @@ HandlerOutcome outcomeFrom(Run& run) {
     }
     if (const Html* html = htmlHandleOf(result)) {
         o.kind = HandlerOutcome::Kind::Fragment;
+        // A Markdown page's /x.md gets Markdown, if the value is Markdown.
+        const std::string* md = run.context.render.format == OutputFormat::Markdown ? html->markdown() : nullptr;
+        if (md) {
+            o.body = *md;
+            o.contentType = kMarkdownContentType;
+            return o;
+        }
         o.body = html->str();
         o.hasScript = html->hasScript();
         return o;

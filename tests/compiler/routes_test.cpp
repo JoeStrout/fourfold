@@ -379,14 +379,30 @@ TEST_CASE("compile: Markdown pages") {
     REQUIRE(docs);
     CHECK(docs->trailingSlash);
 
-    const MarkdownPage& index = out.app->markdownPages.at(RelPath::parse("pages/index.md").value());
-    CHECK_EQ(index.title, "Home");
-    CHECK(contains(index.content.str(), "<a href=\"/docs/guide#start\">Guide</a>"));
-    CHECK(contains(index.content.str(), "<a href=\"gone.md\">gone</a>"));   // left as written
-    const MarkdownPage& guide = out.app->markdownPages.at(RelPath::parse("pages/docs/guide.md").value());
-    CHECK(contains(guide.content.str(), "<a href=\"/\">up</a>"));
-    CHECK(contains(guide.content.str(), "<a href=\"#x\">self</a>"));
-    CHECK(contains(guide.content.str(), "<a href=\"https://e.com/a.md\">ext</a>"));
+    const CompiledTemplate* index = out.app->templates.find(RelPath::parse("pages/index.md").value());
+    REQUIRE(index);
+    CHECK_EQ(pageTitle(*index, EmptyFields()), "Home");
+    std::string indexHtml = render(*index, EmptyFields()).html.str();
+    CHECK(contains(indexHtml, "<a href=\"/docs/guide#start\">Guide</a>"));
+    CHECK(contains(indexHtml, "<a href=\"gone.md\">gone</a>"));   // left as written
+    const CompiledTemplate* guide = out.app->templates.find(RelPath::parse("pages/docs/guide.md").value());
+    REQUIRE(guide);
+    std::string guideHtml = render(*guide, EmptyFields()).html.str();
+    CHECK(contains(guideHtml, "<a href=\"/\">up</a>"));
+    CHECK(contains(guideHtml, "<a href=\"#x\">self</a>"));
+    CHECK(contains(guideHtml, "<a href=\"https://e.com/a.md\">ext</a>"));
+    // The Markdown form keeps the links as written.
+    RenderOptions md;
+    md.format = OutputFormat::Markdown;
+    CHECK_EQ(render(*guide, EmptyFields(), md).markdown,
+             "# The Guide\n\n[up](../index.md) [self](#x) [ext](https://e.com/a.md)");
+    // Each Markdown page also answers at its Markdown URL.
+    std::string path;
+    CHECK_EQ(out.app->routes.findMarkdown("/index.md", &path), home);
+    CHECK_EQ(path, "/");
+    CHECK_EQ(out.app->routes.findMarkdown("/docs/index.md"), docs);
+    CHECK(out.app->routes.findMarkdown("/docs/guide.md"));
+    CHECK_FALSE(out.app->routes.findMarkdown("/docs.md"));
     CHECK(hasDiagnostic(out, "code/pages/index.md: warning: links to gone.md: there's no such page"));
     CHECK(hasDiagnostic(out, "code/pages/index.md: warning: shows j.png: there's no such page or file"));
     CHECK_FALSE(hasDiagnostic(out, "i.png"));
@@ -637,4 +653,64 @@ TEST_CASE("compile: golden route table for examples/clubhouse") {
     std::string goldenPath = FOURFOLD_TESTS_DIR "/compiler/golden/clubhouse.txt";
     if (std::getenv("FOURFOLD_UPDATE_GOLDEN")) std::ofstream(goldenPath, std::ios::binary) << actual;
     CHECK_EQ(actual, readFile(goldenPath));
+}
+
+TEST_CASE("compile: Dynamic Markdown pages, with code") {
+    TempDir dir;
+    dir.write("code/pages/count.md", "# Visits: {{n}}\n\nSeen {{n}} times. {{flash}}\n\n{{> note}}\n");
+    dir.write("code/pages/count.ms", "render = function(req)\n  return {\"n\": 1}\nend function\n"
+                                     "post.reset = function(req)\n  return null\nend function\n");
+    dir.write("code/pages/plain.md", "{{x}}");
+    dir.write("code/frags/note.md", "*A {{kind}} note.*");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    const RouteEntry* count = route(out, "/count");
+    REQUIRE(count);
+    CHECK_EQ(count->kind, RouteKind::Markdown);
+    REQUIRE(count->render);
+    CHECK_EQ(count->render->source.str(), "pages/count.ms");
+    CHECK(count->usesSession);   // for its {{flash}}
+    CHECK(route(out, "/count/reset"));
+    CHECK_EQ(out.app->routes.findMarkdown("/count.md"), count);
+    CHECK_FALSE(route(out, "/plain")->render);
+    const CompiledTemplate* t = out.app->templates.find(RelPath::parse("pages/count.md").value());
+    REQUIRE(t);
+    CHECK_EQ(t->fieldNames(), std::vector<std::string>{"n", "flash", "kind"});
+    CHECK(contains(describe(*out.app), "/count  markdown  pages/count.md  /count.md  fields: n flash kind  "
+                                       "title: Visits: {{n}}  render in pages/count.ms  session"));
+}
+
+TEST_CASE("compile: Dynamic Markdown errors") {
+    struct Case {
+        std::map<std::string, std::string> files;
+        std::string diagnostic;
+    };
+    const std::vector<Case> cases = {
+        {{{"code/pages/a.md", "one\n\nSee [{{x}}].\n"}},
+         "code/pages/a.md:3: error: {{x}}: a field can't go inside [brackets]"},
+        {{{"code/frags/f.md", "a [[b]]"}, {"code/pages/a.md", "x"}}, "code/frags/f.md:1: error: [[ is reserved"},
+        {{{"code/frags/f.html", "<b>x</b>"}, {"code/pages/a.md", "{{> f}}"}},
+         "code/pages/a.md:1: error: {{> f}} is HTML (code/frags/f.html)"},
+        {{{"code/pages/a.md", "{{> gone}}"}}, "code/pages/a.md:1: error: there's no code/frags/gone.html (or .md)"},
+        // The Markdown URL is a route of its own, so it can collide.
+        {{{"code/pages/a.md", "x"}, {"code/pages/a.md.html", "<!DOCTYPE html>x"}},
+         "code/pages/a.md: error: its Markdown URL, /a.md, is also served by code/pages/a.md.html"},
+        {{{"code/pages/a/index.md", "x"}, {"code/pages/a/index.md.md", "y"}},
+         "code/pages/a/index.md: error: its Markdown URL, /a/index.md, is also served by code/pages/a/index.md.md"},
+    };
+    for (const Case& c : cases) {
+        TempDir dir;
+        for (const auto& [path, text] : c.files) dir.write(path, text);
+        CompileOutput out = compileApp(dir.path());
+        INFO(c.diagnostic);
+        CHECK_MESSAGE(hasDiagnostic(out, c.diagnostic), allDiagnostics(out));
+    }
+}
+
+TEST_CASE("compile: every example compiles, with no errors") {
+    for (const char* name : {"static-site", "scripts", "guestbook", "markdown-site", "clubhouse"}) {
+        INFO(name);
+        CompileOutput out = compileApp(FOURFOLD_TESTS_DIR "/../examples/" + std::string(name), AppFolder::Missing::Fail);
+        CHECK_MESSAGE(out.ok(), allDiagnostics(out));
+    }
 }

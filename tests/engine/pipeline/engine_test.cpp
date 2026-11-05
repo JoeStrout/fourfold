@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "doctest.h"
+#include "markdown/markdown.h"
 #include "partition/app_folder.h"
 #include "temp_dir.h"
 
@@ -473,7 +474,7 @@ TEST_CASE("Engine: render returning fields for a page with no template is an err
     ScriptApp app(true);
     HttpResponse r = app.get("/api");
     CHECK_EQ(r.status, 500);
-    CHECK(r.body.find("there's no code/pages/api.html template") != std::string::npos);
+    CHECK(r.body.find("there's no code/pages/api.html (or .md) template") != std::string::npos);
 }
 
 TEST_CASE("Engine: setApp swaps the app for later requests") {
@@ -588,6 +589,7 @@ struct HtmlApp {
                   "get.md = function(req)\n  return markdown(\"# Hi <b>\")\nend function\n");
         dir.write("code/frags/entry.html", "<li>{{who}}</li>");
         dir.write("code/frags/scripted.html", "<script>evil()</script>");
+        dir.write("code/pages/guide.md", "# Guide & more\n\nRead *this*.\n");
         dir.write("code/frags/layout/markdown.html",
                   "<!DOCTYPE html><html><head><title>{{title}}</title></head><body>{{content}}</body></html>");
 
@@ -622,11 +624,12 @@ struct HtmlApp {
         }
         app->templates.setFragments(std::move(frags));
 
-        // A Markdown page, rendered by hand as the compiler would.
+        // A Markdown page, parsed as the compiler would, with its Markdown URL.
         app->routes.add("/guide", {RouteKind::Markdown, rel("pages/guide.md")});
-        app->markdownPages[rel("pages/guide.md")] =
-            MarkdownPage{HtmlAccess::make("<div class=\"markdown\"><h1 id=\"guide\">Guide</h1></div>", false, true),
-                         "Guide & more"};
+        app->routes.addMarkdownAlias("/guide.md", "/guide");
+        ParsedTemplate guide = parseMarkdownTemplate(code.read(rel("pages/guide.md")).value(), TemplateKind::Page);
+        REQUIRE(guide.ok());
+        app->templates.add(rel("pages/guide.md"), std::move(guide.compiled));
         if (withLayout) {
             app->markdownLayout =
                 parseTemplate(code.read(rel("frags/layout/markdown.html")).value(), TemplateKind::Page).compiled;
@@ -707,7 +710,7 @@ TEST_CASE("Engine: fragments, with and without HTMX") {
     CHECK_EQ(header(status, "Content-Type"), "text/html; charset=utf-8");
 
     HttpResponse md = app.get("/book/md");
-    CHECK_EQ(md.body, "<div class=\"markdown comment\">\n<p>Hi &lt;b&gt;</p>\n</div>\n");
+    CHECK_EQ(md.body, "<div class=\"markdown limited\">\n<p>Hi &lt;b&gt;</p>\n</div>\n");
 }
 
 TEST_CASE("Engine: an HTMX redirect") {
@@ -747,7 +750,8 @@ TEST_CASE("Engine: Markdown pages, in the built-in page or the app's layout") {
         CHECK_EQ(a.status, 200);
         CHECK(a.body.find("<title>Guide &amp; more</title>") != std::string::npos);
         CHECK(a.body.find("<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">") != std::string::npos);
-        CHECK(a.body.find("<h1 id=\"guide\">Guide</h1>") != std::string::npos);
+        CHECK(a.body.find("<h1 id=\"guide--more\">Guide &amp; more</h1>") != std::string::npos);
+        CHECK(a.body.find("<link rel=\"alternate\" type=\"text/markdown\" href=\"/guide.md\">") != std::string::npos);
     }
 
     HtmlApp layout(true);
@@ -755,9 +759,23 @@ TEST_CASE("Engine: Markdown pages, in the built-in page or the app's layout") {
     CHECK_EQ(b.status, 200);
     CHECK(b.body.find("<title>Guide &amp; more</title>") != std::string::npos);
     CHECK(b.body.find("<body hx-headers=\"") != std::string::npos);   // the CSRF token, for HTMX
-    CHECK(b.body.find("\"><div class=\"markdown\"><h1") != std::string::npos);
+    CHECK(b.body.find("\"><div class=\"markdown\">\n<h1") != std::string::npos);
     CHECK(b.body.find("href=\"/__fourfold/markdown.css\"></head>") == std::string::npos);
-    CHECK(b.body.find("<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">\n</head>") != std::string::npos);
+    CHECK(b.body.find("<link rel=\"stylesheet\" href=\"/__fourfold/markdown.css\">\n"
+                      "<link rel=\"alternate\" type=\"text/markdown\" href=\"/guide.md\">\n</head>") != std::string::npos);
+
+    // The same page as Markdown: its source, alone, with no layout.
+    HttpResponse md = layout.get("/guide.md");
+    CHECK_EQ(md.status, 200);
+    CHECK_EQ(header(md, "Content-Type"), "text/markdown; charset=utf-8; variant=GFM");
+    CHECK_EQ(md.body, "# Guide & more\n\nRead *this*.\n");
+    CHECK(header(md, "Content-Security-Policy").size() > 0);
+    CHECK_EQ(header(md, "Set-Cookie"), "(none)");   // no CSRF cookie: it has no forms
+    // Its one form has no trailing slash; an HTML page has no Markdown URL.
+    HttpResponse slash = layout.get("/guide.md/");
+    CHECK_EQ(slash.status, 302);
+    CHECK_EQ(header(slash, "Location"), "/guide.md");
+    CHECK_EQ(layout.get("/book.md").status, 404);
 
     // An app with its own pages/markdown.css links that one instead.
     auto own = std::make_shared<CompiledApp>(*layout.app);
