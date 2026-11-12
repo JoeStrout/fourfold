@@ -94,8 +94,12 @@ struct EngineOptions {
     // for them. May be null.
     std::function<void()> jobsAdded{};
     // Push channels (overview §7): /live/<name>, and `publish`. Null: both
-    // unavailable (as in CGI mode).
+    // unavailable.
     std::shared_ptr<PushHub> push{};
+    // CGI mode (overview §8; M10): with no hub, `publish` still succeeds, and
+    // goes nowhere. No page can subscribe there, so there's no one to tell;
+    // the same app code runs on either kind of hosting.
+    bool publishWithoutPush = false;
 };
 
 // The host names `fourfold dev` answers to.

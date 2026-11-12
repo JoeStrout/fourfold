@@ -61,24 +61,6 @@ Status writeAll(int fd, const char* data, size_t size, const std::string& what) 
     return {};
 }
 
-// Copies open file `from` into a new file `name` in folder `toFd`.
-Status copyFile(int from, int toFd, const std::string& name, mode_t mode, const std::string& what) {
-    Fd out(openat(toFd, name.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, mode));
-    if (!out.valid()) return osError(what);
-    char buffer[64 * 1024];
-    while (true) {
-        ssize_t n = ::read(from, buffer, sizeof buffer);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            return osError(what);
-        }
-        if (n == 0) break;
-        if (Status s = writeAll(out.get(), buffer, static_cast<size_t>(n), what); !s) return s;
-    }
-    if (fsync(out.get()) < 0) return osError(what);
-    return {};
-}
-
 Result<Fd> openFolderAt(int parent, const std::string& name, bool create, const std::string& what) {
     if (create && mkdirat(parent, name.c_str(), 0700) < 0 && errno != EEXIST) return osError(what);
     Fd fd(openat(parent, name.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
@@ -104,7 +86,7 @@ Status copyBetween(int fromFd, int toFd, const std::string& rel, const TreeSkip&
         if (!in.valid()) return osError(what + "/" + path);
         struct stat info;
         mode_t mode = fstat(in.get(), &info) == 0 ? (info.st_mode & 0777) : 0600;   // as it was
-        if (Status s = copyFile(in.get(), toFd, e.name, mode, what + "/" + path); !s) return s;
+        if (Status s = copyFileInto(in.get(), toFd, e.name, mode, what + "/" + path); !s) return s;
     }
     return {};
 }
@@ -132,6 +114,50 @@ Status clear(int fd, const std::string& rel, const TreeSkip& skip, const std::st
 }
 
 }  // namespace
+
+Status copyFileInto(int from, int toFd, const std::string& name, mode_t mode, const std::string& what,
+                    std::optional<int64_t> modifiedNs) {
+    Fd out(openat(toFd, name.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, mode));
+    if (!out.valid()) return osError(what);
+    char buffer[64 * 1024];
+    while (true) {
+        ssize_t n = ::read(from, buffer, sizeof buffer);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return osError(what);
+        }
+        if (n == 0) break;
+        if (Status s = writeAll(out.get(), buffer, static_cast<size_t>(n), what); !s) return s;
+    }
+    if (modifiedNs) {
+        struct timespec times[2];
+        times[0].tv_sec = 0;
+        times[0].tv_nsec = UTIME_OMIT;   // the access time
+        times[1].tv_sec = static_cast<time_t>(*modifiedNs / 1'000'000'000);
+        times[1].tv_nsec = static_cast<long>(*modifiedNs % 1'000'000'000);
+        if (futimens(out.get(), times) < 0) return osError(what);
+    }
+    if (fsync(out.get()) < 0) return osError(what);
+    return {};
+}
+
+Status removeTree(int rootFd, const RelPath& dir, const std::string& partition) {
+    if (dir.isRoot()) return makeError(ErrorCode::Invalid, partition + ": can't remove the partition itself");
+    auto parent = openFolder(rootFd, dir.parent(), partition);
+    if (!parent) return parent.error().code == ErrorCode::NotFound ? Status() : Status(parent.error());
+    std::string name(dir.name());
+    std::string what = describe(partition, dir);
+    struct stat st;
+    if (fstatat(parent.value().get(), name.c_str(), &st, AT_SYMLINK_NOFOLLOW) < 0) {
+        return errno == ENOENT ? Status() : Status(osError(what));
+    }
+    if (!S_ISDIR(st.st_mode)) return makeError(ErrorCode::Conflict, what + ": not a folder");
+    auto folder = openFolderAt(parent.value().get(), name, false, what);
+    if (!folder) return folder.error();
+    if (Status s = clear(folder.value().get(), "", nullptr, what); !s) return s;
+    if (unlinkat(parent.value().get(), name.c_str(), AT_REMOVEDIR) < 0 && errno != ENOENT) return osError(what);
+    return {};
+}
 
 Status copyTreeOut(int fromFd, const std::string& toHostFolder, const TreeSkip& skip, const std::string& partition) {
     if (mkdir(toHostFolder.c_str(), 0700) < 0 && errno != EEXIST) return osError(toHostFolder);

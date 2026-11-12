@@ -1256,8 +1256,8 @@ But nearly every shared host runs CGI, and many run FastCGI. The execution model
 | | **Standalone server** (primary) | **CGI / FastCGI** (reduced) |
 |---|---|---|
 | Typical host | VPS, container platform, own machine; `fourfold dev` | Shared hosting behind Apache |
-| Startup per request | none (compiled app held in memory) | loads the compiled app from `private/state/` (CGI); none once warm (FastCGI) |
-| Recompile on change | file watcher, wait for quiet | checked on request (`code/` changed, or `.deploy` touched) |
+| Startup per request | none (compiled app held in memory) | loads the compiled app from `private/state/` (CGI): a snapshot of `code/` and each file's handlers, compiling only the page's own code (M10); none once warm (FastCGI) |
+| Recompile on change | file watcher, wait for quiet | checked on request (`code/` changed, or `.deploy` touched); quiet judged across requests; migrations applied as the new version is installed (M10) |
 | SSE push (§7) | yes | **no**: fall back to HTMX polling (`hx-trigger="every 5s"`) |
 | OS-level enforcement (§1) | separate engine user, read-only `code/` | **engine-only**: under suEXEC the engine runs as the developer |
 | Budgets, outbound HTTP, email | Fourfold's config | Fourfold's config, but the host's own limits apply on top |

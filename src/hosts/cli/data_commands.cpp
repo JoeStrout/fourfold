@@ -10,12 +10,14 @@
 #include "data_commands.h"
 
 #include <chrono>
+#include <optional>
 #include <ostream>
 #include <sstream>
 #include <thread>
 
 #include "app_server.h"
 #include "base/crypto.h"
+#include "cgi/schema_lock.h"
 #include "config/app_config.h"
 #include "partition/app_folder.h"
 #include "platform/random.h"
@@ -128,6 +130,33 @@ int askServer(const std::string& folder, const std::string& command, std::ostrea
     return ok ? kExitOk : kExitError;
 }
 
+// The schema lock that CGI requests to the app hold (overview §8): taken
+// exclusively, so a migrate or restore waits for those running, and those
+// arriving wait (or get a 503). Held as long as `held` lives.
+struct CgiHold {
+    std::optional<StateDir> state;
+    std::optional<SchemaFileLock> lock;
+    std::optional<SchemaFileLock::Exclusive> held;
+};
+
+bool holdCgiRequests(const std::string& folder, CgiHold& hold, std::ostream& err, const char* command) {
+    auto app = AppFolder::open(folder);
+    auto state = app ? app.value().stateDir() : Result<StateDir>(app.error());
+    if (!state) {
+        err << command << state.error().message << "\n";
+        return false;
+    }
+    hold.state = std::move(state).value();
+    hold.lock.emplace(*hold.state);
+    auto held = hold.lock->exclusive();
+    if (!held) {
+        err << command << held.error().message << "\n";
+        return false;
+    }
+    hold.held = std::move(held).value();
+    return true;
+}
+
 ServerOptions offlineOptions(const DataArgs& args) {
     ServerOptions options;
     options.dev = false;
@@ -150,6 +179,8 @@ int runMigrate(const std::vector<std::string>& args, std::ostream& out, std::ost
     if (serverRunning(a.folder)) return askServer(a.folder, "migrate", out, err);
     auto server = AppServer::start(a.folder, offlineOptions(a), out, err);
     if (!server) return kExitError;
+    CgiHold hold;
+    if (!holdCgiRequests(a.folder, hold, err, "fourfold migrate: ")) return kExitError;
     if (!server->compiled() && server->instance().pendingMigrations() == 0) {
         err << "fourfold migrate: the app doesn't compile, or can't run on this data (above); nothing was changed\n";
         return kExitError;
@@ -206,6 +237,8 @@ int runRestore(const std::vector<std::string>& args, std::ostream& out, std::ost
         for (const BackupInfo& b : all.value()) out << b.name << "  (" << b.reason << ", " << b.time << ")\n";
         return kExitOk;
     }
+    CgiHold hold;
+    if (!holdCgiRequests(a.folder, hold, err, "fourfold restore: ")) return kExitError;
     // A backup of what's there now, first: a restore can be undone too.
     auto before = backups.backup("before-restore");
     if (!before) {

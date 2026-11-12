@@ -11,6 +11,7 @@
 #include <set>
 
 #include "base/crypto.h"
+#include "platform/ca_bundle.h"
 #include "base/version.h"
 #include "outbound/address_rules.h"
 
@@ -300,6 +301,9 @@ Result<HopResult> exchange(const Hop& hop, const OutboundSettings& settings, Exc
     std::unique_ptr<CURL, void (*)(CURL*)> guard(curl, curl_easy_cleanup);
     std::string url = urlText(hop.url);
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    if (auto ca = caBundleFallback(curl_version_info(CURLVERSION_NOW)->cainfo)) {
+        curl_easy_setopt(curl, CURLOPT_CAINFO, ca->c_str());
+    }
 #if LIBCURL_VERSION_NUM >= 0x075500
     curl_easy_setopt(curl, CURLOPT_PROTOCOLS_STR, "http,https");
 #else

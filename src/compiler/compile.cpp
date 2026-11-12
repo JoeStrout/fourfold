@@ -52,7 +52,7 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
 
     templatesPass(listing.value(), code, *app, diagnostics);
     DatabaseSources database = databasePass(listing.value(), code, options.dialect, *app, diagnostics);
-    auto handlers = scriptsPass(listing.value(), code, options.scripts, std::move(database), *app, diagnostics);
+    auto handlers = scriptsPass(listing.value(), code, options, std::move(database), *app, diagnostics);
     routesPass(listing.value(), handlers, *app, diagnostics);
     accessPass(listing.value(), code, handlers, options.evaluator, *app, diagnostics);
     limitsPass(listing.value(), code, options.evaluator, *app, diagnostics);
@@ -64,7 +64,7 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
 
     if (diagnostics.hasErrors()) return {nullptr, diagnostics.all()};
     app->diagnostics = diagnostics.warnings();
-    return {std::move(app), diagnostics.all()};
+    return {std::move(app), diagnostics.all(), std::move(handlers)};
 }
 
 }  // namespace fourfold

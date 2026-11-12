@@ -190,8 +190,8 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                 addRoute(app, diagnostics, url, std::move(entry), "render");
             }
             routeHandlers(file.path, segments, stem, h, app, diagnostics);
-            if (!h.render && h.get.empty() && h.post.empty() && !hasHtml) {
-                diagnostics.warning(fileName, "defines no render, get or post handlers, so nothing is served");
+            if (!h.render && h.get.empty() && h.post.empty() && h.webhook.empty() && !hasHtml) {
+                diagnostics.warning(fileName, "defines no render, get, post or webhook handlers, so nothing is served");
             }
         } else if (extension == ".md") {
             if (isSpecialPage(segments, stem)) {

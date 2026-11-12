@@ -9,6 +9,7 @@
 
 #include "compiledapp/compiled_app.h"
 #include "partition/code_tree.h"
+#include "compiler/compiler.h"
 #include "script/script_host.h"
 
 namespace fourfold {
@@ -52,9 +53,11 @@ DatabaseSources databasePass(const CodeListing& listing, const CodeTree& code, S
 // Compiles the .ms files in code/pages/ and code/lib/ into app.scripts, with
 // the migrations' and the seed's, and returns the handlers each page file
 // defines.
+// With `options.knownHandlers` (CGI mode), compiles only
+// `options.compileOnly`, and returns the known handlers.
 std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const CodeTree& code,
-                                            ScriptCompiler* compiler, DatabaseSources database, CompiledApp& app,
-                                            Diagnostics& diagnostics);
+                                            const CompileOptions& options, DatabaseSources database,
+                                            CompiledApp& app, Diagnostics& diagnostics);
 
 // Routes for code/pages/: pages, handlers, static files, and the 404 and 500
 // pages.

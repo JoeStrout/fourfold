@@ -627,7 +627,7 @@ Engine::JobServices Engine::jobServices() const {
     c.outbound = std::move(outbound);
     c.mailer = std::make_shared<EngineMail>(s.config, options.auth, options.rates, options.log);
     c.enqueue = options.jobs != nullptr;
-    c.publish = options.push != nullptr;
+    c.publish = options.push != nullptr || options.publishWithoutPush;
     c.budget = s.config->jobs.budget;
     if (s.app) c.render = renderOptionsFor(*s.app, "");
     return s;
@@ -877,7 +877,7 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
     context.outbound = f->outbound;
     context.mailer = std::make_shared<EngineMail>(f->config, options.auth, options.rates, options.log);
     context.enqueue = options.jobs != nullptr;
-    context.publish = options.push != nullptr;
+    context.publish = options.push != nullptr || options.publishWithoutPush;
     std::string group = addressGroup(f->client);
     context.rateIp = "ip:" + group;
     context.rateUser = f->user ? "user:" + f->user->id : "ip:" + group;

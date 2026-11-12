@@ -34,6 +34,14 @@ void printUsage(std::ostream& out) {
            "  backup <app-folder>           Back up the app's data and state\n"
            "  restore <app-folder> [NAME]   List the app's backups, or restore one (with\n"
            "        [--data-only]           the app stopped)\n"
+           "  cgi-setup <app-folder> <web-root> [--fastcgi]\n"
+           "                                Serve an app through Apache's CGI (shared\n"
+           "                                hosting): writes the web root's entry point\n"
+           "  fastcgi <app-folder> [--listen PATH|HOST:PORT]\n"
+           "                                Serve an app through FastCGI (what cgi-setup\n"
+           "                                --fastcgi's entry point runs)\n"
+           "  run-jobs <app-folder>         Run due jobs, for an app served through CGI\n"
+           "        [--max-seconds N]       (for cron, every minute)\n"
            "  version                       Print the Fourfold version\n"
            "  help                          Show this message\n";
 }
@@ -244,18 +252,20 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     if (command == "migrate") return runMigrate(rest, out, err);
     if (command == "backup") return runBackup(rest, out, err);
     if (command == "restore") return runRestore(rest, out, err);
+    if (command == "run-jobs") return runJobs(rest, out, err);
+    if (command == "cgi-setup") return runCgiSetup(rest, out, err);
+    if (command == "fastcgi") return runFastCgi(rest, out, err);
     if (command == "cgi") {
-        // Unlisted: M5's CGI spike. `fourfold cgi <app-folder>`, run by a web
-        // server as a CGI program; FOURFOLD_CGI_TIMING=1 reports timings.
+        // `fourfold cgi <app-folder>`, run by a web server as a CGI program
+        // (the entry point cgi-setup writes); FOURFOLD_CGI_TIMING=1 reports
+        // each request's time to the server's error log.
         if (rest.size() != 1) {
             err << "Usage: fourfold cgi <app-folder>\n";
             return kExitUsage;
         }
-        auto env = [](const std::string& name) -> std::optional<std::string> {
-            const char* v = std::getenv(name.c_str());
-            return v ? std::optional<std::string>(v) : std::nullopt;
-        };
-        return runCgi(rest[0], env, std::cin, out, err, env("FOURFOLD_CGI_TIMING").value_or("") == "1");
+        CgiVariables vars = processEnvironment();
+        bool timing = vars.count("FOURFOLD_CGI_TIMING") && vars.at("FOURFOLD_CGI_TIMING") == "1";
+        return runCgi(rest[0], vars, std::cin, out, err, timing);
     }
     err << "fourfold: unknown command '" << command << "'\n\n";
     printUsage(err);

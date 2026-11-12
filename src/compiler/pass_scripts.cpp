@@ -10,8 +10,10 @@
 namespace fourfold {
 
 std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const CodeTree& code,
-                                            ScriptCompiler* compiler, DatabaseSources database, CompiledApp& app,
-                                            Diagnostics& diagnostics) {
+                                            const CompileOptions& options, DatabaseSources database,
+                                            CompiledApp& app, Diagnostics& diagnostics) {
+    ScriptCompiler* compiler = options.scripts;
+    const bool partial = options.knownHandlers != nullptr;
     const RelPath migrations = RelPath::parse("migrations").value();
     const RelPath pages = RelPath::parse("pages").value();
     const RelPath lib = RelPath::parse("lib").value();
@@ -40,6 +42,9 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
                                 "MiniScript files belong in code/pages/, code/lib/, code/jobs/ or code/migrations/; ignored");
         }
         if (!into) continue;
+        // In CGI mode, a page or job file is read only if it's compiled; libs
+        // are read, to find which of them its imports reach.
+        if (partial && into != &libFiles && !options.compileOnly.count(entry.path)) continue;
         auto file = code.read(entry.path);
         if (!file) {
             diagnostics.error(name, file.error().message);
@@ -48,6 +53,27 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
         into->push_back(std::move(file).value());
     }
 
+    if (partial) {
+        std::map<RelPath, PageHandlers> handlers = *options.knownHandlers;
+        if (options.compileOnly.empty()) return handlers;   // nothing that runs code
+        if (!compiler) {
+            diagnostics.error("code", "this app has MiniScript files, but no script compiler was provided");
+            return {};
+        }
+        ScriptSources sources{std::move(pageFiles), std::move(libFiles), {}, std::nullopt, std::move(jobFiles)};
+        sources.only = options.compileOnly;
+        CompiledScripts compiled = compiler->compileScripts(sources);
+        for (const Diagnostic& d : compiled.diagnostics) {
+            if (d.severity == Diagnostic::Severity::Error) {
+                diagnostics.error(d.file, d.message, d.line);
+            } else {
+                diagnostics.warning(d.file, d.message, d.line);
+            }
+        }
+        app.scripts = compiled.bundle;
+        for (auto& [path, h] : compiled.pages) handlers[path] = std::move(h);
+        return handlers;
+    }
     if (pageFiles.empty() && libFiles.empty() && jobFiles.empty() && database.migrations.empty() && !database.seed) {
         return {};
     }

@@ -2,6 +2,7 @@
 // (when FOURFOLD_TEST_PG_URL names a server; see test_postgres.h).
 #include "appdata/database.h"
 
+#include <atomic>
 #include <thread>
 
 #include "doctest.h"

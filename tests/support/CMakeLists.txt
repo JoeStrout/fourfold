@@ -6,4 +6,7 @@ target_include_directories(fourfold_test_support PUBLIC ${CMAKE_CURRENT_SOURCE_D
 target_link_libraries(fourfold_test_support PUBLIC doctest)
 target_compile_definitions(fourfold_test_support PUBLIC
     FOURFOLD_TEST_APPS_DIR="${CMAKE_SOURCE_DIR}/tests/apps"
-    FOURFOLD_TESTS_DIR="${CMAKE_SOURCE_DIR}/tests")
+    FOURFOLD_TESTS_DIR="${CMAKE_SOURCE_DIR}/tests"
+    # doctest includes <ostream> rather than declaring it: with libstdc++,
+    # a check on a shared_ptr (CHECK(app->scripts)) needs the real one.
+    DOCTEST_CONFIG_USE_STD_HEADERS)

@@ -297,6 +297,13 @@ The risks most likely to change the design, and where each is retired:
 
 **Goal:** the reduced hosting mode of §8, building on the M5 spike.
 
+**Decisions (2026-11-12, with the user):**
+- **FastCGI as shared hosts launch it.** The process accepts FastCGI on a listening socket inherited as fd 0 (how `mod_fcgid` starts it; a shared host won't let us run a daemon of our own), and also takes `--listen <socket>` so a local `mod_proxy_fcgi` can test the same code.
+- **A warm FastCGI process keeps the compiled app in memory** and checks for changes on each request, as CGI does. It doesn't run jobs (`mod_fcgid` kills idle processes); `fourfold run-jobs` from cron is the job runner in both modes.
+- **The entry point is a two-line shell script** in the web root that `exec`s the real binary, kept outside the web root, with the app folder's path, since suEXEC runs only programs inside the docroot that the user owns and others can't write.
+- **The Linux binary for shared hosts is fully static (musl)**, built in a container, so one binary runs on whatever glibc the host has. If a dependency won't build statically, we fall back to building on an old-glibc image. (The test host, DreamHost shared hosting, is x86_64 Ubuntu 24.04 with glibc 2.39, so an ordinary Linux build also runs there.)
+- **Testing, in four layers:** automated tests (CGI environment parsing, the FastCGI protocol, `fourfold cgi` as a child process); the Apache that ships with macOS, run unprivileged from a generated `httpd.conf` on a high port (CGI and `mod_proxy_fcgi`; skipped where `httpd` is missing); Apache with suEXEC and `mod_fcgid` in a Debian container; and the user's DreamHost account, over SSH.
+
 **Scope:**
 - The CGI and FastCGI adapters; caching the compiled app's plain parts in `private/state/`, and compiling per request only the requested page's `.ms` file and its imports (M5 decided bytecode serialization isn't needed); recompiling when `code/` changes or `.deploy` is touched.
 - File-based locks for sessions and the schema lock; migrations run by the first request that sees new code.
@@ -305,6 +312,8 @@ The risks most likely to change the design, and where each is retired:
 - Mode reporting: what CGI mode doesn't provide (SSE, OS-level enforcement), in the dev reports and the engine log.
 
 **Exit criteria:** the M9 sample apps (minus SSE, with polling instead) run on a real shared-hosting account and on a local Apache with suEXEC.
+
+**Decisions made here** (details in [m10-results.md](m10-results.md)): a version is cached as a snapshot of `code/` plus every `.ms` file's handlers (running each file's top level was most of a compile), and a request compiles the rest again from the snapshot, MiniScript only for its own page and imports; no `CompiledApp` serialization. Requests serve from the snapshot, so a partial or broken upload never shows. Quiet is judged across requests (a change found unchanged two seconds after it was first seen); `.deploy` skips the wait. A new version's migrations are applied by the request that installs it, under a cross-process schema lock (two lock files, so migrating can't be starved), with a backup first. `publish` succeeds and goes nowhere in CGI mode. `run-jobs` holds the schema lock a job at a time and stops when nothing is due. `cgi-setup` sends everything, static files included, to Fourfold, with `CGIPassAuth On` for webhooks (suEXEC drops rewritten variables). Tested under macOS's Apache (CGI, `mod_proxy_fcgi`) and Debian's with suEXEC (CGI, `mod_fcgid`), with a static musl build that passes the whole suite on Linux.
 
 ---
 

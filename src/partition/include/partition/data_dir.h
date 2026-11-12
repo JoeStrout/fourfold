@@ -20,6 +20,7 @@
 
 #include "base/fd.h"
 #include "base/result.h"
+#include "partition/code_tree.h"
 #include "partition/file_lock.h"
 #include "partition/paths.h"
 
@@ -134,6 +135,23 @@ public:
     // For backups, as DataDir's.
     Status copyOut(const std::string& hostFolder, const TreeSkip& skip) const;
     Status copyIn(const std::string& hostFolder, const TreeSkip& skip) const;
+
+    // The folders and files in `folder`, as DataDir::list.
+    Result<std::vector<DirEntry>> list(const RelPath& folder) const;
+    // Removes folder `folder` and everything in it; fine if there's none.
+    Status removeTree(const RelPath& folder) const;
+
+    // CGI mode's code snapshots (overview §8): a copy of code/ that a
+    // compiled version serves from, so each request sees the code exactly as
+    // it compiled, whatever is being uploaded meanwhile.
+    //
+    // Copies the files `listing` names (as `code` lists them) into folder
+    // `to` here, which is emptied first, keeping their modification times.
+    // A file gone since the listing is left out.
+    Status saveCodeSnapshot(const CodeTree& code, const CodeListing& listing, const RelPath& to) const;
+    // A read-only view of a snapshot saveCodeSnapshot made: the CodeTree the
+    // compiler and the engine read, in place of code/.
+    Result<CodeTree> openCodeSnapshot(const RelPath& folder, CodeTreeLimits limits = {}) const;
 
 private:
     Fd fd_;

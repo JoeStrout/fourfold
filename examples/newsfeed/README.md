@@ -25,6 +25,10 @@ stories come from `hacker-news.firebaseio.com`).
 - `/live/stories` is served because `code/access.ms` has a rule for it
   (`"public"`). A channel no rule covers isn't served, and a rule like
   `"login"` makes it members-only, like a page.
+- `/poll` is the same page for hosting without live updates (CGI, on shared
+  hosting; see the admin guide's "Shared hosting"): it fetches the list from
+  `get.stories` every 30 seconds (`hx-trigger="load, every 30s"`), and the
+  jobs run when cron runs `fourfold run-jobs`.
 - "Check now" posts to `post.refresh`, which runs
   `enqueue "pollStories", null, {"key": "refresh"}`. The key makes the job
   unique while it waits, so clicking again adds nothing. An enqueued job is

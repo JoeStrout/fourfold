@@ -20,6 +20,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -394,6 +395,10 @@ struct ScriptSources {
     // functions in a `job` map, which only these files have. Found like
     // pages' handlers, in CompiledScripts::pages by path ("jobs/mail.ms").
     std::vector<CodeFile> jobs{};
+    // CGI mode (overview §8): compile only these files of `pages` and `jobs`
+    // ("pages/hello.ms"), and the libs they import, directly or not; no
+    // migrations or seed. Unset: everything.
+    std::optional<std::set<RelPath>> only{};
 };
 
 // The compiler's view of the script side: .ms files in, a bundle out.

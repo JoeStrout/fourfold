@@ -1,0 +1,6 @@
+# Apache set up as shared hosting is: suEXEC (each site's requests run as its
+# own user), CGI and mod_fcgid. Used by tools/linux/suexec-test.sh.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        apache2 apache2-suexec-custom libapache2-mod-fcgid curl ca-certificates procps tzdata \
+    && rm -rf /var/lib/apt/lists/*

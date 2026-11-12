@@ -32,12 +32,14 @@ public:
     using Admitted = std::function<void(bool admitted)>;
 
     SchemaGate() = default;
-    ~SchemaGate();
+    virtual ~SchemaGate();
     SchemaGate(const SchemaGate&) = delete;
     SchemaGate& operator=(const SchemaGate&) = delete;
 
-    void enter(Admitted admitted);
-    void leave();
+    // Virtual so CGI mode can hold a lock file instead (FileSchemaGate),
+    // for `fourfold run-jobs`.
+    virtual void enter(Admitted admitted);
+    virtual void leave();
 
     // Stops admitting; requests that arrive wait up to `maxWait`.
     void pause(std::chrono::milliseconds maxWait);

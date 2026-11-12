@@ -70,6 +70,8 @@ fourfold_component(jobs DIR engine/jobs   # the schedule and the job worker loop
 # --- Hosts ---
 fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform push)
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)
+fourfold_component(cgi DIR hosts/cgi   # CGI and FastCGI (overview §8)
+    DEPS base partition platform compiledapp script compiler config state appdata http pipeline authflow)   # CGI and FastCGI (overview §8)
 fourfold_executable(fourfold DIR hosts/cli
     DEPS base partition script compiler config mail observer pipeline authflow lifecycle devtools platform httpserver state
-         appdata jobs push)
+         appdata jobs push cgi)

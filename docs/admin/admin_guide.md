@@ -7,9 +7,10 @@ the server. The person writing the site needs the
 config file, deploying), this guide covers what the server needs and links to
 the user guide for the rest.
 
-*Status: covers what works as of Milestone 9. Fourfold isn't ready yet to
-face the internet on its own: see [Known gaps](#known-gaps). CGI and FastCGI
-hosting, TLS and a production server will be added here as they arrive.*
+*Status: covers what works as of Milestone 10, including shared hosting
+through CGI and FastCGI. Fourfold isn't ready yet to face the internet on its
+own: see [Known gaps](#known-gaps). TLS and a production server will be added
+here as they arrive.*
 
 ---
 
@@ -24,16 +25,17 @@ hosting, TLS and a production server will be added here as they arrive.*
 7. [Outbound requests and app mail](#outbound-requests-and-app-mail)
 8. [Background jobs and live updates](#background-jobs-and-live-updates)
 9. [Keeping it running](#keeping-it-running)
-10. [Mail for sign-in](#mail-for-sign-in)
-11. [The first admin](#the-first-admin)
-12. [Server limits: `--server-config`](#server-limits---server-config)
-13. [Deploying an app's changes](#deploying-an-apps-changes)
-14. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
-15. [A Postgres database](#a-postgres-database)
-16. [Logs](#logs)
-17. [Backups](#backups)
-18. [Known gaps](#known-gaps)
-19. [Quick reference](#quick-reference)
+10. [Shared hosting: CGI and FastCGI](#shared-hosting-cgi-and-fastcgi)
+11. [Mail for sign-in](#mail-for-sign-in)
+12. [The first admin](#the-first-admin)
+13. [Server limits: `--server-config`](#server-limits---server-config)
+14. [Deploying an app's changes](#deploying-an-apps-changes)
+15. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
+16. [A Postgres database](#a-postgres-database)
+17. [Logs](#logs)
+18. [Backups](#backups)
+19. [Known gaps](#known-gaps)
+20. [Quick reference](#quick-reference)
 
 ---
 
@@ -417,6 +419,108 @@ picked up while running.
 
 ---
 
+## Shared hosting: CGI and FastCGI
+
+On shared web hosting, Apache is already running, and you can't run a server
+of your own. Fourfold can still serve an app there, through CGI (a
+`fourfold` process for each request) or FastCGI (a `fourfold` process that
+Apache starts and keeps for many requests). It's the same engine, with a few
+things missing (below); the standalone server is better wherever you can run
+it, but this lets you try Fourfold on hosting you already have.
+
+### Setting it up
+
+You need SSH access to the account.
+
+1. **Put the `fourfold` program outside the web root**, e.g. in `~/bin/`. A
+   shared host is almost always x86_64 Linux: use the static build
+   (`tools/linux/build-static.sh` in the source; see
+   [building.md](../building.md#a-linux-binary-for-shared-hosting)), which
+   runs on any of them, whatever their C library. Make it executable
+   (`chmod 755 ~/bin/fourfold`).
+2. **Put the app folder outside the web root too**, e.g.
+   `~/fourfold-apps/club/`. If Apache could reach it, it could serve your
+   code, data and secrets as plain files, so Fourfold refuses to serve an app
+   whose folder is inside the site's web root.
+3. **Run `cgi-setup`** with the app folder and the site's web root (the
+   folder the host serves the domain from):
+
+   ```sh
+   ~/bin/fourfold cgi-setup ~/fourfold-apps/club ~/club.example.com
+   ```
+
+   It makes the app folder's partitions if they're missing, and writes two
+   files into the web root: `fourfold.cgi`, a two-line script that runs
+   `fourfold` on the app, and an `.htaccess` that sends **every** request to
+   it, static files included, so the app's access rules cover everything.
+   Anything else in the web root is no longer served (it lists what it
+   hid). If there's already an `.htaccess` it didn't write, it stops; move
+   that one aside, or use `--force`.
+4. **Upload the app's code** into `~/fourfold-apps/club/code/`, set
+   `config.domain` in `private/config/app.ms`, and visit the site.
+5. **If the app has background jobs or a schedule**, add a cron job (in the
+   host's control panel, or `crontab -e`) that runs every minute:
+
+   ```
+   * * * * * ~/bin/fourfold run-jobs ~/fourfold-apps/club
+   ```
+
+The first request compiles the app, which takes a moment; later ones reuse
+the compiled version (below).
+
+**FastCGI.** If the host runs `mod_fcgid`, `cgi-setup --fastcgi` writes
+`fourfold.fcgi` instead, run by `mod_fcgid`: one process serves many
+requests, keeping the compiled app in memory, so requests are quicker.
+Apache starts and stops these processes itself. If the site shows Apache's
+own error page or the script's text instead, the host doesn't offer
+`mod_fcgid` for `.fcgi` files; run `cgi-setup` again without `--fastcgi`.
+(`fourfold fastcgi <folder> --listen HOST:PORT` serves FastCGI on a port,
+for a server whose Apache uses `mod_proxy_fcgi`.)
+
+### Deploying
+
+The same as with the standalone server: upload changes to `code/`, then
+`touch code/.deploy` (over SSH) to load them at once. Without `.deploy`,
+the next request after the uploads have stopped for two seconds loads
+them. A version that doesn't compile is never loaded: the site keeps
+serving the previous one, and the errors go to the engine log.
+
+Each request is served from a copy of the code its version compiled from
+(`private/state/cgi/`), not from `code/` itself, so a request that arrives
+mid-upload sees the old version or the new one, never a mix.
+
+**Migrations run on their own:** the request that loads a version with new
+migrations takes a backup, applies them, and only then switches to it.
+Requests that arrive meanwhile wait (up to `deploy.migrationWaitSeconds`,
+then get a 503). If a migration fails, nothing is changed and the previous
+version keeps serving; the error is in the engine log. `fourfold migrate`
+isn't needed.
+
+### What's different
+
+| | Standalone server | CGI / FastCGI |
+|---|---|---|
+| Live updates (`/live/`, `publish`) | yes | **no**: `/live/` isn't served and `publish` does nothing. Pages poll instead (`hx-trigger="every 5s"`) |
+| Background jobs | run by the server | run when cron runs `fourfold run-jobs` |
+| Loading new code | `touch code/.deploy` | the same, or two quiet seconds after an upload |
+| Migrations | `fourfold migrate` | applied by the first request on the new version |
+| OS-level protection | the engine can run as its own user, with `code/` read-only to it | **none**: under suEXEC, Fourfold runs as you, and could write anything you can. The partitions are kept by the engine only |
+| HTTPS | from your proxy | from the host's Apache (turn on its certificate) |
+| Limits | Fourfold's | Fourfold's, and the host's on top (process time, memory, processes) |
+
+Every new version writes a line to the [engine log](#logs) saying so.
+
+**Don't also run `fourfold serve` or `dev` on the same app folder.** CGI
+requests are refused (503) while one is running, since their locks are in
+memory where the CGI processes can't see them.
+
+**Speed.** With CGI, each request starts a process and compiles its page's
+code: about 10–15 ms for a small app on a fast machine, 30 ms for a
+100-page one, plus whatever the page itself does. The first request after a
+deploy compiles the whole app. FastCGI saves most of that.
+
+---
+
 ## Mail for sign-in
 
 Visitors sign in by email: they enter their address, and Fourfold sends a
@@ -796,7 +900,8 @@ Fourfold site behind a proxy, and expect to watch it.
 - **No limit on slow uploads** beyond the 30-second limit on a whole request
   (M11).
 - **No graceful shutdown, and no log rotation** (M11).
-- **CGI and FastCGI hosting**, for shared web hosts, aren't ready yet (M10).
+- **CGI and FastCGI hosting** has no live updates, and no protection from
+  the OS (see [Shared hosting](#shared-hosting-cgi-and-fastcgi)).
 - **Dead background jobs** can be seen and retried only in dev mode's jobs
   panel; on a server, they're in the engine log (a production console is
   planned).
@@ -819,6 +924,9 @@ Fourfold site behind a proxy, and expect to watch it.
 | `fourfold migrate <folder>` | apply the app's pending migrations (see [Migrations](#migrations-fourfold-migrate)) |
 | `fourfold backup <folder>` | back up the app (see [Backups](#backups)) |
 | `fourfold restore <folder> [NAME] [--data-only]` | list the backups, or restore one, with the server stopped |
+| `fourfold cgi-setup <folder> <web-root> [--fastcgi]` | serve an app through the host's Apache (see [Shared hosting](#shared-hosting-cgi-and-fastcgi)) |
+| `fourfold run-jobs <folder> [--max-seconds N]` | run due jobs, from cron, for an app served through CGI |
+| `fourfold cgi <folder>`, `fastcgi <folder> [--listen HOST:PORT]` | what the web root's entry point runs |
 | `fourfold version` | print the version |
 | `fourfold help` | list the commands |
 
@@ -833,6 +941,7 @@ Fourfold site behind a proxy, and expect to watch it.
 | `private/state/secret.key` | signs CSRF tokens, form timestamps and puzzles; made if missing |
 | `private/state/logs/` | the engine log |
 | `private/state/backups/` | backups |
+| `private/state/cgi/` | CGI mode's compiled versions, each with a copy of its code (made again as needed) |
 | `data/.fourfold/app.sqlite` | the app's SQLite database |
 | `dropbox/print.log` | the app's `print` output |
 | the `--server-config` file | ceilings on the app's settings (the `server` map) |

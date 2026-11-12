@@ -464,7 +464,9 @@ std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const
                 "<p class=\"note\">Background jobs (code/jobs/), the schedule (code/schedule.ms, in " +
                 escapeHtml(text(items, "timeZone")) + "), and the queue in private/state/state.db. At most " +
                 escapeHtml(text(items, "workers")) + " run at once (config.jobs.workers); " +
-                escapeHtml(text(items, "running")) + " running now. Dev mode only.</p>\n";
+                escapeHtml(text(items, "running")) + " running now. Dev mode only.</p>\n"
+                "<p class=\"note\">Served through CGI or FastCGI (shared hosting; fourfold cgi-setup), jobs and "
+                "the schedule run only when cron runs <code>fourfold run-jobs</code>.</p>\n";
         std::string message;
         {
             std::lock_guard<std::mutex> lock(messageMutex_);
@@ -522,7 +524,8 @@ std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const
                     "</td></tr>\n";
         }
         html += "</table>\n<h2>Push channels</h2>\n<p class=\"note\">Open subscriptions to /live/&lt;name&gt;. Who "
-                "may subscribe is in the <a href=\"/__dev/access\">access report</a>.</p>\n<ul>\n";
+                "may subscribe is in the <a href=\"/__dev/access\">access report</a>. Served through CGI or FastCGI, "
+                "channels aren't available: pages poll instead (hx-trigger=\"every 5s\").</p>\n<ul>\n";
         std::string open;
         for (const Datum& d : listOf("channels")) {
             const auto& m = d.asMap();

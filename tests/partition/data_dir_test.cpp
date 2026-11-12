@@ -212,3 +212,58 @@ TEST_CASE("StateDir: private files and SQLite paths") {
     CHECK(stat(app.at("private/state/db").c_str(), &info) == 0);
     REQUIRE(state.lockFile("session"));
 }
+
+namespace {
+
+void writeFile(const std::string& path, const std::string& contents) {
+    std::ofstream(path, std::ios::binary) << contents;
+}
+
+}  // namespace
+
+TEST_CASE("StateDir: code snapshots copy code/ with its times, and read back as a CodeTree") {
+    App app;
+    mkdir(app.at("code/pages").c_str(), 0755);
+    mkdir(app.at("code/pages/docs").c_str(), 0755);
+    writeFile(app.at("code/pages/index.html"), "<p>home</p>");
+    writeFile(app.at("code/pages/docs/a.md"), "# A");
+    writeFile(app.at("code/.deploy"), "");
+    symlink("index.html", app.at("code/pages/link.html").c_str());
+    CodeTree code = app.folder.codeTree().value();
+    StateDir state = app.folder.stateDir().value();
+    CodeListing listing = code.list().value();
+    REQUIRE(listing.files.size() == 2);
+
+    REQUIRE(state.saveCodeSnapshot(code, listing, rel("cgi/1")));
+    CodeTree snap = state.openCodeSnapshot(rel("cgi/1")).value();
+    CodeListing copied = snap.list().value();
+    REQUIRE(copied.files.size() == 2);
+    for (size_t i = 0; i < 2; i++) {
+        CHECK(copied.files[i].path == listing.files[i].path);
+        CHECK(copied.files[i].size == listing.files[i].size);
+        CHECK(copied.files[i].modifiedNs / 1000 == listing.files[i].modifiedNs / 1000);   // µs: what every FS keeps
+    }
+    CHECK(copied.skipped.empty());   // the link wasn't copied
+    CHECK_EQ(snap.read(rel("pages/docs/a.md")).value().contents(), "# A");
+    CHECK_FALSE(snap.deployTrigger());   // dot-files aren't copied
+    CHECK(modeOf(app.at("private/state/cgi/1/pages/index.html")) == 0600);
+
+    // Later changes to code/ don't reach the snapshot.
+    writeFile(app.at("code/pages/index.html"), "<p>changed</p>");
+    CHECK_EQ(snap.read(rel("pages/index.html")).value().contents(), "<p>home</p>");
+
+    // Saving again replaces what was there; a file gone since the listing is left out.
+    unlink(app.at("code/pages/docs/a.md").c_str());
+    REQUIRE(state.saveCodeSnapshot(code, listing, rel("cgi/1")));
+    CodeListing again = state.openCodeSnapshot(rel("cgi/1")).value().list().value();
+    REQUIRE(again.files.size() == 1);
+    CHECK(again.files[0].path == rel("pages/index.html"));
+
+    auto entries = state.list(rel("cgi")).value();
+    REQUIRE(entries.size() == 1);
+    CHECK(entries[0].isFolder);
+    REQUIRE(state.removeTree(rel("cgi/1")));
+    CHECK(state.list(rel("cgi")).value().empty());
+    CHECK(state.removeTree(rel("cgi/1")));   // fine if gone
+    CHECK(state.openCodeSnapshot(rel("cgi/1")).error().code == ErrorCode::NotFound);
+}

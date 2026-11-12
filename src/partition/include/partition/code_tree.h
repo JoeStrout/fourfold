@@ -78,6 +78,7 @@ public:
 
 private:
     friend class AppFolder;
+    friend class StateDir;   // CGI mode's code snapshots
     CodeTree(Fd root, CodeTreeLimits limits) : root_(std::move(root)), limits_(limits) {}
 
     Status walk(Fd folder, const RelPath& dir, size_t depth, CodeListing& out) const;

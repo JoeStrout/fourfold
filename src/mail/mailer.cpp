@@ -10,6 +10,7 @@
 
 #include "base/crypto.h"
 #include "base/datum.h"
+#include "platform/ca_bundle.h"
 #include "platform/random.h"
 
 namespace fourfold {
@@ -202,6 +203,9 @@ public:
         char error[CURL_ERROR_SIZE] = {0};
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
         restrictProtocols(curl, "smtp,smtps");
+        if (auto ca = caBundleFallback(curl_version_info(CURLVERSION_NOW)->cainfo)) {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, ca->c_str());
+        }
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(settings_.timeout.count()));
@@ -262,6 +266,9 @@ public:
         char error[CURL_ERROR_SIZE] = {0};
         curl_easy_setopt(curl, CURLOPT_URL, settings_.apiUrl.c_str());
         restrictProtocols(curl, "https,http");
+        if (auto ca = caBundleFallback(curl_version_info(CURLVERSION_NOW)->cainfo)) {
+            curl_easy_setopt(curl, CURLOPT_CAINFO, ca->c_str());
+        }
         curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error);
         curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, static_cast<long>(settings_.timeout.count()));

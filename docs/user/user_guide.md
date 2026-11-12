@@ -2287,6 +2287,10 @@ schedule["report"]    = "0 6 1 * *"           // cron's five fields work too
 - At most 2 jobs run at once (`config.jobs.workers`), so jobs can't crowd out
   visitors' requests.
 - At most 100 `enqueue`s per request or job.
+- On shared hosting (CGI or FastCGI), jobs run only when cron runs
+  `fourfold run-jobs`, usually once a minute: a queued job waits until then,
+  and a schedule finer than a minute can't be kept. See the admin guide's
+  [Shared hosting](../admin/admin_guide.md#shared-hosting-cgi-and-fastcgi).
 
 ### In dev mode
 
@@ -2400,7 +2404,14 @@ end function
   subscriber to a channel gets the same message: per-user channels aren't
   here yet.
 - Live updates need `fourfold dev` or `fourfold serve`, which keep the
-  connections open; they don't work in CGI mode.
+  connections open. On shared hosting (CGI or FastCGI; see the admin
+  guide's [Shared hosting](../admin/admin_guide.md#shared-hosting-cgi-and-fastcgi)),
+  `/live/` isn't served and `publish` does nothing. Have the page poll
+  instead, which works everywhere:
+
+  ```html
+  <ul hx-get="/guestbook/latest" hx-trigger="every 5s">{{entries}}</ul>
+  ```
 
 In dev mode, the jobs panel lists the open channels and how many pages
 subscribe to each, and the access report lists who may subscribe.
@@ -2559,6 +2570,14 @@ start it with `fourfold serve --migrate`.
 
 Since anything in `code/` with an error stops the whole deploy, it's best to
 check your changes locally first.
+
+**On shared hosting** (CGI or FastCGI), deploying works the same way, with
+two differences: new code also goes live on its own once uploads have
+stopped for a couple of seconds (touching `code/.deploy` still makes it
+immediate), and new migrations are applied by the first request on the new
+version, with a backup first, rather than by `fourfold migrate`. If one
+fails, nothing changes and the old version keeps serving. See the admin
+guide's [Shared hosting](../admin/admin_guide.md#shared-hosting-cgi-and-fastcgi).
 
 ---
 

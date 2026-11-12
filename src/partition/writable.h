@@ -84,6 +84,15 @@ Result<std::optional<std::string>> readEngineFile(int folderFd, const std::strin
 Status writeEngineFile(int folderFd, const std::string& name, std::string_view bytes, mode_t mode,
                        const std::string& what);
 
+// Copies open file `from` into file `name` in folder `toFd` (replacing any),
+// flushed to disk; with modification time `modifiedNs`, if given.
+Status copyFileInto(int from, int toFd, const std::string& name, mode_t mode, const std::string& what,
+                    std::optional<int64_t> modifiedNs = std::nullopt);
+
+// Removes folder `dir` and everything in it (never following links); fine
+// if there's no such folder. Never the root.
+Status removeTree(int rootFd, const RelPath& dir, const std::string& partition);
+
 // Removes everything in the partition except what `skip` names.
 Status clearTree(int fd, const TreeSkip& skip, const std::string& partition);
 

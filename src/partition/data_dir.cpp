@@ -1,6 +1,9 @@
 #include "partition/data_dir.h"
 
 #include "base/crypto.h"
+#include <sys/stat.h>
+
+#include "fs_util.h"
 #include "writable.h"
 
 namespace fourfold {
@@ -131,6 +134,40 @@ Result<std::string> StateDir::folderPath(const RelPath& name) const {
 
 Status StateDir::copyOut(const std::string& hostFolder, const TreeSkip& skip) const {
     return writable::copyTreeOut(fd_.get(), hostFolder, skip, kState);
+}
+
+Result<std::vector<DirEntry>> StateDir::list(const RelPath& folder) const {
+    return writable::list(fd_.get(), folder, kState);
+}
+
+Status StateDir::removeTree(const RelPath& folder) const { return writable::removeTree(fd_.get(), folder, kState); }
+
+Status StateDir::saveCodeSnapshot(const CodeTree& code, const CodeListing& listing, const RelPath& to) const {
+    if (to.isRoot()) return makeError(ErrorCode::Invalid, std::string(kState) + ": not a snapshot folder");
+    if (Status s = removeTree(to); !s) return s;
+    auto root = writable::ensureFolder(fd_.get(), to, 0700, kState);
+    if (!root) return root.error();
+    for (const CodeEntry& entry : listing.files) {
+        struct stat info;
+        auto in = openFileForRead(code.root_.get(), entry.path, "code", &info);
+        if (!in) {
+            if (in.error().code == ErrorCode::NotFound) continue;   // gone since the listing
+            return in.error();
+        }
+        auto folder = writable::ensureFolder(root.value().get(), entry.path.parent(), 0700, kState);
+        if (!folder) return folder.error();
+        Status s = writable::copyFileInto(in.value().get(), folder.value().get(), std::string(entry.path.name()), 0600,
+                                          describe(kState, to) + "/" + entry.path.str(), modifiedTimeNs(info));
+        if (!s) return s;
+    }
+    return {};
+}
+
+Result<CodeTree> StateDir::openCodeSnapshot(const RelPath& folder, CodeTreeLimits limits) const {
+    if (folder.isRoot()) return makeError(ErrorCode::Invalid, std::string(kState) + ": not a snapshot folder");
+    auto fd = openFolder(fd_.get(), folder, kState);
+    if (!fd) return fd.error();
+    return CodeTree(std::move(fd).value(), limits);
 }
 
 Status StateDir::copyIn(const std::string& hostFolder, const TreeSkip& skip) const {

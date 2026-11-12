@@ -73,6 +73,50 @@ For clangd and other editor tooling, link the compile database into the reposito
 ln -sf build/dev/compile_commands.json compile_commands.json
 ```
 
+## Under Apache: CGI and FastCGI
+
+`tests/apache/apache_test.sh` runs Fourfold under a real Apache: the CGI
+entry point and `.htaccess` that `fourfold cgi-setup` writes, and FastCGI
+through `mod_proxy_fcgi`. It checks pages, static files, sessions, a form
+post with its CSRF token, a webhook's `Authorization` header, `run-jobs`,
+deploys (a broken one too), and 80 concurrent requests on one session.
+
+```sh
+tests/apache/apache_test.sh            # both; or `cgi`, or `fastcgi`
+FOURFOLD=build/release/bin/fourfold tests/apache/apache_test.sh
+```
+
+It runs Apache as you, on port 18090 (and 18091 for FastCGI), from a config
+of its own in a temporary folder, so nothing of the system's Apache is used
+or changed; it needs no root. The Apache that comes with macOS works
+(`/usr/sbin/httpd`), as does Debian's (`apt install apache2`). It isn't run
+by ctest; without an `httpd`, it says so and skips.
+
+Shared hosting runs Apache with suEXEC (each site's requests as its own
+user) and often `mod_fcgid`. `tools/linux/suexec-test.sh` runs the same
+checks that way, in a Debian container, with the static Linux build (below),
+which it needs first:
+
+```sh
+tools/linux/build-static.sh && tools/linux/suexec-test.sh
+```
+
+## A Linux binary for shared hosting
+
+Shared hosts run Linux, with whatever C library their distribution has.
+`tools/linux/build-static.sh` builds a fully static x86_64 `fourfold`
+(linked against musl, in an Alpine container), which runs on any of them,
+and runs the test suite there first:
+
+```sh
+tools/linux/build-static.sh        # → build/linux-static/fourfold
+```
+
+It needs Docker (with Docker Desktop on macOS, it must be running), and
+MiniScript 2 where a normal build finds it. The static build has no
+Postgres support. The build's and the tests' logs are in
+`build/linux-static/`.
+
 ## Repository layout
 
 ```
@@ -87,8 +131,10 @@ fourfold/
       *.cpp, *.h                implementation and private headers
     engine/<component>/         engine components (pipeline, policy, …)
     hosts/<program>/            executables; main.cpp is a thin wrapper
+  tools/linux/          the static Linux build (Dockerfile and script)
   tests/
     support/            doctest's main(), shared fakes and helpers
+    apache/             Fourfold under a real Apache (CGI, FastCGI), and its app
     <component>/        *_test.cpp for src/<component>, same relative path
     apps/               sample app folders used as test fixtures
     bench/              benchmarks (built, not run by ctest)

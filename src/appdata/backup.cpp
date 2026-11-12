@@ -39,9 +39,10 @@ bool skipDataInButDatabase(const std::string& path, bool folder) {
 }
 
 // And of private/state/: the backups themselves, locks, logs, requests to
-// the server, and state.db (through SQLite).
+// the server, CGI mode's compiled versions (copies of code/, made again as
+// needed), and state.db (through SQLite).
 bool skipStateIn(const std::string& path, bool) {
-    return path == "backups" || path == "locks" || path == "logs" || path == "control";
+    return path == "backups" || path == "locks" || path == "logs" || path == "control" || path == "cgi";
 }
 
 bool skipStateOut(const std::string& path, bool folder) {

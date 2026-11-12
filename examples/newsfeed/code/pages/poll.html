@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Newsfeed (polling)</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="/__fourfold/htmx.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Newsfeed</h1>
+    <p class="note">The same stories, for hosting without live updates (CGI): this page asks
+      for the list every 30 seconds, instead of having new stories pushed to it.</p>
+    <form method="post" action="/refresh"><button>Check now</button></form>
+    <ol class="stories" hx-get="/stories" hx-trigger="load, every 30s" hx-swap="innerHTML"></ol>
+  </main>
+</body>
+</html>

@@ -163,6 +163,7 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
     const std::vector<CodeFile>* jobs = nullptr;
     const std::vector<MigrationScript>* migrations = nullptr;
     const std::optional<CodeFile>* seed = nullptr;
+    std::shared_ptr<ScriptSources> ownedSources;   // when compiling only some files
     std::function<void(CompiledScripts)> done;
 
     CompiledScripts out;
@@ -514,14 +515,71 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
 
 }  // namespace
 
+namespace {
+
+// The libs whose import names are in `names`, and those they import in turn
+// (all of them, if any of these files imports by something other than a
+// string literal).
+std::vector<CodeFile> libsReachedFrom(const std::vector<const std::string*>& sources, const std::vector<CodeFile>& libs) {
+    std::map<std::string, const CodeFile*> byName;
+    for (const CodeFile& lib : libs) {
+        std::string_view name = lib.path().name();
+        byName[std::string(name.substr(0, name.size() - lib.path().extension().size()))] = &lib;
+    }
+    std::set<std::string> reached;
+    std::vector<std::string> todo;
+    bool all = false;
+    auto follow = [&](const std::string& source) {
+        References refs = scanReferences(source);
+        if (refs.dynamicImport) all = true;
+        todo.insert(todo.end(), refs.imports.begin(), refs.imports.end());
+    };
+    for (const std::string* source : sources) follow(*source);
+    while (!todo.empty() && !all) {
+        std::string name = todo.back();
+        todo.pop_back();
+        auto it = byName.find(name);
+        if (it == byName.end() || !reached.insert(name).second) continue;
+        follow(it->second->contents());
+    }
+    if (all) return libs;
+    std::vector<CodeFile> out;
+    for (const CodeFile& lib : libs) {
+        std::string_view name = lib.path().name();
+        if (reached.count(std::string(name.substr(0, name.size() - lib.path().extension().size())))) {
+            out.push_back(lib);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
 void ScriptHost::Impl::compile(const ScriptSources& sources, std::function<void(CompiledScripts)> done) {
     auto job = std::make_shared<CompileJob>();
     job->host = this;
-    job->pages = &sources.pages;
-    job->libs = &sources.libs;
-    job->jobs = &sources.jobs;
-    job->migrations = &sources.migrations;
-    job->seed = &sources.seed;
+    const ScriptSources* use = &sources;
+    if (sources.only) {
+        // Only some files: the job keeps its own, smaller, set of sources.
+        auto partial = std::make_shared<ScriptSources>();
+        std::vector<const std::string*> chosen;
+        for (const CodeFile& f : sources.pages) {
+            if (sources.only->count(f.path())) partial->pages.push_back(f);
+        }
+        for (const CodeFile& f : sources.jobs) {
+            if (sources.only->count(f.path())) partial->jobs.push_back(f);
+        }
+        for (const CodeFile& f : partial->pages) chosen.push_back(&f.contents());
+        for (const CodeFile& f : partial->jobs) chosen.push_back(&f.contents());
+        partial->libs = libsReachedFrom(chosen, sources.libs);
+        job->ownedSources = partial;
+        use = partial.get();
+    }
+    job->pages = &use->pages;
+    job->libs = &use->libs;
+    job->jobs = &use->jobs;
+    job->migrations = &use->migrations;
+    job->seed = &use->seed;
     job->done = std::move(done);
     job->step();
 }

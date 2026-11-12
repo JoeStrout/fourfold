@@ -1,0 +1,9 @@
+# The tools for a fully static Linux build of Fourfold (musl, on Alpine): one
+# binary that runs on any x86_64 Linux, whatever its C library, as on shared
+# hosting (docs/building.md, "A Linux binary for shared hosting").
+# Used by tools/linux/build-static.sh, which mounts the sources.
+FROM alpine:3.20
+RUN apk add --no-cache build-base cmake ninja pkgconf linux-headers \
+        curl-dev curl-static openssl-libs-static nghttp2-static zlib-static brotli-static \
+        libpsl-static libidn2-static libunistring-static c-ares-static zstd-static \
+        tzdata
