@@ -621,7 +621,8 @@ TEST_CASE("compile: bad access rules and declarations") {
     check("rules = {\"/admin/\": \"admin\"}\n", "trailing slash");
     check("rules = {\"admin\": \"admin\"}\n", "not a plain URL path");
     check("rules = {\"/a/../b\": \"admin\"}\n", "not a plain URL path");
-    check("rules = {\"/\": \"public\"}\n", "isn't a role name");
+    // "public" is allowed on its own (M9.1), not as a role in a list.
+    check("rules = {\"/\": [\"public\"]}\n", "isn't a role name");
     check("rules = {\"/\": [\"admin\", \"login\"]}\n", "goes on its own");
     check("rules = {\"/\": []}\n", "use \"login\"");
     check("rules = {\"/\": 1}\n", "use \"login\"");

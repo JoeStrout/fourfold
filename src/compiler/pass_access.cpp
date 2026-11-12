@@ -23,12 +23,13 @@ namespace {
 
 const char* const kAccessFile = "access.ms";
 const char* const kValueHelp =
-    "\"login\", a role name like \"admin\", or a list of role names like [\"admin\", \"moderator\"]";
+    "\"login\", a role name like \"admin\", a list of role names like [\"admin\", \"moderator\"], or \"public\"";
 
 // One rule from access.ms.
 struct Rule {
     std::string path;                 // "/admin"
-    std::vector<std::string> anyOf;   // empty: "login"
+    std::vector<std::string> anyOf;   // empty: "login" (unless isPublic)
+    bool isPublic = false;            // "public": requires nothing
     bool used = false;
 };
 
@@ -58,10 +59,15 @@ std::optional<RelPath> codeFileOf(const RouteEntry& entry) {
 
 }  // namespace
 
-std::optional<std::vector<std::string>> parseAccessValue(const Datum& value, std::string& error) {
+std::optional<std::vector<std::string>> parseAccessValue(const Datum& value, std::string& error, bool& isPublic) {
+    isPublic = false;
     if (value.kind() == Datum::Kind::String) {
         const std::string& s = value.asString();
         if (s == "login") return std::vector<std::string>();
+        if (s == "public") {
+            isPublic = true;
+            return std::vector<std::string>();
+        }
         if (!isValidRoleName(s)) {
             error = "\"" + s + "\" isn't a role name (a letter, then letters, digits, _ or -); use " + kValueHelp;
             return std::nullopt;
@@ -123,12 +129,13 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
                         continue;
                     }
                     std::string error;
-                    auto anyOf = parseAccessValue(value, error);
+                    bool isPublic = false;
+                    auto anyOf = parseAccessValue(value, error, isPublic);
                     if (!anyOf) {
                         diagnostics.error(accessName, where + error);
                         continue;
                     }
-                    rules.push_back({path, std::move(*anyOf)});
+                    rules.push_back({path, std::move(*anyOf), isPublic});
                 }
             }
         }
@@ -139,12 +146,13 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
     for (const auto& [path, h] : handlers) {
         if (!h.access) continue;
         std::string error;
-        auto anyOf = parseAccessValue(*h.access, error);
+        bool isPublic = false;
+        auto anyOf = parseAccessValue(*h.access, error, isPublic);
         if (!anyOf) {
             diagnostics.error(codeFileName(path), "access: " + error);
             continue;
         }
-        declared.emplace(path, std::move(*anyOf));
+        if (!isPublic) declared.emplace(path, std::move(*anyOf));
     }
 
     RouteTable routes;
@@ -153,6 +161,7 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
         for (Rule& rule : rules) {
             if (!covers(rule.path, url)) continue;
             rule.used = true;
+            if (rule.isPublic) continue;   // requires nothing
             entry.access.require(rule.anyOf);
             entry.accessSources.push_back(accessName + ": " + rule.path);
         }
@@ -168,6 +177,13 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
     for (const auto& [alias, url] : app.routes.markdownAliases()) routes.addMarkdownAlias(alias, url);
     app.routes = std::move(routes);
 
+    // Rules are kept for push channels (/live/<name>), whose names aren't
+    // known until they're asked for; a rule for /live, or below it, is used.
+    std::string live = std::string(kLivePrefix).substr(0, std::string(kLivePrefix).size() - 1);   // "/live"
+    for (Rule& rule : rules) {
+        app.accessRules.push_back({rule.path, rule.anyOf, rule.isPublic});
+        if (rule.path == live || covers(live, rule.path)) rule.used = true;
+    }
     for (const Rule& rule : rules) {
         if (!rule.used) {
             diagnostics.warning(accessName, "the rule for " + rule.path +

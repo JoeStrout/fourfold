@@ -42,6 +42,27 @@ public:
     // needs the response on its own thread posts it there.)
     void handle(const HttpRequest& request, Done done) const;
 
+    // For the job runner (overview §2, Background jobs): the version and
+    // config serving now, and a context with the services a job's run has
+    // (data, the database, users, http, mail, enqueue, publish; no
+    // session), with config.jobs' budget.
+    struct JobServices {
+        std::shared_ptr<const CompiledApp> app;
+        std::shared_ptr<const AppConfig> config;
+        RunContext context;
+    };
+    JobServices jobServices() const;
+
+    // What a successful run did besides its response: its enqueued jobs,
+    // committed together, then its push messages, sent. Blocks (SQLite), so
+    // call it on a worker. `source` names the run ("POST /signup", "job
+    // digest"). An error if the jobs couldn't be committed; nothing is
+    // published then.
+    Status commitEffects(const HandlerOutcome& outcome, const std::string& source) const;
+    // A failed run's enqueued jobs (by name), dropped: noted for the
+    // developer and in the log.
+    void dropEffects(const std::vector<std::string>& names, const std::string& source) const;
+
     struct Flow;   // private: one request past Admit
 
 private:
@@ -54,6 +75,8 @@ private:
     void identify(std::shared_ptr<Flow> flow, std::function<void(std::shared_ptr<Flow>)> next) const;
     void serveAuth(std::shared_ptr<Flow> flow) const;
     void serveRoute(std::shared_ptr<Flow> flow) const;
+    // /live/<name>: a push channel (overview §7), under access.ms's rules.
+    void serveChannel(std::shared_ptr<Flow> flow) const;
     // The rest of serveRoute, once the gate has decided.
     void afterGate(std::shared_ptr<Flow> flow, GateDecision gate, RequestFacts facts, Submission submission) const;
 

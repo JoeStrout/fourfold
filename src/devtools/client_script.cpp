@@ -122,7 +122,8 @@ const char* const kDevClientScript = R"js((function () {
       font: "12px/1.6 -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif"
     });
     [["sign in as\u2026", "/__auth/fake?next=" + encodeURIComponent(location.pathname + location.search)],
-     ["access", "/__dev/access"], ["limits", "/__dev/limits"], ["outbound", "/__dev/outbound"]].forEach(function (item, i) {
+     ["access", "/__dev/access"], ["limits", "/__dev/limits"], ["outbound", "/__dev/outbound"],
+     ["jobs", "/__dev/jobs"]].forEach(function (item, i) {
       if (i) box.appendChild(el("span", { color: "#888" }, " \u00b7 "));
       var a = el("a", { color: "#eee" }, item[0]);
       a.href = item[1];

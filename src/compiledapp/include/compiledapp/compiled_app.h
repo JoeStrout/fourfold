@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "compiledapp/outbound_policy.h"
+#include "compiledapp/schedule.h"
 #include "compiledapp/sql.h"
 #include "partition/paths.h"
 #include "template/template.h"
@@ -50,15 +51,17 @@ const char* routeKindName(RouteKind kind);
 // A function in a page's .ms file that a URL can reach (overview §4,
 // Handler model): the global `render`, or a function in the `get`, `post`
 // or `webhook` map. A webhook (overview §6, Inbound webhooks) is a POST
-// handler without CSRF protection, for callers that aren't browsers.
+// handler without CSRF protection, for callers that aren't browsers. Or a
+// job (overview §2, Background jobs): a function in the `job` map of a file
+// in code/jobs/, which no URL reaches.
 struct HandlerRef {
-    enum class Kind { Render, Get, Post, Webhook };
+    enum class Kind { Render, Get, Post, Webhook, Job };
 
     Kind kind = Kind::Render;
-    RelPath source;      // "pages/guestbook.ms"
+    RelPath source;      // "pages/guestbook.ms", "jobs/mail.ms"
     std::string name;    // "render", or the key in get/post ("sign" for post.sign)
 
-    // "render", "get.more", "post.sign"
+    // "render", "get.more", "post.sign", "job.sendWelcome"
     std::string label() const;
 };
 
@@ -320,6 +323,29 @@ struct Migration {
     std::string fileLabel() const;
 };
 
+// --- Jobs and push (overview §2, Background jobs; §7) ---
+
+// A job in code/schedule.ms: its name (job.x in code/jobs/) and when.
+struct ScheduledJob {
+    std::string job;
+    Schedule schedule;
+};
+
+// One rule from code/access.ms, kept for paths that aren't routes: push
+// channels, /live/<name>, whose names aren't known at compile time.
+struct AccessRule {
+    std::string path;                 // "/live/orders"
+    std::vector<std::string> anyOf;   // empty: "login" (unless isPublic)
+    bool isPublic = false;            // "public": covers the path, requires nothing
+};
+
+// A push channel's name: one or more segments of letters, digits, '-' and
+// '_', joined by '/' ("orders", "rooms/lobby"); at most 100 bytes.
+bool isValidChannelName(const std::string& name);
+
+// Where the engine serves push channels: /live/<name>.
+extern const char* const kLivePrefix;   // "/live/"
+
 struct CompiledApp {
     uint64_t generation = 0;
     RouteTable routes;
@@ -354,6 +380,16 @@ struct CompiledApp {
     std::optional<RelPath> seed;
     // code/outbound.ms: where `http` may send requests, and `mail` mail.
     OutboundPolicy outbound;
+    // Jobs (code/jobs/), by name ("sendWelcome" for job.sendWelcome).
+    std::map<std::string, HandlerRef> jobs;
+    // code/schedule.ms, by job name.
+    std::vector<ScheduledJob> schedule;
+    // code/access.ms's rules, for push channels (/live/<name>).
+    std::vector<AccessRule> accessRules;
+    // Who may subscribe to channel `name` (/live/<name>): every access.ms
+    // rule covering its path, combined; nullopt if no rule covers it (the
+    // channel isn't served). `sources` gets the rules that applied.
+    std::optional<AccessLevel> channelAccess(const std::string& name, std::vector<std::string>* sources = nullptr) const;
     // Mail templates (code/mail/welcome.md), by name ("welcome"): Markdown
     // templates, sent as text (their Markdown) and HTML.
     std::map<std::string, CompiledTemplate> mailTemplates;

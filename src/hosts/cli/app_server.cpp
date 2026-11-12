@@ -180,14 +180,18 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     auto auth = sessions ? AuthStore::open(dbPath.value(), config->auth.store)
                          : Result<std::unique_ptr<AuthStore>>(sessions.error());
     auto rates = auth ? RateStore::open(dbPath.value()) : Result<std::unique_ptr<RateStore>>(auth.error());
-    if (!sessions || !auth || !rates) {
+    auto jobQueue = rates ? JobQueue::open(dbPath.value()) : Result<std::unique_ptr<JobQueue>>(rates.error());
+    if (!sessions || !auth || !rates || !jobQueue) {
         err << command << "can't open private/state/state.db: "
-            << (!sessions ? sessions.error() : !auth ? auth.error() : rates.error()).message << "\n";
+            << (!sessions ? sessions.error() : !auth ? auth.error() : !rates ? rates.error() : jobQueue.error()).message
+            << "\n";
         return nullptr;
     }
     server->sessions_ = std::move(sessions).value();
     server->auth_ = std::move(auth).value();
     server->rates_ = std::move(rates).value();
+    server->jobQueue_ = std::move(jobQueue).value();
+    server->push_ = PushHub::create(*server->loop_);
     server->sessionLocks_ = makeMemoryLockService();
 
     // The app's database (overview §3): opened on first use, so an app that
@@ -335,6 +339,11 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     engineOptions.schema = &server->schema_;
     engineOptions.https = options.https;
     engineOptions.engineKey = std::move(key).value();
+    engineOptions.jobs = server->jobQueue_.get();
+    engineOptions.jobsAdded = [self] {
+        if (self->jobRunner_) self->jobRunner_->wake();
+    };
+    engineOptions.push = server->push_;
     server->engine_ = std::make_unique<Engine>(nullptr, std::move(engineCode).value(), server->scripts_.get(),
                                                std::move(engineOptions));
     server->engine_->setConfig(config);
@@ -361,6 +370,44 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     server->instance_ = std::move(instance).value();
     server->instance_->start();   // reports through compileFinished
 
+    // Background jobs (overview §2): the schedule and the queue, on the
+    // runner's own thread, once the app has compiled.
+    JobRunnerOptions jobOptions;
+    jobOptions.retryDelay = options.jobRetryDelay;
+    if (options.dev) jobOptions.say = [self](const std::string& line) { self->say(line); };
+    auto runner = JobRunner::create(*server->jobQueue_, *server->engine_, *server->scripts_, &server->schema_,
+                                    server->log_.get(), systemClock(), jobOptions);
+    if (!runner) {
+        err << command << runner.error().message << "\n";
+        return nullptr;
+    }
+    server->jobRunner_ = std::move(runner).value();
+    if (server->devtools_) {
+        DevTools::JobsPanel jobs;
+        JobRunner* r = server->jobRunner_.get();
+        jobs.status = [r] { return r->status(); };
+        jobs.runNow = [r](const std::string& name) {
+            auto ran = r->runNow(name);
+            return !ran ? "Couldn't queue " + name + ": " + ran.error().message
+                        : ran.value() ? "Queued " + name + "." : "There's no job named " + name + ".";
+        };
+        jobs.retry = [r](int64_t id) {
+            Status s = r->retry(id);
+            return s ? std::string("Queued it again.") : "Couldn't: " + s.error().message;
+        };
+        jobs.discard = [r](int64_t id) {
+            Status s = r->discard(id);
+            return s ? std::string("Discarded it.") : "Couldn't: " + s.error().message;
+        };
+        jobs.setPaused = [r](bool paused) {
+            r->setPaused(paused);
+            return std::string(paused ? "The schedule is paused." : "The schedule is running.");
+        };
+        server->devtools_->setJobsPanel(std::move(jobs));
+        PushHub* hub = server->push_.get();
+        server->devtools_->setChannelSource([hub] { return hub->counts(); });
+    }
+
     if (!options.dev && server->instance_->pendingMigrations() > 0) {
         size_t pending = server->instance_->pendingMigrations();
         if (options.migrateOnStart) {
@@ -378,6 +425,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
         }
     }
     if (!options.listen) return server;
+    server->jobRunner_->start();
 
     server->server_ = std::make_unique<HttpServer>(*server->loop_, [self](HttpRequest request, Responder respond) {
         std::string line = request.method + " " + request.target;
@@ -424,6 +472,7 @@ AppServer::~AppServer() {
     server_.reset();
     if (controlThread_.joinable()) controlThread_.join();
     instance_.reset();
+    jobRunner_.reset();   // no new jobs; those running are abandoned with the script host
     scripts_.reset();
     engine_.reset();
     database_.reset();
@@ -431,6 +480,8 @@ AppServer::~AppServer() {
     authFlow_.reset();
     data_.reset();
     sessionLocks_.reset();
+    push_.reset();
+    jobQueue_.reset();
     rates_.reset();
     auth_.reset();
     sessions_.reset();
@@ -525,6 +576,7 @@ void AppServer::configLoaded(const ConfigLoad& load, bool first) {
         log_->write("config", "config.db changed; takes effect after a restart");
     }
     sessions_->setConfig(load.config->session);
+    if (jobRunner_) jobRunner_->wake();   // the workers or the time zone may have changed
     auth_->setConfig(load.config->auth.store);
     scripts_->setBudget(load.config->budget);
     if (!first) {
@@ -539,6 +591,7 @@ void AppServer::printMail(const std::string& text) {
 }
 
 void AppServer::compileFinished(const CompileReport& report) {
+    if (report.ok && jobRunner_) jobRunner_->wake();   // the schedule may have changed
     for (const Diagnostic& d : report.diagnostics) {
         sayError(d.toString());
         if (!dev_) log_->write("compile", d.toString());
@@ -602,6 +655,13 @@ void AppServer::renderWarnings(uint64_t generation, const std::vector<RenderWarn
                            ": warning: " + w.message;
         if (warned_.insert(line).second) err_ << line << std::endl;
     }
+}
+
+void AppServer::jobsEnqueued(const std::string& source, const std::vector<std::string>& names, bool committed) {
+    if (!dev_ || committed) return;
+    std::string list;
+    for (size_t i = 0; i < names.size(); i++) list += (i ? ", " : "") + names[i];
+    sayError("Note: " + source + " failed, so the jobs it enqueued were dropped (" + list + ").");
 }
 
 void AppServer::say(const std::string& line) {

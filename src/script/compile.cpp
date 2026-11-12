@@ -160,6 +160,7 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
     ScriptHost::Impl* host = nullptr;
     const std::vector<CodeFile>* pages = nullptr;
     const std::vector<CodeFile>* libs = nullptr;
+    const std::vector<CodeFile>* jobs = nullptr;
     const std::vector<MigrationScript>* migrations = nullptr;
     const std::optional<CodeFile>* seed = nullptr;
     std::function<void(CompiledScripts)> done;
@@ -169,7 +170,7 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
     std::map<std::string, References> libRefs;   // by import name
     std::map<std::string, List<FuncDef>> stubCache;
     bool failed = false;
-    size_t next = 0;   // the next step: libs first, then pages, then migrations and the seed
+    size_t next = 0;   // the next step: libs first, then pages, jobs, migrations and the seed
 
     void error(ScriptError e) {
         out.diagnostics.push_back(diagnosticFrom(e));
@@ -183,15 +184,18 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
 
     void step() {
         size_t i = next++;
-        if (i < libs->size()) {
+        size_t nLibs = libs->size(), nPages = pages->size(), nJobs = jobs->size(), nMigrations = migrations->size();
+        if (i < nLibs) {
             compileLib((*libs)[i]);
             postNext();
-        } else if (i - libs->size() < pages->size()) {
-            compilePage((*pages)[i - libs->size()]);   // posts the next step when it's done
-        } else if (i - libs->size() - pages->size() < migrations->size()) {
-            compileMigration((*migrations)[i - libs->size() - pages->size()]);
+        } else if (i - nLibs < nPages) {
+            compilePage((*pages)[i - nLibs], false);   // posts the next step when it's done
+        } else if (i - nLibs - nPages < nJobs) {
+            compilePage((*jobs)[i - nLibs - nPages], true);
+        } else if (i - nLibs - nPages - nJobs < nMigrations) {
+            compileMigration((*migrations)[i - nLibs - nPages - nJobs]);
             postNext();
-        } else if (i - libs->size() - pages->size() == migrations->size() && seed->has_value()) {
+        } else if (i - nLibs - nPages - nJobs == nMigrations && seed->has_value()) {
             compileSeed(**seed);
             postNext();
         } else {
@@ -328,7 +332,8 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         return false;
     }
 
-    void compilePage(const CodeFile& file) {
+    // A page's .ms file, or (`jobFile`) one in code/jobs/.
+    void compilePage(const CodeFile& file, bool jobFile) {
         std::string fileName = codeFileName(file.path());
         Value compileError;
         List<FuncDef> functions = compileProgram(file.contents(), fileName, &compileError);
@@ -343,15 +348,18 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         // in slices among the requests being served.
         auto run = std::make_unique<Run>();
         run->kind = Run::Kind::Discovery;
+        run->jobFile = jobFile;
         run->host = host;
         run->fileName = fileName;
         run->libs = &bundle->libs;
         auto self = shared_from_this();
         RelPath path = file.path();
         bool session = usesSession(scanReferences(file.contents()));
-        run->discovered = [self, path, functions, session](Run& r, const HandlerOutcome& outcome) {
+        run->discovered = [self, path, functions, session, jobFile](Run& r, const HandlerOutcome& outcome) {
             if (outcome.kind == HandlerOutcome::Kind::Error) {
                 self->error(outcome.error);
+            } else if (jobFile) {
+                self->discoverJobs(r, path, functions);
             } else {
                 self->discover(r, path, functions, session);
             }
@@ -359,6 +367,51 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
         };
         prepareInterpreter(*run, functions);
         host->schedule(std::move(run));
+    }
+
+    // Reads a job file's jobs (the `job` map) from the globals its top
+    // level left.
+    void discoverJobs(Run& run, const RelPath& path, const List<FuncDef>& functions) {
+        const std::string& fileName = run.fileName;
+        PageProgram program;
+        program.fileName = fileName;
+        program.functions = functions;
+        PageHandlers handlers;
+        bool ok = true;
+        Value map = run.interp.GetGlobalValue("job");
+        if (!map.IsMap()) {
+            error({"job must stay a map of job functions (job.cleanup = function(args) ... end function)", fileName, 0});
+            return;
+        }
+        MiniScript::MapIterator it = map.Iterator();
+        Value key, value;
+        while (MiniScript::map_iterator_next(&it, &key, &value)) {
+            std::string name = key.IsString() ? toStdString(key) : "";
+            if (!isIdentifier(name)) {
+                error({"job has a key that isn't a valid name: " + toStdString(key), fileName, 0});
+                ok = false;
+                continue;
+            }
+            std::string label = "job." + name;
+            if (!value.IsFuncRef()) {
+                error({label + " must be a function", fileName, 0});
+                ok = false;
+                continue;
+            }
+            if (value.FunctionDef().ParamNames().Count() > 1) {
+                error({label + " takes one parameter, args (or none)", fileName, 0});
+                ok = false;
+                continue;
+            }
+            if (const List<FuncDef>* stub = stubFor(callFor(label, value), *bundle, stubCache)) {
+                handlers.job.push_back(name);
+                program.stubs[label] = {*stub};
+            }
+        }
+        std::sort(handlers.job.begin(), handlers.job.end());
+        if (!ok) return;
+        out.pages[path] = handlers;
+        bundle->pages.emplace(path, std::move(program));
     }
 
     // Reads a page's handlers from the globals its top level left.
@@ -466,6 +519,7 @@ void ScriptHost::Impl::compile(const ScriptSources& sources, std::function<void(
     job->host = this;
     job->pages = &sources.pages;
     job->libs = &sources.libs;
+    job->jobs = &sources.jobs;
     job->migrations = &sources.migrations;
     job->seed = &sources.seed;
     job->done = std::move(done);

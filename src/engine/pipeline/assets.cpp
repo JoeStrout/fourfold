@@ -1,6 +1,6 @@
 // The engine's own files, under /__fourfold/ (Arch §5, pipeline): the htmx
-// library with Fourfold's settings, the proof-of-work solver, and the
-// default Markdown stylesheet.
+// library with Fourfold's settings and its SSE extension, the proof-of-work
+// solver, and the default Markdown stylesheet.
 // They're built into the program (cmake's fourfold_embed), so an app can't
 // replace or break them.
 
@@ -16,6 +16,8 @@ extern const unsigned char kMarkdownCss[];
 extern const size_t kMarkdownCssSize;
 extern const unsigned char kChallengeScript[];
 extern const size_t kChallengeScriptSize;
+extern const unsigned char kHtmxSse[];
+extern const size_t kHtmxSseSize;
 
 namespace {
 
@@ -41,9 +43,11 @@ const char* const kChallengeScriptUrl = "/__fourfold/challenge.js";
 std::optional<HttpResponse> builtinAsset(const std::string& path) {
     if (path == "/__fourfold/htmx.js") {
         // With the proof-of-work solver, so a form swapped in by htmx can
-        // solve its puzzle.
+        // solve its puzzle; and the SSE extension, for push channels
+        // (hx-ext="sse" sse-connect="/live/name").
         static const std::string htmx = bytes(kHtmxLibrary, kHtmxLibrarySize) + "\n" +
                                          bytes(kHtmxConfig, kHtmxConfigSize) + "\n" +
+                                         bytes(kHtmxSse, kHtmxSseSize) + "\n" +
                                          bytes(kChallengeScript, kChallengeScriptSize);
         return asset("text/javascript; charset=utf-8", htmx);
     }

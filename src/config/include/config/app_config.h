@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "appdata/database.h"
+#include "base/time_zone.h"
 #include "compiledapp/compiled_app.h"
 #include "mail/mailer.h"
 #include "outbound/outbound_client.h"
@@ -114,6 +115,24 @@ struct BackupConfig {
     size_t keep = 10;
 };
 
+// Background jobs (overview §2, Background jobs; config.jobs).
+struct JobsConfig {
+    // Jobs running at once, at most: they share the script thread with
+    // requests, so a few long jobs can't crowd them out.
+    size_t workers = 2;
+    // Each job run's budget (its own, longer than a request's).
+    ScriptBudget budget = [] {
+        ScriptBudget b;
+        b.instructions = 100'000'000;
+        b.wallClock = std::chrono::milliseconds(60'000);
+        return b;
+    }();
+    // Attempts before a failing job is dead.
+    int maxAttempts = 5;
+    // The schedule's time zone (IANA), loaded from the system's zoneinfo.
+    std::shared_ptr<const TimeZone> timeZone = TimeZone::utc();
+};
+
 struct AppConfig {
     ConfigMode mode = ConfigMode::Dev;
     SiteConfig site;
@@ -128,6 +147,7 @@ struct AppConfig {
     BackupConfig backups;
     // Outbound HTTP (config.outbound): tightens code/outbound.ms.
     OutboundSettings outbound;
+    JobsConfig jobs;
     // Sends mail as configured; null if the transport is None. Thread-safe.
     std::shared_ptr<Mailer> mailer;
     // By name. Only `config` and the OutboundClient read the values.

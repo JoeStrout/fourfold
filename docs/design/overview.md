@@ -253,9 +253,18 @@ schedule["report"]    = "0 6 1 * *"           // plain cron syntax also works
 
 There's no long-running process in CGI mode, so the host's cron runs `fourfold run-jobs ./myapp` every minute. It runs whatever scheduled jobs are due and works through the queue until a time limit is reached. Enqueued jobs therefore wait up to a minute.
 
+#### As built in M9.1
+
+- Jobs are `job.x` in files in `code/jobs/` (any depth); only those files get the `job` map. A job takes `args` (or no parameter). It gets `data`, `file`, `db`, `users`, `http`, `secrets`, `mail`, `enqueue` and `publish`; no `req`, `session` or form.
+- **A job's enqueues (and publishes) commit only if it succeeds**, like a request's; so chains work, and a failed job doesn't set off its follow-ups. A request's publishes are held back the same way.
+- `enqueue name, args, {"delay": seconds, "key": "..."}`. A key is unique while its job is *queued*; once it has started, the same key can be queued again (the data may have changed since). A failed job retrying with a key that's been queued again gives way to the newer one.
+- Schedules: `"every 15m"` (an interval since the last run, the first run when the schedule first appears), `"hourly :15"`, `"daily 03:00"`, `"weekly mon 08:00"`, `"monthly 1 06:00"`, and cron's five fields. Time zones are IANA names (`config.jobs.timeZone`), read from the system's zoneinfo, with the POSIX rule in a file's footer for times past its last transition. A skipped time runs at the jump; a repeated time runs once, the first time.
+- A scheduled tick is a queued job with the key `schedule:<name>`, so a tick is skipped while the last one is waiting or running.
+- Retries: 15 s, doubling, at most an hour apart; dead after `config.jobs.maxAttempts` (5). The budget is 100M instructions and 60 s; at most `config.jobs.workers` (2) at once, on the shared script thread. Jobs hold the schema lock while they run, as requests do.
+- The pause toggle in the jobs panel pauses the schedule only; queued jobs still run.
+
 #### Still open
 
-- Whether jobs need a way to enqueue follow-up jobs in a chain, and whether a job's enqueues commit only when it succeeds, like a request's.
 - Multi-server deployments need the queue in Postgres (or similar) instead of SQLite, with workers claiming jobs safely. Same host-config option as for sessions.
 - In CGI mode without cron access, whether to fall back to running due jobs after a request's response has been sent.
 
@@ -1215,6 +1224,8 @@ This fits the per-request model unchanged: request → handler → filled-in tem
 
 No VM lives beyond its request, so the core security property still holds. WebSockets could be added later if two-way connections are needed. SSE needs a long-running engine process, so it isn't available in CGI mode (see [Hosting modes](#hosting-modes)).
 
+*As built in M9.1:* channels are paths, `/live/<name>`, under `code/access.ms` like pages (decided with the user); a channel no rule covers isn't served, and `"public"` is now an access value, which requires nothing (so changes no page) but declares a channel. `publish channel, content, event="message"` takes `frag(...)`, `markdown(...)` or a string (escaped), and is sent only if the request or job succeeds. A published HTML value can't hold a `<script>` or the publishing visitor's CSRF token. HTMX's SSE extension (2.2.2) is part of `/__fourfold/htmx.js`. The engine's `PushHub` holds the streams on the I/O loop, at most 1,000, with a comment every 15 s. Per-user channels are later.
+
 ---
 
 ## 8. Deployment
@@ -1449,7 +1460,7 @@ All the settings the design has called for so far:
 ## Open questions
 
 - Routes table format. Tentatively: a separate file from `access.ms`, with the same path syntax and the same compile-time evaluation, and optionally an inline access level per entry.
-- **Background and scheduled jobs.** Designed in §2, [Background jobs](#background-jobs); remaining questions are listed there.
+- **Background and scheduled jobs.** Built in M9.1: see §2, [Background jobs](#background-jobs); remaining questions are listed there.
 - **Serving on the open internet** (TLS, proxies, connection limits, security headers, CSP). Designed in §8, [Serving on the open internet](#serving-on-the-open-internet); remaining questions are listed there.
 - **Schema changes and migrations.** Designed in §3, [Schema changes and migrations](#schema-changes-and-migrations); remaining questions are listed there.
 - **Forms and input validation.** Designed in §4, [Forms and validation](#forms-and-validation); remaining questions are listed there.

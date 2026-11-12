@@ -448,6 +448,10 @@ void Engine::proceed(std::shared_ptr<Flow> f) const {
         identify(f, [this](std::shared_ptr<Flow> flow) { serveAuth(std::move(flow)); });
         return;
     }
+    if (path.compare(0, std::char_traits<char>::length(kLivePrefix), kLivePrefix) == 0) {
+        identify(f, [this](std::shared_ptr<Flow> flow) { serveChannel(std::move(flow)); });
+        return;
+    }
     f->decision = route(f->admitted, *f->app);
     setRenderFormat(f->render, f->decision);
     const RouteEntry* entry = f->decision.entry;
@@ -533,6 +537,141 @@ void Engine::serveAuth(std::shared_ptr<Flow> f) const {
     a.origin = origin;
     a.https = options.https;
     options.authRoutes->handle(std::move(a), [f](HttpResponse response) { f->send(std::move(response)); });
+}
+
+void Engine::serveChannel(std::shared_ptr<Flow> f) const {
+    const EngineOptions& options = *options_;
+    const CompiledApp& app = *f->app;
+    const HttpRequest& request = f->request;
+    std::string name = f->admitted.path.path.substr(std::char_traits<char>::length(kLivePrefix));
+    std::vector<std::string> sources;
+    std::optional<AccessLevel> access = options.push ? app.channelAccess(name, &sources) : std::nullopt;
+    if (!access || f->admitted.path.trailingSlash) {
+        // No rule covers it: not served, like a path no route matches.
+        RouteDecision none;
+        none.kind = RouteDecision::Kind::NotFound;
+        f->send(dispatch(none, app, code_, f->render));
+        return;
+    }
+    if (request.method != "GET") {
+        HttpResponse r = HttpResponse::text(405, "Method Not Allowed\n");
+        r.headers.set("Allow", "GET");
+        f->send(std::move(r), false);
+        return;
+    }
+    // The gate decides, as for a page: the access rules, and any rate limits.
+    RouteEntry entry{RouteKind::Page, RelPath()};
+    entry.access = *access;
+    entry.accessSources = sources;
+    f->personal = !access->isPublic() || f->user.has_value();
+    GateFacts gateFacts;
+    gateFacts.method = request.method;
+    if (const std::string* origin = request.headers.get("Origin")) gateFacts.origin = *origin;
+    const std::string* host = request.headers.get("Host");
+    gateFacts.ownOrigin = std::string(options.https ? "https://" : "http://") + (host ? *host : "");
+    gateFacts.csrfCookie = f->csrfCookie;
+    if (f->user) gateFacts.visitor = {true, f->user->roles};
+    gateFacts.addressGroup = addressGroup(f->client);
+    if (f->user) gateFacts.userId = f->user->id;
+    gateFacts.sessionHash = f->sessionHash;
+    gateFacts.nowMs = options.clock->nowMillis();
+    GateDecision gate = gate_.check(entry, gateFacts, nullptr);
+    if (!gate.approval) {
+        if (options.log) {
+            options.log->write("access", request.method + " " + f->admitted.path.path + " from " + f->client + ": " +
+                                             gate.reason);
+        }
+        // An EventSource can't follow a sign-in redirect: a plain refusal.
+        int status = gate.denial == GateDecision::Denial::NeedLogin ? 401 : gate.status ? gate.status : 403;
+        f->send(HttpResponse::text(status, gate.denial == GateDecision::Denial::NeedLogin
+                                               ? "Sign in to subscribe to this channel.\n"
+                                               : "Not allowed.\n"),
+                false);
+        return;
+    }
+    if (options.push->full()) {
+        HttpResponse r = HttpResponse::text(503, "Too many subscribers; try again later.\n");
+        r.headers.set("Retry-After", "30");
+        f->send(std::move(r), false);
+        return;
+    }
+    HttpResponse r;
+    r.headers.set("Content-Type", "text/event-stream");
+    r.headers.set("Cache-Control", "no-store");
+    r.headers.set("X-Accel-Buffering", "no");   // nginx: don't hold the stream back
+    std::shared_ptr<PushHub> hub = options.push;
+    r.stream = [hub, name](std::shared_ptr<StreamWriter> writer) { hub->subscribe(name, std::move(writer)); };
+    f->send(std::move(r), false);
+}
+
+Engine::JobServices Engine::jobServices() const {
+    const EngineOptions& options = *options_;
+    JobServices s;
+    std::shared_ptr<OutboundClient> outbound;
+    {
+        std::lock_guard<std::mutex> lock(appMutex_);
+        s.app = app_;
+        s.config = config_;
+        outbound = outbound_;
+    }
+    RunContext& c = s.context;
+    c.data = options.data;
+    c.dropbox = options.dropbox;
+    if (options.db && s.app && s.app->usesDatabase()) {
+        c.db = options.db;
+        c.queries = &s.app->queries;   // the app, pinned with the run, keeps it alive
+    }
+    c.users = users_.get();
+    c.rates = rates_.get();
+    c.rateIp = c.rateUser = c.rateSession = "job";
+    c.outbound = std::move(outbound);
+    c.mailer = std::make_shared<EngineMail>(s.config, options.auth, options.rates, options.log);
+    c.enqueue = options.jobs != nullptr;
+    c.publish = options.push != nullptr;
+    c.budget = s.config->jobs.budget;
+    if (s.app) c.render = renderOptionsFor(*s.app, "");
+    return s;
+}
+
+Status Engine::commitEffects(const HandlerOutcome& outcome, const std::string& source) const {
+    const EngineOptions& options = *options_;
+    if (!outcome.enqueued.empty()) {
+        if (!options.jobs) return makeError(ErrorCode::Denied, "there's no job queue here");
+        std::vector<NewJob> jobs;
+        std::vector<std::string> names;
+        int64_t now = options.clock->nowMillis();
+        for (const JobRequest& j : outcome.enqueued) {
+            NewJob n;
+            n.name = j.name;
+            n.argsJson = toJson(j.args);
+            n.key = j.key;
+            n.runAtMs = now + j.delayMs;
+            n.source = source;
+            jobs.push_back(std::move(n));
+            names.push_back(j.name);
+        }
+        auto added = options.jobs->enqueue(jobs);
+        if (!added) {
+            if (options.log) options.log->write("jobs", source + ": enqueuing failed: " + added.error().message);
+            return makeError(added.error().code, "the enqueued jobs couldn't be saved: " + added.error().message);
+        }
+        if (options.observer) options.observer->jobsEnqueued(source, names, true);
+        if (options.jobsAdded) options.jobsAdded();
+    }
+    if (options.push) {
+        for (const PushMessage& m : outcome.published) options.push->publish(m.channel, m.event, m.data);
+    }
+    return {};
+}
+
+void Engine::dropEffects(const std::vector<std::string>& names, const std::string& source) const {
+    const EngineOptions& options = *options_;
+    if (names.empty()) return;
+    if (options.log) {
+        options.log->write("jobs", source + " failed, so its " + std::to_string(names.size()) +
+                                       (names.size() == 1 ? " enqueued job was" : " enqueued jobs were") + " dropped");
+    }
+    if (options.observer) options.observer->jobsEnqueued(source, names, false);
 }
 
 void Engine::serveRoute(std::shared_ptr<Flow> f) const {
@@ -737,6 +876,8 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
     context.rates = rates_.get();
     context.outbound = f->outbound;
     context.mailer = std::make_shared<EngineMail>(f->config, options.auth, options.rates, options.log);
+    context.enqueue = options.jobs != nullptr;
+    context.publish = options.push != nullptr;
     std::string group = addressGroup(f->client);
     context.rateIp = "ip:" + group;
     context.rateUser = f->user ? "user:" + f->user->id : "ip:" + group;
@@ -754,9 +895,10 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
     // The route entry lives in the app, which `f` keeps alive.
     bool htmx = isHtmxRequest(request);
     WorkerPool* workers = &scripts_->workers();
+    std::string source = request.method + " " + f->admitted.path.path;
     scripts_->run(
         f->app, *decision.handler, *gate.approval, std::move(context),
-        [f, entry, htmx, session, workers](HandlerOutcome outcome) {
+        [this, f, entry, htmx, session, workers, source](HandlerOutcome outcome) {
             const EngineOptions& options = *f->options;
             if (options.observer && !outcome.warnings.empty()) {
                 options.observer->renderWarnings(f->app->generation, outcome.warnings);
@@ -771,23 +913,40 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
                                 outcome.kind != HandlerOutcome::Kind::Status;
                 f->send(std::move(response), fullPage);
             };
-            if (!session) {
+            if (!outcome.droppedJobs.empty()) dropEffects(outcome.droppedJobs, source);
+            bool effects = !outcome.enqueued.empty() || !outcome.published.empty();
+            if (!session && !effects) {
                 respondWith(std::move(outcome), std::nullopt);
                 return;
             }
-            // Commit: save what the run did to the session (SQLite, so on a
-            // worker), before the response goes out.
+            // Commit: save what the run did to the session, then its jobs and
+            // push messages (SQLite, so on a worker), before the response
+            // goes out. If the session can't be saved, nothing else is kept.
             auto shared = std::make_shared<HandlerOutcome>(std::move(outcome));
-            workers->submit([session, shared, respondWith] {
-                EngineSession::Committed c = session->commit(shared->session);
-                if (c.error) {
+            workers->submit([this, session, shared, respondWith, source] {
+                std::optional<std::string> cookie;
+                if (session) {
+                    EngineSession::Committed c = session->commit(shared->session);
+                    if (c.error) {
+                        std::vector<std::string> names;
+                        for (const JobRequest& j : shared->enqueued) names.push_back(j.name);
+                        dropEffects(names, source);
+                        HandlerOutcome failed;
+                        failed.kind = HandlerOutcome::Kind::Error;
+                        failed.error.message = "the session couldn't be saved: " + c.error->message;
+                        respondWith(std::move(failed), std::nullopt);
+                        return;
+                    }
+                    cookie = c.setCookie;
+                }
+                if (Status s = commitEffects(*shared, source); !s) {
                     HandlerOutcome failed;
                     failed.kind = HandlerOutcome::Kind::Error;
-                    failed.error.message = "the session couldn't be saved: " + c.error->message;
-                    respondWith(std::move(failed), std::nullopt);
+                    failed.error.message = s.error().message;
+                    respondWith(std::move(failed), cookie);
                     return;
                 }
-                respondWith(std::move(*shared), c.setCookie);
+                respondWith(std::move(*shared), cookie);
             });
         });
 }

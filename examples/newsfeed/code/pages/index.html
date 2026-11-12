@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Newsfeed</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="/__fourfold/htmx.js"></script>
+</head>
+<body>
+  <main>
+    <h1>Newsfeed</h1>
+    <p class="note">Hacker News's top stories. A background job checks every five minutes,
+      and new stories appear here as they're found, without reloading.</p>
+    <form method="post" action="/refresh"><button>Check now</button></form>
+    <ol class="stories" hx-ext="sse" sse-connect="/live/stories" sse-swap="message" hx-swap="afterbegin">
+      {{stories}}
+    </ol>
+    <p class="note">The jobs, their schedule and the queue are in <a href="/__dev/jobs">the jobs panel</a>.</p>
+  </main>
+</body>
+</html>

@@ -289,6 +289,8 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** a job killed mid-run is retried; enqueues from a failed request are dropped; a unique key enqueues once; schedules fire on time across a DST change in a named zone; missed runs run once after downtime; a feed-polling job publishes to open pages over SSE; a channel under a members-only rule refuses a visitor who isn't signed in.
 
+**Decisions made here** (details in [m9.1-results.md](m9.1-results.md)): a job's enqueues and publishes commit only if it succeeds, like a request's (closing the overview's open question), and a request's publishes are held back the same way. `"public"` is an access value: it changes no page (rules only tighten) but declares a channel, since a channel needs a covering rule. A key is unique while its job is queued, not while it runs. A scheduled tick is a queued job keyed `schedule:<name>`, which is how it never overlaps itself. `"every"` schedules are intervals since the last run, first run when the schedule appears. Time zones come from the system's zoneinfo, with the POSIX footer rule for later times. The pause toggle pauses the schedule, not the queue. HTMX's SSE extension is part of `/__fourfold/htmx.js`. A published value can't carry the publishing visitor's CSRF token. `.md` fragments now carry their Markdown form even on HTML output when it renders cleanly, so a job can put one in a mail template. Retries: 15 s, doubling, at most an hour. `fourfold run-jobs` (CGI mode) is left for M10.
+
 ---
 
 ## M10 — CGI and FastCGI hosting

@@ -100,6 +100,38 @@ void ScriptHost::Impl::startRun(std::shared_ptr<const CompiledApp> app, HandlerR
     });
 }
 
+void ScriptHost::Impl::startJob(std::shared_ptr<const CompiledApp> app, HandlerRef job, Datum args,
+                                RunContext context, ScriptHost::Done done) {
+    const ScriptBundle* bundle = app ? app->scripts.get() : nullptr;
+    const PageProgram* page = bundle ? bundle->page(job.source) : nullptr;
+    const HandlerStub* stub = bundle ? bundle->stub(job) : nullptr;
+    if (job.kind != HandlerRef::Kind::Job || !page || !stub) {
+        done(errorOutcome("no compiled job " + job.label() + " in code/" + job.source.str(),
+                          "code/" + job.source.str()));
+        return;
+    }
+    auto run = std::make_unique<Run>();
+    run->kind = Run::Kind::Job;
+    run->jobFile = true;
+    run->host = this;
+    run->fileName = page->fileName;
+    run->libs = &bundle->libs;
+    run->app = std::move(app);
+    run->bundle = bundle;
+    run->page = page;
+    run->stub = stub;
+    run->handler = std::move(job);
+    run->jobArgs = std::move(args);
+    run->context = std::move(context);
+    // No visitor: no session, form or request (overview §2, Defining jobs).
+    run->context.session.reset();
+    run->context.form.reset();
+    run->context.request = RequestFacts{};
+    run->done = std::move(done);
+    prepareInterpreter(*run, page->functions);
+    schedule(std::move(run));
+}
+
 void ScriptHost::Impl::startMigration(std::shared_ptr<const CompiledApp> app, int number, RunContext context,
                                       ScriptHost::Done done) {
     const ScriptBundle* bundle = app ? app->scripts.get() : nullptr;
@@ -168,8 +200,10 @@ void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
         if (it == runs.end()) return;
         Run& r = *it->second;
         r.deadline = 0;
-        std::string what = r.kind == Run::Kind::Migration ? "the migration" : r.kind == Run::Kind::Seed ? "the seed"
-                                                                                                         : "the request";
+        std::string what = r.kind == Run::Kind::Migration ? "the migration"
+                           : r.kind == Run::Kind::Seed    ? "the seed"
+                           : r.kind == Run::Kind::Job     ? "the job"
+                                                          : "the request";
         finish(r, errorOutcome(overBudget(r, what + " took longer than its time budget (" + describeMs(wallClock) + ")"),
                                r.fileName));
     });
@@ -240,6 +274,29 @@ bool ScriptHost::Impl::slice(Run& run) {
             finish(run, std::move(o));
             return false;
         }
+        if (run.phase == Run::Phase::TopLevel && run.kind == Run::Kind::Job) {
+            // The top level has defined the jobs; call this one with its
+            // arguments, frozen, in place of a request.
+            run.phase = Run::Phase::Handler;
+            MiniScript::Value args = toValue(run.jobArgs);
+            args.Freeze();
+            run.interp.SetGlobalValue("_ff_req", args);
+            vm.Reset(run.stub->functions, run.interp.GetGlobals());
+            return true;
+        }
+        if (run.kind == Run::Kind::Job) {
+            // An error value means the job failed; anything else, that it
+            // succeeded (overview §2, Defining jobs).
+            MiniScript::Value result = run.interp.GetGlobalValue("_ff_result");
+            HandlerOutcome o;
+            if (result.IsError()) {
+                o.kind = HandlerOutcome::Kind::Error;
+                o.error = scriptErrorFrom(result, run.fileName);
+            }
+            o.warnings = std::move(run.warnings);
+            finish(run, std::move(o));
+            return false;
+        }
         if (run.phase == Run::Phase::TopLevel) {
             // The top level has defined the page's functions; now call the
             // handler, in the same namespace, through its stub.
@@ -258,7 +315,9 @@ bool ScriptHost::Impl::slice(Run& run) {
     }
     uint64_t limit = run.instructionLimit ? run.instructionLimit : budgetOf(run).instructions;
     if (run.instructions >= limit) {
-        finish(run, errorOutcome(overBudget(run, std::string(run.kind == Run::Kind::Request ? "the request" : "the run") +
+        finish(run, errorOutcome(overBudget(run, std::string(run.kind == Run::Kind::Request ? "the request"
+                                                             : run.kind == Run::Kind::Job   ? "the job"
+                                                                                            : "the run") +
                                                      " used more than its budget of " + std::to_string(limit) +
                                                      " instructions (an endless loop?)"),
                                  run.fileName));
@@ -275,6 +334,13 @@ void ScriptHost::Impl::finish(Run& run, HandlerOutcome outcome) {
         if (run.context.data) run.context.data->locks().release(ticket);
     }
     run.dataLocks.clear();
+    // Jobs and push messages go to the engine only if the run succeeded.
+    if (outcome.kind != HandlerOutcome::Kind::Error) {
+        outcome.enqueued = std::move(run.enqueued);
+        outcome.published = std::move(run.published);
+    } else {
+        for (const JobRequest& j : run.enqueued) outcome.droppedJobs.push_back(j.name);
+    }
     ScriptHost::Done done = std::move(run.done);
     if (run.discovered) run.discovered(run, outcome);
     run.interp.Reset();   // releases the namespace; the VM goes with the interpreter
@@ -393,6 +459,24 @@ void ScriptHost::run(std::shared_ptr<const CompiledApp> app, HandlerRef handler,
     impl->loop->post([impl, args] {
         impl->startRun(std::move(args->app), std::move(args->handler), std::move(args->context),
                        std::move(args->done));
+    });
+}
+
+void ScriptHost::runJob(std::shared_ptr<const CompiledApp> app, HandlerRef job, Datum args, RunContext context,
+                        Done done) {
+    struct Args {
+        std::shared_ptr<const CompiledApp> app;
+        HandlerRef job;
+        Datum args;
+        RunContext context;
+        Done done;
+    };
+    auto shared = std::make_shared<Args>(
+        Args{std::move(app), std::move(job), std::move(args), std::move(context), std::move(done)});
+    Impl* impl = impl_.get();
+    impl->loop->post([impl, shared] {
+        impl->startJob(std::move(shared->app), std::move(shared->job), std::move(shared->args),
+                       std::move(shared->context), std::move(shared->done));
     });
 }
 

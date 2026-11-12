@@ -53,19 +53,23 @@ fourfold_component(compiler DEPS base partition template markdown compiledapp sc
 fourfold_component(http DIR engine/http)           # HttpRequest/HttpResponse
 fourfold_component(observer DIR engine/observer DEPS base partition compiledapp script)   # events for the dev tools
 fourfold_component(policy DIR engine/policy DEPS base platform compiledapp script state)   # access, CSRF, rate limits, spam checks
-fourfold_component(pipeline DIR engine/pipeline DEPS base partition platform template compiledapp state appdata script config http observer policy)
+fourfold_component(push DIR engine/push DEPS base platform http)   # SSE channels and subscribers (overview §7)
+fourfold_component(pipeline DIR engine/pipeline DEPS base partition platform template compiledapp state appdata script config http observer policy push)
 fourfold_embed(pipeline kHtmxLibrary ${CMAKE_SOURCE_DIR}/third_party/htmx/htmx.min.js)
 fourfold_embed(pipeline kHtmxConfig ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/htmx-config.js)
 fourfold_embed(pipeline kMarkdownCss ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/markdown.css)
 fourfold_embed(pipeline kChallengeScript ${CMAKE_SOURCE_DIR}/src/engine/pipeline/assets/challenge.js)
+fourfold_embed(pipeline kHtmxSse ${CMAKE_SOURCE_DIR}/third_party/htmx/sse.js)
 fourfold_component(authflow DIR engine/authflow   # the /__auth/ pages: magic links, sign-out, fake login
     DEPS base platform template compiledapp config mail state http pipeline)
 fourfold_component(lifecycle DIR engine/lifecycle   # watch, compile, migrate, swap; backups
     DEPS base partition compiledapp appdata script compiler config observer pipeline platform)
+fourfold_component(jobs DIR engine/jobs   # the schedule and the job worker loop (overview §2)
+    DEPS base platform compiledapp script state config observer pipeline)
 
 # --- Hosts ---
-fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform)
+fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform push)
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)
 fourfold_executable(fourfold DIR hosts/cli
     DEPS base partition script compiler config mail observer pipeline authflow lifecycle devtools platform httpserver state
-         appdata)
+         appdata jobs push)

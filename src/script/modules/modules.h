@@ -13,6 +13,8 @@
 // - http, secrets, hmac: outbound requests, secret handles, and checking
 //   webhook signatures (http.cpp).
 // - mail: email from app code (mail.send).
+// - enqueue, publish: jobs and push messages, for the engine to commit
+//   when the run succeeds (jobs.cpp).
 #pragma once
 
 #include <string>
@@ -36,6 +38,7 @@ void addRateLimit();
 void addDb();
 void addHttp();
 void addMail();
+void addJobs();
 
 // An intrinsic's error result.
 MiniScript::IntrinsicResult intrinsicError(const std::string& message);

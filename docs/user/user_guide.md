@@ -47,13 +47,15 @@ for the language. This guide covers what Fourfold adds to it.
 25. [Secrets: API keys in your code](#secrets-api-keys-in-your-code)
 26. [Being called: webhooks](#being-called-webhooks)
 27. [Sending email: mail.send](#sending-email-mailsend)
-28. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
-29. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
-30. [Output: print and the dropbox](#output-print-and-the-dropbox)
-31. [Errors and limits](#errors-and-limits)
-32. [Deploying changes](#deploying-changes)
-33. [Developing on your own machine](#developing-on-your-own-machine)
-34. [Quick reference](#quick-reference)
+28. [Background jobs: code/jobs](#background-jobs-codejobs)
+29. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
+30. [Live updates: publish](#live-updates-publish)
+31. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
+32. [Output: print and the dropbox](#output-print-and-the-dropbox)
+33. [Errors and limits](#errors-and-limits)
+34. [Deploying changes](#deploying-changes)
+35. [Developing on your own machine](#developing-on-your-own-machine)
+36. [Quick reference](#quick-reference)
 
 ---
 
@@ -1368,6 +1370,7 @@ URL:
 | `"login"` | anyone signed in |
 | `"admin"` (any role name) | signed in, with that role |
 | `["admin", "moderator"]` | signed in, with **any** of these roles |
+| `"public"` | anyone; adds nothing to a page (rules only tighten), but declares a [live channel](#live-updates-publish) |
 
 Rules go in two places.
 
@@ -1521,6 +1524,10 @@ on a server is covered in the [admin guide](../admin/admin_guide.md#mail-for-sig
 | `outbound.timeoutSeconds` | 10 | the longest one request may take, redirects included (and never past the request's own budget) |
 | `mail.appMail` | `true` | `false` turns off [`mail.send`](#sending-email-mailsend) |
 | `mail.appPerHour` | 100 | the most messages `mail.send` may send an hour, for the whole app |
+| `jobs.timeZone` | `"UTC"` | the [schedule's](#on-a-schedule-codeschedulems) time zone: an IANA name like `"America/Denver"` |
+| `jobs.workers` | 2 | the most jobs running at once |
+| `jobs.instructions`, `jobs.seconds` | 100,000,000; 60 | each job run's limits |
+| `jobs.maxAttempts` | 5 | tries before a failing job is dead |
 | `deploy.migrationWaitSeconds` | 30 | how long requests wait while migrations run, before a 503 |
 | `deploy.migrationBudgetSeconds` | 600 | how long one migration may run |
 | `deploy.clearAnonymousSessions` | `false` | sign out every anonymous visitor after migrations |
@@ -1551,7 +1558,7 @@ How changes are handled:
 - **A config with an error isn't used.** The previous one stays, and the error
   goes to the terminal (dev) or the engine log. `fourfold serve` won't start
   with one; `fourfold dev` starts with the defaults and picks up the fix.
-- Your host may set **ceilings** (in its own server config) on budgets and
+- Your host may set **ceilings** (in its own server config) on budgets, jobs and
   session limits; a value over one is lowered to it, with a warning. (See
   [Server limits](../admin/admin_guide.md#server-limits---server-config) in
   the admin guide.)
@@ -2157,8 +2164,138 @@ message:
   counting each recipient, blind copies included. If any recipient is
   refused (or the message would go over the limit), nothing is sent.
 
-Sending waits for the mail server, which can take a second or two. (Sending
-in the background will come with background jobs.)
+Sending waits for the mail server, which can take a second or two. To send
+without making the visitor wait, send from a
+[background job](#background-jobs-codejobs): `enqueue "sendWelcome",
+{"user": id}`.
+
+---
+
+## Background jobs: `code/jobs`
+
+Some work shouldn't make a visitor wait, or doesn't belong to any request:
+sending a welcome email, a nightly cleanup, a daily digest, checking a feed
+every few minutes. That's a **job**: a function in a file in `code/jobs/`,
+run by Fourfold in a fresh VM, like a handler, but with no visitor.
+
+```
+// code/jobs/mail.ms
+job.sendWelcome = function(args)
+    u = users.get(args.user)
+    if u == null then return null    // the account is gone: nothing to do
+    return mail.send(u.id, "Welcome!", "welcome", {"name": u.name})
+end function
+```
+
+- Files in `code/jobs/` define jobs in a map called `job`, the way page files
+  define `get` and `post`. (Only these files have `job`; page files don't.)
+  Each job's name is its key, `sendWelcome` here, and must be unique across
+  `code/jobs/`.
+- **No URL reaches a job.** It runs only when your code enqueues it, when the
+  schedule says, or from the dev tools' "run now".
+- It gets `args`, a frozen map (the one it was enqueued with), instead of
+  `req`. There's no `req`, `session` or signed-in user: a job acting for a
+  user is given the user's `id`, and looks them up when it runs, so it sees
+  their current roles.
+- `data`, `file`, `db`, `users`, `http`, `secrets`, `mail`, `enqueue` and
+  `publish` all work as they do in a handler.
+- **Returning an error value means it failed**, and it's tried again later
+  (below). Anything else, `null` included, means it succeeded.
+
+### Enqueuing: `enqueue`
+
+```
+post.signup = function(req)
+    ...
+    enqueue "sendWelcome", {"user": id}
+    enqueue "remind", {"user": id}, {"delay": 3 * 24 * 60 * 60}   // in 3 days
+    return redirect("/welcome")
+end function
+```
+
+`enqueue name, args=null, options=null` adds a job to the queue:
+
+- **`args` must be data**: numbers, strings, lists and maps, as for
+  `session`, at most 64 KB. A function or a secret handle is an error, at the
+  call. Pass an id, and look the rest up in the job.
+- **The jobs a request enqueues are kept only if it succeeds.** If the
+  request ends in an error, they're dropped (in dev mode, the terminal says
+  so). A failed signup sends no welcome email. The same goes for a job: what
+  it enqueues is kept only if it succeeds, so jobs can enqueue follow-ups.
+- **`{"delay": seconds}`** waits at least that long before running it.
+- **`{"key": "digest:" + id}`** makes it unique while it's waiting: enqueuing
+  the same key again does nothing. That covers "at most one digest" without
+  bookkeeping of your own. (Once it has started, the key can be queued
+  again.)
+- A name with no job is an error at the call: `enqueue "sendWelcom"` says
+  there's no job named `sendWelcom`.
+
+The queue is kept in `private/state/`, where your code can't read or change
+it, and it survives restarts and deploys.
+
+### On a schedule: `code/schedule.ms`
+
+```
+// code/schedule.ms
+schedule = {}
+schedule["cleanup"]   = "daily 03:00"
+schedule["digest"]    = "weekly mon 08:00"
+schedule["pollFeeds"] = "every 15m"
+schedule["report"]    = "0 6 1 * *"           // cron's five fields work too
+```
+
+| Written | Runs |
+|---|---|
+| `"every 15m"`, `"every 2 hours"`, `"every day"` | that long after the last run (at least a minute); the first run is when the schedule first appears |
+| `"hourly"`, `"hourly :15"` | at that minute of every hour |
+| `"daily 03:00"` | at that time each day (24-hour) |
+| `"weekly mon 08:00"` | on that weekday (`mon` ... `sun`) |
+| `"monthly 1 06:00"` | on that day of the month (1 to 28) |
+| `"0 6 * * 1-5"` | cron: minute, hour, day of the month, month, weekday |
+
+- Times are in the app's time zone, `config.jobs.timeZone` (a name like
+  `"America/Denver"`; UTC unless you set one).
+- **Daylight saving time**: a time skipped when clocks go forward (02:30 on
+  the spring night, in the US) runs at the jump, 03:00. A time that happens
+  twice when clocks go back runs once, the first time. `"every"` intervals are
+  real time, so DST doesn't stretch or shrink them.
+- **A scheduled job never overlaps itself.** If the last run is still waiting
+  or running when the next is due, that one is skipped.
+- **Missed runs run once.** If the server was down at 03:00, `"daily 03:00"`
+  runs once when it starts, not once per missed day.
+- `schedule.ms` is read when the app compiles, as data, like `access.ms`. A
+  schedule naming no job, or one that isn't a schedule, is a compile error.
+
+### When a job fails
+
+- A job that fails (an error value, a runtime error, or running out of time)
+  is tried again: after 15 seconds, then 30, a minute, two..., up to an hour
+  apart. After `config.jobs.maxAttempts` (5) it's **dead**: kept with its last
+  error, in the engine log, and in the jobs panel, where you can retry or
+  discard it.
+- **A job can run more than once.** If the server stops while one runs, it
+  runs again when the server starts. So write jobs that are safe to repeat:
+  `data.increment`, `data.compareAndSet`, and a `key` help.
+- Each job runs on whichever version of the app is current when it starts.
+  If a deploy removes a job that still has entries in the queue, the terminal
+  (or engine log) warns, and those entries go dead when they come up.
+
+### Limits
+
+- A job's own budget: 100 million instructions and 60 seconds
+  (`config.jobs.instructions`, `config.jobs.seconds`), more than a request's.
+- At most 2 jobs run at once (`config.jobs.workers`), so jobs can't crowd out
+  visitors' requests.
+- At most 100 `enqueue`s per request or job.
+
+### In dev mode
+
+The **jobs panel**, at `/__dev/jobs` (also in the corner menu), shows the
+schedule with each job's next and last run, the queue (waiting, running and
+dead jobs, with their arguments, attempts and last error), the latest runs,
+a "run now" button for every job, and a toggle that pauses the schedule
+(queued jobs still run). Each run is printed in the terminal. Scheduled jobs
+run in dev mode just as on a server.
 
 ---
 
@@ -2204,6 +2341,69 @@ end function
 For safety, Fourfold's copy of HTMX is configured not to run JavaScript from
 attributes or from swapped-in content. `hx-on...` attributes are compile
 errors, and a fragment returned as a response can't contain a `<script>`.
+
+---
+
+## Live updates: `publish`
+
+A page can get new content the moment something happens, without reloading
+or asking: a new chat message, a finished order, a story a job just found.
+The page subscribes to a **channel**, and your code **publishes** to it.
+
+```html
+<!-- in the page: HTMX's SSE extension comes with /__fourfold/htmx.js -->
+<ul hx-ext="sse" sse-connect="/live/guestbook" sse-swap="message" hx-swap="beforeend">
+  {{entries}}
+</ul>
+```
+
+```
+post.sign = function(req)
+    entry = {"who": req.form.who, "msg": req.form.msg}
+    data.append "guestbook", entry
+    publish "guestbook", frag("entry", entry)    // to every open page
+    if req.htmx then return null
+    return redirect("/guestbook")
+end function
+```
+
+- A page subscribes with `sse-connect="/live/<channel>"`; HTMX keeps the
+  connection open (and reconnects if it drops). `sse-swap="message"` puts
+  each message into the element, as `hx-swap` says.
+- `publish channel, content, event="message"` sends `content`, a
+  `frag(...)`, `markdown(...)`, or a string (sent as text, escaped), to every
+  page subscribed to `/live/<channel>`. Use another event name to send to a
+  different element: `publish "orders", frag("count", n), "count"` goes to the
+  element with `sse-swap="count"`.
+- Like `enqueue`, a request's (or job's) messages are sent only if it
+  succeeds.
+- **A channel needs an access rule.** `/live/<name>` is a path like any
+  other, and `code/access.ms` decides who may subscribe. A channel no rule
+  covers isn't served (404), so you choose which exist:
+
+  ```
+  rules["/live/news"] = "public"       // anyone
+  rules["/live/members"] = "login"     // signed-in visitors only
+  rules["/live/staff"] = "admin"       // and so on, as for pages
+  ```
+
+  A rule covers everything below it, so `rules["/live"] = "public"` makes
+  every channel public. A visitor who may not subscribe gets a 401 (not
+  signed in) or 403, and no messages.
+- Channel names are letters, digits, `-` and `_`, in parts joined by `/`
+  (`"rooms/lobby"`). `code/pages/live/` can't exist: `/live/` is for
+  channels.
+- A message can't hold a `<script>` (it wouldn't run), or a form rendered
+  for the visitor who published it (its CSRF token would go to everyone).
+  Publish HTML without forms; a subscriber can load a form with `hx-get`.
+- At most 64 KB per message, and 100 messages per request or job. Every
+  subscriber to a channel gets the same message: per-user channels aren't
+  here yet.
+- Live updates need `fourfold dev` or `fourfold serve`, which keep the
+  connections open; they don't work in CGI mode.
+
+In dev mode, the jobs panel lists the open channels and how many pages
+subscribe to each, and the access report lists who may subscribe.
 
 ---
 
@@ -2401,6 +2601,10 @@ loop:
   requests, refused ones included, with why.
 - **Mail from `mail.send`** is printed in the terminal too, like sign-in
   emails.
+- **The jobs panel**, at `/__dev/jobs` (also in the corner menu): the
+  schedule, the queue, recent runs, dead jobs with retry and discard, "run
+  now" for any job, a toggle that pauses the schedule, and the open
+  [live channels](#live-updates-publish).
 - **Migrations** are applied as soon as you save one (with a backup first),
   and `code/seed.ms` fills a fresh database with sample data. `/__dev/migrations`
   shows which are applied, pending, failed or changed, with two buttons:
@@ -2434,6 +2638,8 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `code/limits.ms` | rate limits and spam checks: `limits["/path"] = "5/minute"` |
 | `code/outbound.ms` | hosts `http` may reach, `allow = [...]`, and addresses `mail.send` may write to, `mailTo = [...]` |
 | `code/mail/x.md` | the mail template `x` |
+| `code/jobs/x.ms` | jobs: `job.name = function(args) ... end function` |
+| `code/schedule.ms` | when jobs run: `schedule["name"] = "daily 03:00"` |
 | `code/queries/x.sql` | the named query `x`; `x.sqlite.sql`, `x.pg.sql` for one database |
 | `code/migrations/001_x.sql` | a migration: SQL, a folder with `migrate.ms`, or a `.ms` file |
 | `code/seed.ms` | sample data for a fresh dev database |
@@ -2498,6 +2704,8 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `http.post(url, body=null, headers=null)` | the same; also `put`, `patch`, and `http.request(method, url, body, headers)` |
 | `hmac.verify(algorithm, secret, message, signature)` | 1 if the signature matches, else 0 |
 | `mail.send(to, subject, template, fields=null, options=null)` | null, once sent; `to` (and each of `options.bcc`) is a user's id or an address in `mailTo` |
+| `enqueue name, args=null, options=null` | null; queues `job.name`, kept if the request (or job) succeeds; options `delay`, `key` |
+| `publish channel, content, event="message"` | null; sends HTML to the pages on `/live/channel`, if the request (or job) succeeds |
 
 ### Globals
 
@@ -2508,6 +2716,7 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `session` | this visitor's map, saved if changed; `session.flash` is removed once a page shows it |
 | `get`, `post` | maps of handlers |
 | `webhook` | a map of handlers for POSTs from other servers, without CSRF checks |
+| `job` | in `code/jobs/`: a map of jobs |
 | `secrets` | handles for the secrets in `secrets.ms` that your code may use |
 | `form` | a map of form declarations: `form.sign` for `post.sign` |
 | `migrate` | in a migration: the function that makes the change |

@@ -190,13 +190,14 @@ Ceilings readServer(const Datum& server, const std::string& file, Problems& prob
     Ceilings out;
     Section top(server, "server", file, problems);
     Section ceilings = top.section("ceilings");
-    for (const char* group : {"budget", "session"}) {
+    for (const char* group : {"budget", "session", "jobs"}) {
         Section g = ceilings.section(group);
         const std::vector<const char*> keys =
-            std::string(group) == "budget"
-                ? std::vector<const char*>{"instructions", "seconds"}
-                : std::vector<const char*>{"capKB", "anonIdleHours", "anonMaxDays", "userIdleDays", "userMaxDays",
-                                           "anonPerAddress", "anonTotal"};
+            std::string(group) == "budget"    ? std::vector<const char*>{"instructions", "seconds"}
+            : std::string(group) == "jobs" ? std::vector<const char*>{"instructions", "seconds", "workers"}
+                                           : std::vector<const char*>{"capKB", "anonIdleHours", "anonMaxDays",
+                                                                      "userIdleDays", "userMaxDays", "anonPerAddress",
+                                                                      "anonTotal"};
         for (const char* key : keys) {
             if (auto v = g.number(key, 0, 1e12)) out[std::string(group) + "." + key] = *v;
         }
@@ -409,6 +410,31 @@ void readBudget(Section budget, AppConfig& c, const Ceilings& ceilings, Problems
         budget.error("memoryMB", "isn't supported yet: there's no per-request memory limit in this version");
     }
     budget.finish();
+}
+
+// config.jobs (overview §2, Background jobs).
+void readJobs(Section jobs, AppConfig& c, const Ceilings& ceilings, Problems& problems) {
+    JobsConfig& j = c.jobs;
+    auto get = [&](const char* key, double fallback, double min, double max) {
+        return limited(jobs, "jobs", key, fallback, min, max, ceilings, problems);
+    };
+    j.workers = static_cast<size_t>(get("workers", static_cast<double>(j.workers), 1, 64));
+    j.budget.instructions = static_cast<uint64_t>(get("instructions", static_cast<double>(j.budget.instructions), 1000, 1e12));
+    j.budget.wallClock = std::chrono::milliseconds(
+        static_cast<int64_t>(get("seconds", j.budget.wallClock.count() / 1000.0, 0.1, 24 * 3600) * 1000));
+    if (auto attempts = jobs.number("maxAttempts", 1, 100)) j.maxAttempts = static_cast<int>(*attempts);
+    if (auto zone = jobs.string("timeZone")) {
+        auto loaded = TimeZone::load(*zone);
+        if (!loaded) {
+            jobs.error("timeZone", loaded.error().code == ErrorCode::NotFound
+                                       ? "is \"" + *zone + "\", which isn't a time zone on this system (use an IANA "
+                                         "name like \"America/Denver\", \"Europe/Paris\" or \"UTC\")"
+                                       : loaded.error().message);
+        } else {
+            j.timeZone = std::move(loaded).value();
+        }
+    }
+    jobs.finish();
 }
 
 // The engine's default rates, as written: one string or a list.
@@ -630,6 +656,7 @@ ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     readDatabase(top.section("db"), *c);
     readDeploy(top.section("deploy"), *c);
     readBackups(top.section("backups"), *c);
+    readJobs(top.section("jobs"), *c, ceilings, problems);
     top.finish();
 
     if (c->mail.transport == MailConfig::Transport::Log) {

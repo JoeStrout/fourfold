@@ -65,6 +65,13 @@ std::string localLinkProblem(const CompiledApp& app, const std::optional<std::ve
     if (!local) return "";
     if (path) *path = local->path;
     if (routeExists(app, local->path)) return "";
+    // A push channel (overview §7) is served if an access.ms rule covers it.
+    const std::string live = kLivePrefix;
+    if (local->path.compare(0, live.size(), live) == 0) {
+        if (app.channelAccess(local->path.substr(live.size()))) return "";
+        return "no code/access.ms rule covers this push channel, so it isn't served (add one, like "
+               "rules[\"/live\"] = \"public\")";
+    }
     // A page linked by its file name works, through a redirect (pages are
     // served without ".html"), but the link may as well go straight there.
     const std::string& p = local->path;

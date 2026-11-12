@@ -82,6 +82,12 @@ void limitsPass(const CodeListing& listing, const CodeTree& code, DataEvaluator*
 void outboundPass(const CodeListing& listing, const CodeTree& code, DataEvaluator* evaluator, CompiledApp& app,
                   Diagnostics& diagnostics);
 
+// Jobs (the `job` maps of code/jobs/, by name, each name once) into
+// app.jobs, and code/schedule.ms (evaluated by `evaluator`) into
+// app.schedule. After the scripts pass.
+void jobsPass(const CodeListing& listing, const CodeTree& code, const std::map<RelPath, PageHandlers>& handlers,
+              DataEvaluator* evaluator, CompiledApp& app, Diagnostics& diagnostics);
+
 // The page files' form declarations, onto their post handlers' routes; then
 // each template's forms checked against them (with validation attributes
 // added), and marked for a proof-of-work puzzle where their route has a
@@ -90,8 +96,10 @@ void formsPass(const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app
 
 // An access level as written ("login", "admin", ["admin", "moderator"]): the
 // roles of which any will do, empty for "login"; or nullopt, with `error`
-// saying why it isn't one.
-std::optional<std::vector<std::string>> parseAccessValue(const Datum& value, std::string& error);
+// saying why it isn't one. "public" (M9.1) requires nothing: it sets
+// `isPublic` (and returns an empty list). Rules only tighten, so it changes
+// no page; it declares a push channel served to anyone.
+std::optional<std::vector<std::string>> parseAccessValue(const Datum& value, std::string& error, bool& isPublic);
 
 // Warns about each local URL written in a template (href, src, hx-get, ...)
 // that no route serves. After the routes pass.

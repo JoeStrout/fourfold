@@ -38,6 +38,7 @@ struct Run {
         Data,        // a declaration or config file, evaluated as data; may not park or import
         Migration,   // a migration: its top level, then migrate(); may park
         Seed,        // code/seed.ms's top level; may park
+        Job,         // a job: its file's top level, then the job's function; may park
     };
     enum class Phase { TopLevel, Handler };
 
@@ -87,8 +88,18 @@ struct Run {
 
     // The run's state, for intrinsics: they reach it through hostData.
     static Run* of(MiniScript::Context& ctx);
-    // A request, migration or seed: it may park (wait for the worker pool).
-    bool canPark() const { return kind == Kind::Request || kind == Kind::Migration || kind == Kind::Seed; }
+    // A request, job, migration or seed: it may park (wait for the worker pool).
+    bool canPark() const {
+        return kind == Kind::Request || kind == Kind::Migration || kind == Kind::Seed || kind == Kind::Job;
+    }
+    // The file is in code/jobs/: it gets a `job` map, not get, post and the rest.
+    bool jobFile = false;
+    // A Job run: its arguments.
+    Datum jobArgs = Datum::map({});
+    // What `enqueue` and `publish` collected, for the engine (if the run
+    // succeeds).
+    std::vector<JobRequest> enqueued;
+    std::vector<PushMessage> published;
 };
 
 struct ScriptHost::Impl {
@@ -108,6 +119,8 @@ struct ScriptHost::Impl {
 
     // Starting and finishing request runs (scheduler.cpp).
     void startRun(std::shared_ptr<const CompiledApp> app, HandlerRef handler, RunContext context,
+                  ScriptHost::Done done);
+    void startJob(std::shared_ptr<const CompiledApp> app, HandlerRef job, Datum args, RunContext context,
                   ScriptHost::Done done);
     // A migration's run, or the seed's (`number` < 0).
     void startMigration(std::shared_ptr<const CompiledApp> app, int number, RunContext context,

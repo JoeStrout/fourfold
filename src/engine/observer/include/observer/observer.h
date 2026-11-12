@@ -62,6 +62,11 @@ public:
     // App code sent (or tried to send) a request to another server
     // (overview §6, Visibility). Never holds a secret's value.
     virtual void outboundCall(const OutboundCall&) {}
+    // A request or job (`source`: "POST /signup", "job digest") enqueued
+    // jobs, which were committed (`committed`), or dropped because it
+    // failed (overview §2, Enqueuing).
+    virtual void jobsEnqueued(const std::string& /*source*/, const std::vector<std::string>& /*names*/,
+                              bool /*committed*/) {}
 };
 
 // Passes each event on to several observers, in order.
@@ -76,6 +81,7 @@ public:
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
     void limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) override;
     void outboundCall(const OutboundCall& call) override;
+    void jobsEnqueued(const std::string& source, const std::vector<std::string>& names, bool committed) override;
 
 private:
     std::vector<Observer*> observers_;   // fixed once events start

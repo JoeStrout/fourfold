@@ -345,7 +345,16 @@ RenderResult renderFragment(const CompiledTemplate& compiled, const FieldSource&
     RenderResult r = render(compiled, fields, asHtml);
     if (!r.ok() || !compiled.isMarkdown()) return r;
     std::shared_ptr<const MarkdownForm> form = MarkdownForm::notMade();
-    if (options.format == OutputFormat::Markdown) {
+    if (options.format != OutputFormat::Markdown) {
+        // For an HTML output, the Markdown form is made too if it can be
+        // (M9.1), so the value can still go into a Markdown template, such
+        // as a mail; if it can't (a field holds HTML), it's simply not made.
+        RenderOptions asMarkdown = options;
+        asMarkdown.format = OutputFormat::Markdown;
+        asMarkdown.warnings = false;
+        RenderResult md = render(compiled, fields, asMarkdown);
+        if (md.ok()) form = MarkdownForm::ready(std::move(md.markdown));
+    } else {
         RenderResult md = render(compiled, fields, options);
         for (RenderWarning& w : md.warnings) {
             if (std::find(r.warnings.begin(), r.warnings.end(), w) == r.warnings.end()) r.warnings.push_back(std::move(w));
@@ -364,8 +373,8 @@ RenderResult renderFragment(const CompiledTemplate& compiled, const FieldSource&
 
 Html emptyRendering(const CompiledTemplate& compiled, const RenderOptions& options) {
     if (!compiled.isMarkdown()) return Html();
-    return HtmlAccess::make("", false, false,
-                            options.format == OutputFormat::Markdown ? MarkdownForm::ready("") : MarkdownForm::notMade());
+    (void)options;
+    return HtmlAccess::make("", false, false, MarkdownForm::ready(""));
 }
 
 std::string pageTitle(const CompiledTemplate& page, const FieldSource& fields) {

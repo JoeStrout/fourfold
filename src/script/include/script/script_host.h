@@ -184,6 +184,23 @@ public:
     virtual Result<std::string> send(const AppMailMessage& message) = 0;
 };
 
+// A job enqueued by a run (overview §2, Enqueuing): committed to the queue
+// only if the run succeeds.
+struct JobRequest {
+    std::string name;      // the job: job.<name> in code/jobs/
+    Datum args = Datum::map({});   // inert
+    std::optional<std::string> key;   // unique while pending
+    int64_t delayMs = 0;   // run no sooner than this long after the commit
+};
+
+// A message for a push channel's subscribers (overview §7, Real-time push),
+// from `publish`: sent only if the run succeeds.
+struct PushMessage {
+    std::string channel;   // "orders", for /live/orders
+    std::string event;     // the SSE event name ("message" unless given)
+    std::string data;      // HTML (a string's text, escaped)
+};
+
 // The visitor's session as a run starts (overview §2, Session storage).
 struct SessionInput {
     Datum app = Datum::map({});      // the `session` map
@@ -270,6 +287,11 @@ struct RunContext {
     std::shared_ptr<OutboundClient> outbound{};
     // App mail (the `mail` module). Null: none.
     std::shared_ptr<AppMailer> mailer{};
+    // `enqueue` and `publish` (overview §2, §7): whether the engine takes
+    // the run's jobs and push messages (when it succeeds). Off: they return
+    // an error.
+    bool enqueue = false;
+    bool publish = false;
 };
 
 // A compile or runtime error in a script, located for the developer.
@@ -312,6 +334,13 @@ struct HandlerOutcome {
     // If the run had session access and its handler finished without an
     // error: what it did to the session.
     std::optional<SessionResult> session;
+    // Unless the run failed (Error): the jobs it enqueued and the push
+    // messages it published, for the engine to commit.
+    std::vector<JobRequest> enqueued;
+    std::vector<PushMessage> published;
+    // If the run failed: the names of the jobs it had enqueued, which are
+    // dropped (for a dev-mode note).
+    std::vector<std::string> droppedJobs;
 };
 
 // The handlers found in one page's .ms file, by running its top level once at
@@ -321,6 +350,7 @@ struct PageHandlers {
     std::vector<std::string> get;    // the keys of `get`, sorted
     std::vector<std::string> post;   // the keys of `post`, sorted
     std::vector<std::string> webhook;   // the keys of `webhook`, sorted
+    std::vector<std::string> job;       // a file in code/jobs/: the keys of `job`, sorted
     // The file, or a code/lib/ file it imports, mentions `session`: its
     // runs get the session (loaded and locked). Requests to
     // pages that don't never wait for a session's lock.
@@ -360,6 +390,10 @@ struct ScriptSources {
     std::vector<CodeFile> libs;
     std::vector<MigrationScript> migrations;
     std::optional<CodeFile> seed;     // code/seed.ms (it may import code/lib/)
+    // .ms files in code/jobs/ (overview §2, Defining jobs): each defines
+    // functions in a `job` map, which only these files have. Found like
+    // pages' handlers, in CompiledScripts::pages by path ("jobs/mail.ms").
+    std::vector<CodeFile> jobs{};
 };
 
 // The compiler's view of the script side: .ms files in, a bundle out.
@@ -371,7 +405,7 @@ public:
 
     // Pages and libs only.
     CompiledScripts compileScripts(const std::vector<CodeFile>& pages, const std::vector<CodeFile>& libs) {
-        return compileScripts(ScriptSources{pages, libs, {}, std::nullopt});
+        return compileScripts(ScriptSources{pages, libs, {}, std::nullopt, {}});
     }
 };
 
@@ -423,6 +457,15 @@ public:
     // pinned (with its bytecode) until then.
     void run(std::shared_ptr<const CompiledApp> app, HandlerRef handler, const GateApproval& approval,
              RunContext context, Done done);
+
+    // Runs job `job` (a HandlerRef of kind Job) of `app` (overview §2,
+    // Background jobs): its file's top level, then the job's function, with
+    // `args` as a frozen map, in a fresh VM. There's no request or session;
+    // the context gives it the services jobs have, and its budget. `done`
+    // gets NoContent, or Error if the job failed (a runtime error, its
+    // budget ran out, or it returned an error value); with the jobs it
+    // enqueued and the messages it published, unless it failed.
+    void runJob(std::shared_ptr<const CompiledApp> app, HandlerRef job, Datum args, RunContext context, Done done);
 
     // Runs migration `number` of `app` (overview §3, Migration files): its
     // file's top level, then migrate(), in a fresh VM. The context gives it

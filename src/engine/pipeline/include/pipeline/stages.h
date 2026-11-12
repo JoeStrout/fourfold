@@ -21,6 +21,8 @@
 #include "script/script_host.h"
 #include "state/auth_store.h"
 #include "state/engine_log.h"
+#include "state/job_queue.h"
+#include "push/push_hub.h"
 #include "state/lock_service.h"
 #include "state/rate_store.h"
 #include "state/session_store.h"
@@ -84,6 +86,16 @@ struct EngineOptions {
     // empty, a random one is made for this engine, so tokens last only as
     // long as the process.
     std::string engineKey{};
+
+    // Background jobs (overview §2): the queue that `enqueue` commits to.
+    // Null: `enqueue` is unavailable. Must outlive the engine.
+    JobQueue* jobs = nullptr;
+    // Called (on a worker) after jobs were committed, so the runner can look
+    // for them. May be null.
+    std::function<void()> jobsAdded{};
+    // Push channels (overview §7): /live/<name>, and `publish`. Null: both
+    // unavailable (as in CGI mode).
+    std::shared_ptr<PushHub> push{};
 };
 
 // The host names `fourfold dev` answers to.

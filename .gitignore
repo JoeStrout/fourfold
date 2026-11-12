@@ -77,6 +77,7 @@ examples/*/dropbox/
 examples/*/private/state/
 examples/*/private/config/*
 !examples/clubhouse/private/config/app.ms
+!examples/newsfeed/private/config/app.ms
 # The weather sample's webhook key: a placeholder, for dev mode only
 !examples/weather/private/config/secrets.ms
 

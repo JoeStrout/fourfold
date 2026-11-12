@@ -137,6 +137,11 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
                                                 "/ is reserved for Fourfold's own pages");
                 continue;
             }
+            if (segments.size() > 2 && segments[1] == "live") {
+                diagnostics.error(fileName, "/live/ is reserved for push channels (overview §7): pages subscribe to "
+                                            "/live/<name>; rename the folder");
+                continue;
+            }
         }
 
         std::string extension = lowerExtension(file.path);

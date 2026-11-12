@@ -23,6 +23,8 @@
 #include "config/app_config.h"
 #include "devtools/dev_tools.h"
 #include "httpserver/http_server.h"
+#include "jobs/job_runner.h"
+#include "push/push_hub.h"
 #include "lifecycle/app_instance.h"
 #include "observer/observer.h"
 #include "pipeline/engine.h"
@@ -30,6 +32,7 @@
 #include "script/script_host.h"
 #include "state/auth_store.h"
 #include "state/engine_log.h"
+#include "state/job_queue.h"
 #include "state/lock_service.h"
 #include "state/rate_store.h"
 #include "state/session_store.h"
@@ -64,6 +67,9 @@ struct ServerOptions {
     bool migrateOnStart = false;
     // The emergency override: serve code older than the data's migrations.
     bool allowOlderCode = false;
+    // A failing job's first retry waits this long (then doubles); tests
+    // shorten it.
+    std::chrono::milliseconds jobRetryDelay{15'000};
 };
 
 // Whether a Fourfold server (dev or serve) is running the app at `folder`
@@ -114,6 +120,11 @@ public:
     Database* database() { return database_.get(); }
     BackupService& backups() { return *backups_; }
     SchemaGate::Stats schemaStats() const { return schema_.stats(); }
+    // Background jobs (M9.1): the queue, and the runner.
+    JobQueue& jobQueue() { return *jobQueue_; }
+    JobRunner& jobs() { return *jobRunner_; }
+    // Push channels' subscribers.
+    PushHub& push() { return *push_; }
 
 private:
     AppServer(std::ostream& out, std::ostream& err) : out_(out), err_(err) {}
@@ -128,6 +139,7 @@ private:
     void compileFinished(const CompileReport& report) override;
     void scriptError(const ScriptError& e) override;
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
+    void jobsEnqueued(const std::string& source, const std::vector<std::string>& names, bool committed) override;
 
     // Removes expired sessions and sign-in tokens now, and every hour.
     void scheduleSweep(std::chrono::milliseconds delay);
@@ -175,6 +187,8 @@ private:
     std::unique_ptr<SessionStore> sessions_;
     std::unique_ptr<AuthStore> auth_;
     std::unique_ptr<RateStore> rates_;
+    std::unique_ptr<JobQueue> jobQueue_;
+    std::shared_ptr<PushHub> push_;
     std::unique_ptr<LockService> sessionLocks_;
     std::unique_ptr<DataFiles> data_;
     std::unique_ptr<AuthFlow> authFlow_;
@@ -182,6 +196,7 @@ private:
     ObserverList observers_;
     std::unique_ptr<Engine> engine_;
     std::unique_ptr<AppInstance> instance_;
+    std::unique_ptr<JobRunner> jobRunner_;
     std::unique_ptr<HttpServer> server_;
 };
 

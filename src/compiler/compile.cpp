@@ -57,6 +57,7 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
     accessPass(listing.value(), code, handlers, options.evaluator, *app, diagnostics);
     limitsPass(listing.value(), code, options.evaluator, *app, diagnostics);
     outboundPass(listing.value(), code, options.evaluator, *app, diagnostics);
+    jobsPass(listing.value(), code, handlers, options.evaluator, *app, diagnostics);
     formsPass(handlers, *app, diagnostics);
     markdownPass(listing.value(), code, *app, diagnostics);
     linksPass(listing.value(), *app, diagnostics);

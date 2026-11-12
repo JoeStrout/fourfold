@@ -29,6 +29,7 @@ To run a sample app:
 ./build/dev/bin/fourfold dev examples/clubhouse       # sign-in and access rules (M6)
 ./build/dev/bin/fourfold dev examples/tasks           # a database, queries and migrations (M8)
 ./build/dev/bin/fourfold dev examples/weather         # outbound HTTP, a webhook and app mail (M9)
+./build/dev/bin/fourfold dev examples/newsfeed        # background jobs, a schedule, and live updates (M9.1)
 ```
 
 `fourfold dev` watches `code/`: save a file, and open pages reload (or, for a stylesheet, swap it in place). Compile errors show as an overlay on open pages, while the last version that compiled keeps serving. Touching `code/.deploy` recompiles at once.
@@ -109,7 +110,7 @@ Public headers are included by component name: `#include "base/result.h"`. Priva
 
 **Tests.** A `.cpp` file in `tests/<dir>/` is added to the test executable for `src/<dir>/` automatically (re-run the build; globs are re-checked). Tests use [doctest](https://github.com/doctest/doctest) (`#include "doctest.h"`; `TEST_CASE`, `SUBCASE`, `CHECK`, `REQUIRE`, …). A component's tests use only its public headers, plus fakes of the interfaces below it. Fixture app folders go in `tests/apps/`; tests find them via the `FOURFOLD_TEST_APPS_DIR` macro.
 
-**Embedded files.** Files the engine serves itself (htmx, the default Markdown stylesheet) are built into the program with `fourfold_embed(component symbol file)`, which turns the file into a byte array at build time (`cmake/Embed.cmake`). So an app can't replace or break them, and there's nothing to install beside the binary.
+**Embedded files.** Files the engine serves itself (htmx and its SSE extension, the default Markdown stylesheet) are built into the program with `fourfold_embed(component symbol file)`, which turns the file into a byte array at build time (`cmake/Embed.cmake`). So an app can't replace or break them, and there's nothing to install beside the binary.
 
 **Errors.** Expected failures are returned as `Result<T>` or `Status` (`base/result.h`), not thrown.
 

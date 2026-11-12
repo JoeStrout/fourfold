@@ -26,6 +26,12 @@
 //   the latest outbound requests and refusals. /__dev/outbound.json has the
 //   same as data.
 //
+// - /__dev/jobs (M9.1): the jobs panel (overview §2, Dev mode): the queue,
+//   recent runs, dead jobs with retry and discard, the schedule with next
+//   run times, "run now" for any job, and a toggle that pauses the
+//   schedule; /__dev/jobs.json has the same as data. Open push channels
+//   and their subscribers are listed there too.
+//
 // It's an Observer (compile events come in) and the engine's EngineHooks
 // (requests for /__dev/ and HTML responses go through it). The core never
 // depends on it; production doesn't create one.
@@ -33,6 +39,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -76,6 +83,19 @@ public:
     // serving; may be null.
     void setSecretSource(std::function<Datum()> secrets) { secrets_ = std::move(secrets); }
 
+    // What /__dev/jobs shows and does, over the host's job runner. Each
+    // action returns what happened, for the developer.
+    struct JobsPanel {
+        std::function<Datum()> status;   // JobRunner::status()
+        std::function<std::string(const std::string& job)> runNow;
+        std::function<std::string(int64_t id)> retry;
+        std::function<std::string(int64_t id)> discard;
+        std::function<std::string(bool paused)> setPaused;
+    };
+    void setJobsPanel(JobsPanel panel) { jobs_ = std::move(panel); }
+    // Open push channels and their subscriber counts. May be null.
+    void setChannelSource(std::function<std::map<std::string, size_t>()> channels) { channels_ = std::move(channels); }
+
     // The access report's data: [{url, kind, access, sources, limits,
     // form}], and warnings.
     static Datum accessReport(const CompiledApp& app);
@@ -115,6 +135,9 @@ private:
     RateStore* rates_ = nullptr;
     MigrationPanel migrations_;
     std::function<Datum()> secrets_;
+    JobsPanel jobs_;
+    std::function<std::map<std::string, size_t>()> channels_;
+    std::string jobsMessage_;   // under messageMutex_
     std::mutex messageMutex_;
     std::string migrationMessage_;   // the last action's outcome, shown once
 };

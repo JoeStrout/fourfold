@@ -233,6 +233,7 @@ std::string HandlerRef::label() const {
         case Kind::Get: return "get." + name;
         case Kind::Post: return "post." + name;
         case Kind::Webhook: return "webhook." + name;
+        case Kind::Job: return "job." + name;
     }
     return name;
 }
@@ -355,6 +356,16 @@ std::string describe(const CompiledApp& app) {
             s += "\n";
         }
     }
+    if (!app.jobs.empty()) {
+        s += "jobs:\n";
+        for (const auto& [name, ref] : app.jobs) {
+            s += "  " + name + "  " + ref.source.str();
+            for (const ScheduledJob& j : app.schedule) {
+                if (j.job == name) s += "  schedule: " + j.schedule.text;
+            }
+            s += "\n";
+        }
+    }
     if (app.markdownLayout) s += "markdown layout: " + app.markdownLayout->source().str() + "\n";
     if (app.authLayout) s += "sign-in layout: " + app.authLayout->source().str() + "\n";
     s += "not found page: " + (app.notFoundPage ? app.notFoundPage->str() : std::string("(none)")) + "\n";
@@ -402,6 +413,40 @@ bool CompiledApp::usesDatabase() const {
         if (m.usesDatabase()) return true;
     }
     return false;
+}
+
+const char* const kLivePrefix = "/live/";
+
+bool isValidChannelName(const std::string& name) {
+    if (name.empty() || name.size() > 100 || name.front() == '/' || name.back() == '/') return false;
+    char prev = '/';
+    for (char c : name) {
+        if (c == '/') {
+            if (prev == '/') return false;
+        } else if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_')) {
+            return false;
+        }
+        prev = c;
+    }
+    return true;
+}
+
+std::optional<AccessLevel> CompiledApp::channelAccess(const std::string& name, std::vector<std::string>* sources) const {
+    if (!isValidChannelName(name)) return std::nullopt;
+    std::string url = kLivePrefix + name;
+    AccessLevel level;
+    bool covered = false;
+    for (const AccessRule& rule : accessRules) {
+        bool covers = rule.path == "/" || url == rule.path ||
+                      (url.size() > rule.path.size() && url.compare(0, rule.path.size(), rule.path) == 0 &&
+                       url[rule.path.size()] == '/');
+        if (!covers) continue;
+        covered = true;
+        if (sources) sources->push_back("code/access.ms: " + rule.path);
+        if (!rule.isPublic) level.require(rule.anyOf);
+    }
+    if (!covered) return std::nullopt;
+    return level;
 }
 
 }  // namespace fourfold

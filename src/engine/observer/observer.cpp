@@ -27,4 +27,8 @@ void ObserverList::outboundCall(const OutboundCall& call) {
     for (Observer* o : observers_) o->outboundCall(call);
 }
 
+void ObserverList::jobsEnqueued(const std::string& source, const std::vector<std::string>& names, bool committed) {
+    for (Observer* o : observers_) o->jobsEnqueued(source, names, committed);
+}
+
 }  // namespace fourfold

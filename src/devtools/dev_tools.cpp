@@ -1,5 +1,7 @@
 #include "devtools/dev_tools.h"
 
+#include <set>
+
 #include <cstdio>
 
 #include <algorithm>
@@ -326,6 +328,33 @@ Datum DevTools::accessReport(const CompiledApp& app) {
                                          {"form", str("")}}));
         }
     }
+    // Push channels (overview §7): /live/<name>, under the access.ms rules
+    // that cover it. Their names aren't known until asked for, so each rule
+    // at or below /live is a row, as is /live itself if a rule covers it.
+    auto coversPath = [](const std::string& rule, const std::string& url) {
+        return rule == "/" || url == rule ||
+               (url.size() > rule.size() && url.compare(0, rule.size(), rule) == 0 && url[rule.size()] == '/');
+    };
+    std::set<std::string> roots;
+    for (const AccessRule& rule : app.accessRules) {
+        if (coversPath(rule.path, "/live")) roots.insert("/live");
+        if (rule.path.compare(0, 6, "/live/") == 0) roots.insert(rule.path);
+    }
+    for (const std::string& root : roots) {
+        AccessLevel level;
+        Datum::ListItems sources;
+        for (const AccessRule& rule : app.accessRules) {
+            if (!coversPath(rule.path, root)) continue;
+            if (!rule.isPublic) level.require(rule.anyOf);
+            sources.push_back(str("code/access.ms: " + rule.path));
+        }
+        routes.push_back(Datum::map({{"url", str(root + "/*")},
+                                     {"kind", str("push channel")},
+                                     {"access", str(level.describe())},
+                                     {"sources", Datum::list(std::move(sources))},
+                                     {"limits", Datum::list({})},
+                                     {"form", str("")}}));
+    }
     Datum::ListItems warnings;
     for (const Diagnostic& d : app.diagnostics) {
         bool forms = d.message.find(" posts to ") != std::string::npos || d.message.find("this form posts") == 0;
@@ -369,6 +398,140 @@ Datum DevTools::outboundReport(const CompiledApp& app, Datum secrets) {
 
 std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const AdmittedRequest& admitted) {
     const std::string& path = admitted.path.path;
+    if (path.compare(0, 11, "/__dev/jobs") == 0 && path != "/__dev/jobs" && path != "/__dev/jobs.json" &&
+        request.method == "POST") {
+        // Only from the panel itself, as for /__dev/limits/reset.
+        const std::string* origin = request.headers.get("Origin");
+        const std::string* host = request.headers.get("Host");
+        if (!origin || !host || *origin != "http://" + *host) return HttpResponse::text(403, "Forbidden\n");
+        std::string field, id;
+        for (const auto& [name, value] : parseUrlEncoded(request.body)) {
+            if (name == "job") field = value;
+            if (name == "id") id = value;
+        }
+        int64_t number = 0;
+        for (char c : id) number = std::isdigit(static_cast<unsigned char>(c)) ? number * 10 + (c - '0') : number;
+        std::string message = "The jobs panel isn't connected.";
+        if (path == "/__dev/jobs/run" && jobs_.runNow) message = jobs_.runNow(field);
+        if (path == "/__dev/jobs/retry" && jobs_.retry) message = jobs_.retry(number);
+        if (path == "/__dev/jobs/discard" && jobs_.discard) message = jobs_.discard(number);
+        if (path == "/__dev/jobs/pause" && jobs_.setPaused) message = jobs_.setPaused(true);
+        if (path == "/__dev/jobs/resume" && jobs_.setPaused) message = jobs_.setPaused(false);
+        {
+            std::lock_guard<std::mutex> lock(messageMutex_);
+            jobsMessage_ = message;
+        }
+        HttpResponse r;
+        r.status = 303;
+        r.headers.set("Location", "/__dev/jobs");
+        return r;
+    }
+    if ((path == "/__dev/jobs" || path == "/__dev/jobs.json") && (request.method == "GET" || request.method == "HEAD")) {
+        Datum status = jobs_.status ? jobs_.status() : Datum::map({});
+        Datum::MapItems items = status.kind() == Datum::Kind::Map ? status.asMap() : Datum::MapItems{};
+        Datum::ListItems channels;
+        if (channels_) {
+            for (const auto& [name, count] : channels_()) {
+                channels.push_back(Datum::map({{"channel", str(name)}, {"subscribers", num(static_cast<double>(count))}}));
+            }
+        }
+        items["channels"] = Datum::list(std::move(channels));
+        HttpResponse r;
+        r.headers.set("Cache-Control", "no-store");
+        if (path == "/__dev/jobs.json") {
+            r.headers.set("Content-Type", "application/json");
+            r.body = toJson(Datum::map(std::move(items)));
+            return r;
+        }
+        auto text = [&](const Datum::MapItems& m, const char* key) {
+            auto it = m.find(key);
+            if (it == m.end()) return std::string();
+            if (it->second.kind() == Datum::Kind::Number) {
+                char n[32];
+                std::snprintf(n, sizeof n, "%g", it->second.asNumber());
+                return std::string(n);
+            }
+            return it->second.kind() == Datum::Kind::String ? it->second.asString() : std::string();
+        };
+        auto listOf = [&](const char* key) {
+            auto it = items.find(key);
+            return it != items.end() && it->second.kind() == Datum::Kind::List ? it->second.asList() : Datum::ListItems{};
+        };
+        r.headers.set("Content-Type", "text/html; charset=utf-8");
+        std::string html = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Jobs</title><style>";
+        html += kReportStyle;
+        html += "td form { display: inline; margin: 0; }\n</style></head>\n<body><main>\n<h1>Jobs</h1>\n"
+                "<p class=\"note\">Background jobs (code/jobs/), the schedule (code/schedule.ms, in " +
+                escapeHtml(text(items, "timeZone")) + "), and the queue in private/state/state.db. At most " +
+                escapeHtml(text(items, "workers")) + " run at once (config.jobs.workers); " +
+                escapeHtml(text(items, "running")) + " running now. Dev mode only.</p>\n";
+        std::string message;
+        {
+            std::lock_guard<std::mutex> lock(messageMutex_);
+            message.swap(jobsMessage_);
+        }
+        if (!message.empty()) html += "<p class=\"done\">" + escapeHtml(message) + "</p>\n";
+        bool paused = text(items, "paused") == "1";
+        html += paused ? "<p class=\"warning\">The schedule is paused: scheduled jobs don't fire (queued jobs still "
+                         "run). <form method=\"post\" action=\"/__dev/jobs/resume\"><button>Resume the "
+                         "schedule</button></form></p>\n"
+                       : "<form method=\"post\" action=\"/__dev/jobs/pause\"><button>Pause the schedule</button>"
+                         "</form>\n";
+        html += "<h2>Schedule</h2>\n<table>\n<tr><th>Job</th><th>Schedule</th><th>Next</th><th>Last</th></tr>\n";
+        for (const Datum& d : listOf("schedule")) {
+            const auto& m = d.asMap();
+            html += "<tr><td>" + escapeHtml(text(m, "job")) + "</td><td><code>" + escapeHtml(text(m, "schedule")) +
+                    "</code></td><td>" + escapeHtml(text(m, "next")) + "</td><td>" + escapeHtml(text(m, "last")) +
+                    "</td></tr>\n";
+        }
+        html += "</table>\n<h2>Queue</h2>\n<table>\n<tr><th>Job</th><th>State</th><th>Attempts</th><th>Due</th>"
+                "<th>Args</th><th>From</th><th>Last error</th><th></th></tr>\n";
+        for (const Datum& d : listOf("jobs")) {
+            const auto& m = d.asMap();
+            std::string state = text(m, "state"), id = escapeHtml(text(m, "id"));
+            std::string actions;
+            if (state == "dead") {
+                actions = "<form method=\"post\" action=\"/__dev/jobs/retry\"><input type=\"hidden\" name=\"id\" "
+                          "value=\"" + id + "\"><button>Retry</button></form> ";
+            }
+            if (state != "running") {
+                actions += "<form method=\"post\" action=\"/__dev/jobs/discard\"><input type=\"hidden\" "
+                           "name=\"id\" value=\"" + id + "\"><button>Discard</button></form>";
+            }
+            html += "<tr" + std::string(state == "dead" ? " class=\"restricted\"" : "") + "><td>" +
+                    escapeHtml(text(m, "name")) + "</td><td>" + escapeHtml(state) + "</td><td>" +
+                    escapeHtml(text(m, "attempts")) + "</td><td>" + escapeHtml(text(m, "runAt")) + "</td><td><code>" +
+                    escapeHtml(text(m, "args")) + "</code></td><td>" + escapeHtml(text(m, "source")) + "</td><td>" +
+                    escapeHtml(text(m, "lastError")) + "</td><td>" + actions + "</td></tr>\n";
+        }
+        html += "</table>\n<h2>Recent runs</h2>\n<table>\n<tr><th>Job</th><th>Attempt</th><th>Started</th>"
+                "<th>Time</th><th>Outcome</th><th>Error</th></tr>\n";
+        for (const Datum& d : listOf("runs")) {
+            const auto& m = d.asMap();
+            html += "<tr><td>" + escapeHtml(text(m, "name")) + "</td><td>" + escapeHtml(text(m, "attempt")) +
+                    "</td><td>" + escapeHtml(text(m, "started")) + "</td><td>" + escapeHtml(text(m, "ms")) +
+                    " ms</td><td>" + escapeHtml(text(m, "outcome")) + "</td><td>" + escapeHtml(text(m, "error")) +
+                    "</td></tr>\n";
+        }
+        html += "</table>\n<h2>Run now</h2>\n<table>\n<tr><th>Job</th><th>File</th><th></th></tr>\n";
+        for (const Datum& d : listOf("known")) {
+            const auto& m = d.asMap();
+            html += "<tr><td>" + escapeHtml(text(m, "name")) + "</td><td>" + escapeHtml(text(m, "file")) +
+                    "</td><td><form method=\"post\" action=\"/__dev/jobs/run\"><input type=\"hidden\" "
+                    "name=\"job\" value=\"" + escapeHtml(text(m, "name")) + "\"><button>Run now</button></form>"
+                    "</td></tr>\n";
+        }
+        html += "</table>\n<h2>Push channels</h2>\n<p class=\"note\">Open subscriptions to /live/&lt;name&gt;. Who "
+                "may subscribe is in the <a href=\"/__dev/access\">access report</a>.</p>\n<ul>\n";
+        std::string open;
+        for (const Datum& d : listOf("channels")) {
+            const auto& m = d.asMap();
+            open += "<li>/live/" + escapeHtml(text(m, "channel")) + ": " + escapeHtml(text(m, "subscribers")) + "</li>\n";
+        }
+        html += (open.empty() ? std::string("<li>(none)</li>\n") : open) + "</ul>\n</main></body></html>\n";
+        r.body = std::move(html);
+        return r;
+    }
     if ((path == "/__dev/migrations/redo" || path == "/__dev/migrations/reset") && request.method == "POST") {
         // Only from the panel itself, as for /__dev/limits/reset.
         const std::string* origin = request.headers.get("Origin");

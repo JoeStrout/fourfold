@@ -356,6 +356,7 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addDb();
     addHttp();
     addMail();
+    addJobs();
     addTestSlowWork();
     addTestWithValue();
     g_callbackStub = compileCallbackStub();
@@ -382,6 +383,11 @@ void prepareInterpreter(Run& run, const MiniScript::List<MiniScript::FuncDef>& p
     });
     run.interp.Reset(program);
     if (run.kind == Run::Kind::Data) return;
+    if (run.jobFile) {
+        // Only files in code/jobs/ have a `job` map (overview §2).
+        run.interp.SetGlobalValue("job", Value::make_map(4));
+        return;
+    }
     // The engine creates these before the file runs (overview §4).
     run.interp.SetGlobalValue("get", Value::make_map(4));
     run.interp.SetGlobalValue("post", Value::make_map(4));

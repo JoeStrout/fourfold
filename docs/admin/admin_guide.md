@@ -22,17 +22,18 @@ hosting, TLS and a production server will be added here as they arrive.*
 5. [Behind a reverse proxy](#behind-a-reverse-proxy)
 6. [Rate limits](#rate-limits)
 7. [Outbound requests and app mail](#outbound-requests-and-app-mail)
-8. [Keeping it running](#keeping-it-running)
-9. [Mail for sign-in](#mail-for-sign-in)
-10. [The first admin](#the-first-admin)
-11. [Server limits: `--server-config`](#server-limits---server-config)
-12. [Deploying an app's changes](#deploying-an-apps-changes)
-13. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
-14. [A Postgres database](#a-postgres-database)
-15. [Logs](#logs)
-16. [Backups](#backups)
-17. [Known gaps](#known-gaps)
-18. [Quick reference](#quick-reference)
+8. [Background jobs and live updates](#background-jobs-and-live-updates)
+9. [Keeping it running](#keeping-it-running)
+10. [Mail for sign-in](#mail-for-sign-in)
+11. [The first admin](#the-first-admin)
+12. [Server limits: `--server-config`](#server-limits---server-config)
+13. [Deploying an app's changes](#deploying-an-apps-changes)
+14. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
+15. [A Postgres database](#a-postgres-database)
+16. [Logs](#logs)
+17. [Backups](#backups)
+18. [Known gaps](#known-gaps)
+19. [Quick reference](#quick-reference)
 
 ---
 
@@ -329,6 +330,59 @@ anyone else, from its address; raise that limit if it's refused.
 
 ---
 
+## Background jobs and live updates
+
+An app can run **jobs** in the background (`code/jobs/`), on a schedule
+(`code/schedule.ms`) or when its code enqueues them, and push **live
+updates** to open pages (over server-sent events, on `/live/<channel>`).
+See the user guide's
+[Background jobs](../user/user_guide.md#background-jobs-codejobs) and
+[Live updates](../user/user_guide.md#live-updates-publish).
+
+**Jobs** run inside `fourfold serve`, on their own thread, with nothing to
+set up. The queue is in `private/state/state.db`; a job interrupted by a
+restart runs again when the server starts, and a scheduled time missed while
+the server was down runs once at startup. The settings:
+
+```
+config.jobs = {
+    "timeZone": "America/Denver",   // the schedule's zone (default "UTC")
+    "workers": 2,                   // jobs running at once
+    "instructions": 100000000,      // each run's limits
+    "seconds": 60,
+    "maxAttempts": 5,               // tries before a failing job is dead
+}
+```
+
+The time zone is read from the system's zoneinfo files
+(`/usr/share/zoneinfo`, or `$TZDIR`), so the server needs them: on Debian
+and Ubuntu, the `tzdata` package. An unknown zone is a config error.
+Scheduled times follow the zone's daylight saving changes. Each job run, and
+each failure, is in the [engine log](#logs) (`jobs`). Dead jobs (failed
+`maxAttempts` times) stay in the queue; the jobs panel that lists them is
+dev mode's, so on a server, read the log for now.
+
+**Live updates** hold a connection open for each subscribed page. They count
+against the server's connection limit (1,024); at most 1,000 pages may
+subscribe at once, after which new ones get a 503 and retry. Through a
+reverse proxy, the stream must not be buffered or cut off for being idle:
+
+```nginx
+    location /live/ {
+        proxy_pass http://127.0.0.1:8090;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_buffering off;
+        proxy_read_timeout 1h;
+    }
+```
+
+(Fourfold sends `X-Accel-Buffering: no`, which nginx honors anyway, and a
+comment every 15 seconds to keep the connection alive. Caddy needs nothing.)
+Who may subscribe to a channel is up to the app's access rules.
+
+---
+
 ## Keeping it running
 
 Fourfold doesn't run itself in the background. Use your system's service
@@ -505,6 +559,7 @@ server = {}
 server.ceilings = {}
 server.ceilings.budget = {"instructions": 50000000, "seconds": 20}
 server.ceilings.session = {"capKB": 64, "userMaxDays": 30}
+server.ceilings.jobs = {"instructions": 100000000, "seconds": 60, "workers": 2}
 ```
 
 | Ceiling | The app's setting, and its default |
@@ -515,6 +570,8 @@ server.ceilings.session = {"capKB": 64, "userMaxDays": 30}
 | `session.anonIdleHours`, `anonMaxDays` | when an anonymous session ends: 24 hours idle, 7 days at most |
 | `session.userIdleDays`, `userMaxDays` | when a signed-in session ends: 14 days idle, 30 at most |
 | `session.anonPerAddress`, `anonTotal` | anonymous sessions per visitor address, and in all: 1,000; 100,000 |
+| `jobs.instructions`, `jobs.seconds` | each background job run's limits: 100,000,000; 60 |
+| `jobs.workers` | background jobs running at once: 2 |
 
 Any you leave out isn't limited. As with the app's config, a misspelled name
 is an error, and an error stops `fourfold serve` from starting. The file is
@@ -659,6 +716,7 @@ The word after the time says what kind of event it is:
 | `outbound` | each request the app's code sent to another server: method, URL (without its query string or secrets), status, time and size; or why it was refused |
 | `migrate` | migrations applied, or why they failed |
 | `backup` | scheduled and requested backups |
+| `jobs` | each background job run, with its time; failures, retries and dead jobs; enqueued jobs dropped because their request failed |
 
 Control characters in a message are escaped, so nothing logged can fake a
 line. The app can't write to this log. Old log files aren't removed yet;
@@ -739,6 +797,12 @@ Fourfold site behind a proxy, and expect to watch it.
   (M11).
 - **No graceful shutdown, and no log rotation** (M11).
 - **CGI and FastCGI hosting**, for shared web hosts, aren't ready yet (M10).
+- **Dead background jobs** can be seen and retried only in dev mode's jobs
+  panel; on a server, they're in the engine log (a production console is
+  planned).
+- **Live updates go to one process.** Fourfold runs as one process per app,
+  so this matters only if you run several behind a load balancer (not
+  supported yet).
 - **Moving an app from SQLite to Postgres** gives it an empty database:
   copying its rows over is up to you.
 
@@ -765,7 +829,7 @@ Fourfold site behind a proxy, and expect to watch it.
 | `code/.deploy` | touch it to load changed code |
 | `private/config/app.ms` | the app's settings (the `config` map) |
 | `private/config/secrets.ms` | passwords and tokens (the `secrets` map) |
-| `private/state/state.db` | sessions, users, roles, sign-in links, rate-limit counters |
+| `private/state/state.db` | sessions, users, roles, sign-in links, rate-limit counters, the job queue and the schedule's state |
 | `private/state/secret.key` | signs CSRF tokens, form timestamps and puzzles; made if missing |
 | `private/state/logs/` | the engine log |
 | `private/state/backups/` | backups |
@@ -794,6 +858,7 @@ in the user guide's [Configuration](../user/user_guide.md#configuration-privatec
 | `outbound.enabled`, `allow`, `allowAddresses` | on, no cap, none | the app's outbound requests (see [Outbound requests and app mail](#outbound-requests-and-app-mail)) |
 | `outbound.perMinute`, `maxResponseKB`, `timeoutSeconds` | 120, 5120, 10 | their limits |
 | `mail.appMail`, `appPerHour` | on, 100 | the app's own mail (`mail.send`) |
+| `jobs.timeZone`, `workers`, `seconds`, `maxAttempts` | `"UTC"`, 2, 60, 5 | background jobs (see [Background jobs and live updates](#background-jobs-and-live-updates)) |
 | `db.url`, `passwordSecret`, `schema`, `pool` | SQLite | a Postgres database (see [A Postgres database](#a-postgres-database)) |
 | `deploy.migrationWaitSeconds`, `migrationBudgetSeconds` | 30, 600 | how long requests wait for migrations; how long one may run |
 | `deploy.clearAnonymousSessions` | `false` | sign out anonymous visitors after migrations |
