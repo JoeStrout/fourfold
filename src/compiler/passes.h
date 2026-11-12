@@ -77,6 +77,11 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
 void limitsPass(const CodeListing& listing, const CodeTree& code, DataEvaluator* evaluator, CompiledApp& app,
                 Diagnostics& diagnostics);
 
+// Where the app may send requests and mail, from code/outbound.ms
+// (evaluated by `evaluator`), into app.outbound.
+void outboundPass(const CodeListing& listing, const CodeTree& code, DataEvaluator* evaluator, CompiledApp& app,
+                  Diagnostics& diagnostics);
+
 // The page files' form declarations, onto their post handlers' routes; then
 // each template's forms checked against them (with validation attributes
 // added), and marked for a proof-of-work puzzle where their route has a

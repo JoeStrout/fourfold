@@ -20,6 +20,11 @@
 //   (and refused), and a button that resets the counters.
 // - /__dev/migrations (M8): which migrations are applied, pending, failed or
 //   changed, with "redo last" and "reset dev data".
+// - /__dev/outbound (M9): the outbound report (overview §6, Visibility): the
+//   hosts app code may reach and the addresses it may mail (with any "*"
+//   flagged), which secrets go to which hosts, the webhook endpoints, and
+//   the latest outbound requests and refusals. /__dev/outbound.json has the
+//   same as data.
 //
 // It's an Observer (compile events come in) and the engine's EngineHooks
 // (requests for /__dev/ and HTML responses go through it). The core never
@@ -66,9 +71,17 @@ public:
     };
     void setMigrationPanel(MigrationPanel panel) { migrations_ = std::move(panel); }
 
+    // The secrets app code can see, for the outbound report: [{name, use,
+    // hosts}] (never values), from the config serving now. Set before
+    // serving; may be null.
+    void setSecretSource(std::function<Datum()> secrets) { secrets_ = std::move(secrets); }
+
     // The access report's data: [{url, kind, access, sources, limits,
     // form}], and warnings.
     static Datum accessReport(const CompiledApp& app);
+    // The outbound report's data: {declared, allow, anyHost, mailTo,
+    // anyMail, secrets, webhooks, warnings}, with `secrets` as given.
+    static Datum outboundReport(const CompiledApp& app, Datum secrets);
     ~DevTools() override;
 
     DevTools(const DevTools&) = delete;
@@ -79,6 +92,7 @@ public:
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
     void scriptError(const ScriptError& error) override;
     void limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) override;
+    void outboundCall(const OutboundCall& call) override;
 
     // EngineHooks
     std::optional<HttpResponse> reserved(const HttpRequest& request, const AdmittedRequest& admitted) override;
@@ -100,6 +114,7 @@ private:
     std::function<std::shared_ptr<const CompiledApp>()> currentApp_;   // shared with tasks posted to the loop
     RateStore* rates_ = nullptr;
     MigrationPanel migrations_;
+    std::function<Datum()> secrets_;
     std::mutex messageMutex_;
     std::string migrationMessage_;   // the last action's outcome, shown once
 };

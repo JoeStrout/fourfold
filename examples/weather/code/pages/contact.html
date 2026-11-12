@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contact</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <h1>Contact the owner</h1>
+    <p class="flash">{{flash}}</p>
+    <form method="post" action="/contact/send">
+      <label>Your email <input type="email" name="from" required></label>
+      <label>Message <textarea name="message" rows="5" required></textarea></label>
+      <button>Send</button>
+    </form>
+    <p class="note">The message goes to the one address in <code>mailTo</code>
+      (code/outbound.ms), from <code>code/mail/contact.md</code>. In dev mode
+      it's printed in the terminal instead of sent. <a href="/">Back</a></p>
+  </main>
+</body>
+</html>

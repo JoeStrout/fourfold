@@ -229,13 +229,18 @@ std::map<std::string, Secret> readSecrets(const Datum& secrets, const std::strin
         secret.value = *v;
         if (auto hosts = s.strings("hosts")) {
             for (const std::string& h : *hosts) {
-                if (!isHostName(lowered(h))) {
-                    s.error("hosts", "has \"" + h + "\", which isn't a host name");
+                std::string host = lowered(h);
+                bool subdomains = host.compare(0, 2, "*.") == 0;
+                if (!isValidHostName(subdomains ? host.substr(2) : host) ||
+                    (subdomains && host.find('.', 2) == std::string::npos)) {
+                    s.error("hosts", "has \"" + h + "\", which isn't a host name (or \"*.example.com\" for its "
+                                     "subdomains)");
                 } else {
-                    secret.hosts.push_back(lowered(h));
+                    secret.hosts.push_back(host);
                 }
             }
         }
+        if (auto verify = s.boolean("verify")) secret.verify = *verify;
         s.finish();
         out.emplace(name, std::move(secret));
     }
@@ -251,9 +256,10 @@ std::optional<std::string> engineSecret(Section& s, const std::string& key, cons
         s.error(key, "names the secret \"" + *name + "\", which isn't in private/config/secrets.ms");
         return std::nullopt;
     }
-    if (!it->second.hosts.empty()) {
-        s.error(key, "names the secret \"" + *name + "\", which has \"hosts\" and so is visible to app code; "
-                     "an engine secret like this one must have no hosts");
+    if (!it->second.engineOnly()) {
+        s.error(key, "names the secret \"" + *name + "\", which has \"" +
+                         (it->second.hosts.empty() ? "verify" : "hosts") +
+                         "\" and so is visible to app code; an engine secret like this one must have neither");
         return std::nullopt;
     }
     return it->second.value;
@@ -341,6 +347,8 @@ void readMail(Section mail, AppConfig& c, Problems& problems) {
     PostmarkSettings p;
     std::optional<std::string> token = engineSecret(mail, "postmarkTokenSecret", c.secrets);
     if (auto stream = mail.string("postmarkStream")) p.messageStream = *stream;
+    if (auto appMail = mail.boolean("appMail")) c.mail.appMail = *appMail;
+    if (auto perHour = mail.number("appPerHour", 1, 1e6)) c.mail.appPerHour = static_cast<int>(*perHour);
     mail.finish();
 
     auto before = problems.errors;
@@ -457,6 +465,41 @@ void readProxy(Section proxy, AppConfig& c) {
         }
     }
     proxy.finish();
+}
+
+// config.outbound (overview §6): only ever tightens code/outbound.ms.
+void readOutbound(Section outbound, AppConfig& c) {
+    OutboundSettings& o = c.outbound;
+    if (auto enabled = outbound.boolean("enabled")) o.enabled = *enabled;
+    if (auto allow = outbound.strings("allow")) {
+        std::vector<HostRule> cap;
+        for (const std::string& a : *allow) {
+            std::string error;
+            if (auto rule = parseHostRule(a, error)) {
+                cap.push_back(*rule);
+            } else {
+                outbound.error("allow", error);
+            }
+        }
+        o.cap = std::move(cap);
+    }
+    if (auto addresses = outbound.strings("allowAddresses")) {
+        for (const std::string& a : *addresses) {
+            auto range = AddressRange::parse(a);
+            if (!range) {
+                outbound.error("allowAddresses", "has \"" + a + "\", which isn't an IP address or a range like "
+                                                 "\"10.0.0.0/24\"");
+            } else {
+                o.allowAddresses.push_back(*range);
+            }
+        }
+    }
+    if (auto perMinute = outbound.number("perMinute", 1, 100000)) o.perMinute = static_cast<int>(*perMinute);
+    if (auto kb = outbound.number("maxResponseKB", 1, 1024 * 1024)) o.maxResponseBytes = static_cast<size_t>(*kb * 1024);
+    if (auto seconds = outbound.number("timeoutSeconds", 0.1, 600)) {
+        o.timeout = std::chrono::milliseconds(static_cast<int64_t>(*seconds * 1000));
+    }
+    outbound.finish();
 }
 
 void readDatabase(Section db, AppConfig& c) {
@@ -583,6 +626,7 @@ ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     readMail(top.section("mail"), *c, problems);
     readLimits(top.section("limits"), *c);
     readProxy(top.section("proxy"), *c);
+    readOutbound(top.section("outbound"), *c);
     readDatabase(top.section("db"), *c);
     readDeploy(top.section("deploy"), *c);
     readBackups(top.section("backups"), *c);

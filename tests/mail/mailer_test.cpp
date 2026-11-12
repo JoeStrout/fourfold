@@ -255,3 +255,48 @@ TEST_CASE("mail: the dev log") {
     bad.to = "nope";
     CHECK_FALSE(mailer->send(bad));
 }
+
+TEST_CASE("mail: blind copies are envelope recipients only, in no header") {
+    MailMessage m = sample();
+    m.bcc = {"owner@example.com", "audit@example.com"};
+    CHECK(validateMessage(m));
+    std::string s = formatMessage(m, "Tue, 27 Oct 2026 14:05:00 +0000", "id@example.com");
+    CHECK_FALSE(contains(s, "owner@example.com"));
+    CHECK_FALSE(contains(s, "Bcc"));
+
+    Listener l;
+    auto server = std::async(std::launch::async, [&] { return fakeSmtp(l); });
+    SmtpSettings settings;
+    settings.host = "127.0.0.1";
+    settings.port = l.port;
+    settings.security = SmtpSettings::Security::None;
+    settings.timeout = std::chrono::seconds(5);
+    Status sent = makeSmtpMailer(settings)->send(m);
+    std::string log = server.get();
+    REQUIRE_MESSAGE(sent, sent.error().message);
+    CHECK(contains(log, "RCPT TO:<ann@example.com>"));
+    CHECK(contains(log, "RCPT TO:<owner@example.com>"));
+    CHECK(contains(log, "RCPT TO:<audit@example.com>"));
+    std::string data = log.substr(log.find("Subject:"));
+    CHECK_FALSE(contains(data, "owner@example.com"));   // the message itself never names them
+
+    Listener l2;
+    auto api = std::async(std::launch::async, [&] { return fakeHttp(l2, 200, "{\"ErrorCode\":0}"); });
+    PostmarkSettings postmark;
+    postmark.serverToken = "t";
+    postmark.apiUrl = "http://127.0.0.1:" + std::to_string(l2.port) + "/email";
+    sent = makePostmarkMailer(postmark)->send(m);
+    std::string request = api.get();
+    REQUIRE_MESSAGE(sent, sent.error().message);
+    CHECK(contains(request, "\"Bcc\":\"owner@example.com,audit@example.com\""));
+
+    std::string out;
+    auto log2 = makeLogMailer([&](const std::string& text) { out = text; });
+    REQUIRE(log2->send(m));
+    CHECK(contains(out, "Bcc (not in the message's headers): owner@example.com, audit@example.com"));
+
+    m.bcc = {"x@y.co\r\nTo: victim@example.com"};
+    CHECK_FALSE(validateMessage(m));
+    m.bcc = std::vector<std::string>(kMaxBcc + 1, "a@b.co");
+    CHECK_FALSE(validateMessage(m));
+}

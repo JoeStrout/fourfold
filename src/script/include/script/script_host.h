@@ -28,6 +28,7 @@
 #include "appdata/database.h"
 #include "base/datum.h"
 #include "compiledapp/compiled_app.h"
+#include "outbound/outbound_client.h"
 #include "partition/code_tree.h"
 #include "partition/config_dir.h"
 #include "partition/data_dir.h"
@@ -60,6 +61,10 @@ struct ScriptHostOptions {
     uint32_t sliceInstructions = 10'000;
     // Threads for work that would block the script thread.
     size_t workerThreads = 4;
+    // Threads for work that waits on other servers (outbound HTTP, mail),
+    // kept apart so a slow API can't hold up the rest. Calls past this many
+    // at once wait their turn (within their run's time budget).
+    size_t networkThreads = 8;
     // Registers the _test* intrinsics (for tests and sample apps).
     bool testIntrinsics = false;
     // Where `print` goes: the file that printed, and the text. Default: dropped.
@@ -115,6 +120,12 @@ struct RequestFacts {
     // The visitor's address (`req.ip`): the connection's, or, from a trusted
     // proxy, the one it forwarded.
     std::string ip;
+    // A webhook's request only (overview §6, Inbound webhooks): the body as
+    // sent (`req.rawBody`), for checking the caller's signature; and, if
+    // its Content-Type is JSON, the body parsed (`req.json`; null if it
+    // isn't valid JSON).
+    std::optional<std::string> rawBody;
+    std::optional<Datum> json;
 };
 
 // Counting for rate limits from code (`ratelimit`, overview §5): the
@@ -142,6 +153,35 @@ public:
     // revoking one they don't, is fine.
     virtual Status grant(const std::string& id, const std::string& role) = 0;
     virtual Status revoke(const std::string& id, const std::string& role) = 0;
+};
+
+// One recipient of app mail: one of the app's users (by id), or an address
+// code/outbound.ms allows.
+struct AppMailRecipient {
+    std::string userId;    // one of these two is set
+    std::string address;   // lowercased
+};
+
+// A message from the `mail` module (overview §6, Email from app code),
+// checked and rendered.
+struct AppMailMessage {
+    AppMailRecipient to;
+    std::vector<AppMailRecipient> bcc;   // blind copies: in no header
+    std::string subject;
+    std::string text;        // the template's Markdown
+    std::string html;        // a whole HTML document
+};
+
+// App mail, for the `mail` module: implemented by the engine, which finds a
+// user's address, counts the app's hourly limit, and sends through the
+// configured transport. Blocks (the network), so the module calls it on the
+// worker pool; it may be called from several threads at once.
+class AppMailer {
+public:
+    virtual ~AppMailer() = default;
+    // The address the message went to, or why it wasn't sent. Nothing is
+    // sent unless every recipient can be.
+    virtual Result<std::string> send(const AppMailMessage& message) = 0;
 };
 
 // The visitor's session as a run starts (overview §2, Session storage).
@@ -224,6 +264,12 @@ struct RunContext {
     const QuerySet* queries = nullptr;
     // Limits for this run instead of the host's (a migration's budget).
     std::optional<ScriptBudget> budget{};
+    // Outbound HTTP and secrets (the `http`, `secrets` and `hmac` modules,
+    // overview §6): the app's client, with the config's settings and
+    // secrets. Null: none of them (migrations, or no client).
+    std::shared_ptr<OutboundClient> outbound{};
+    // App mail (the `mail` module). Null: none.
+    std::shared_ptr<AppMailer> mailer{};
 };
 
 // A compile or runtime error in a script, located for the developer.
@@ -274,6 +320,7 @@ struct PageHandlers {
     bool render = false;
     std::vector<std::string> get;    // the keys of `get`, sorted
     std::vector<std::string> post;   // the keys of `post`, sorted
+    std::vector<std::string> webhook;   // the keys of `webhook`, sorted
     // The file, or a code/lib/ file it imports, mentions `session`: its
     // runs get the session (loaded and locked). Requests to
     // pages that don't never wait for a session's lock.

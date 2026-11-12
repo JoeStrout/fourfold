@@ -57,9 +57,10 @@ RouteDecision route(const AdmittedRequest& request, const CompiledApp& app) {
     if (entry->kind == RouteKind::Handler) {
         if (isGet(request.method) && entry->get) handler = &*entry->get;
         if (request.method == "POST" && entry->post) handler = &*entry->post;
+        if (request.method == "POST" && entry->webhook) handler = &*entry->webhook;
         allowed = handler != nullptr;
         decision.allow = entry->get ? "GET, HEAD" : "";
-        if (entry->post) decision.allow += decision.allow.empty() ? "POST" : ", POST";
+        if (entry->post || entry->webhook) decision.allow += decision.allow.empty() ? "POST" : ", POST";
     } else {
         allowed = isGet(request.method);
         if (entry->render) handler = &*entry->render;

@@ -217,11 +217,16 @@ void PolicyGate::checkChallenge(const RouteEntry& route, const GateFacts& facts,
 GateDecision PolicyGate::check(const RouteEntry& route, const GateFacts& facts, RateStore* rates) const {
     GateDecision d;
     auto open = [&] { return d.denial == GateDecision::Denial::None; };
+    // A webhook (overview §6) is called by another server, not from a page
+    // the engine rendered, so it has no CSRF token, timing token or puzzle;
+    // its handler checks the caller's signature instead. Access and rate
+    // limits still apply.
+    bool webhook = route.webhook && facts.method == "POST";
     checkAccess(route, facts, d);
-    if (open()) checkCsrf(facts, d);
+    if (open() && !webhook) checkCsrf(facts, d);
     if (open()) checkRates(route, facts, rates, d);
-    if (open()) checkTiming(route, facts, d);
-    if (open()) checkChallenge(route, facts, rates, d);
+    if (open() && !webhook) checkTiming(route, facts, d);
+    if (open() && !webhook) checkChallenge(route, facts, rates, d);
     if (open()) d.approval = GateApproval();
     return d;
 }

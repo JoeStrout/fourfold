@@ -18,7 +18,9 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
 
     for (const CodeEntry& entry : listing.files) {
         if (entry.path.extension() != ".ms") continue;
-        if (entry.path.str() == "access.ms" || entry.path.str() == "limits.ms") continue;
+        if (entry.path.str() == "access.ms" || entry.path.str() == "limits.ms" || entry.path.str() == "outbound.ms") {
+            continue;   // declarations, evaluated as data by their passes
+        }
         if (entry.path.str() == "seed.ms" || entry.path.isWithin(migrations)) continue;   // the database pass's
         std::string name = codeFileName(entry.path);
         std::vector<CodeFile>* into = nullptr;

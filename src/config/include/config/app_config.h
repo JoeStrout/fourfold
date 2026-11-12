@@ -24,6 +24,7 @@
 #include "appdata/database.h"
 #include "compiledapp/compiled_app.h"
 #include "mail/mailer.h"
+#include "outbound/outbound_client.h"
 #include "partition/config_dir.h"
 #include "platform/address.h"
 #include "script/script_host.h"
@@ -55,6 +56,10 @@ struct MailConfig {
     enum class Transport { None, Log, Smtp, Postmark };
     Transport transport = Transport::None;
     std::string from;   // the sender, "Name <noreply@example.com>"
+    // App mail (the `mail` module): on unless turned off, and limited to
+    // this many messages an hour.
+    bool appMail = true;
+    int appPerHour = 100;
 };
 
 // Rate limits and spam checks (overview §5, Rate limits and spam): the
@@ -109,14 +114,6 @@ struct BackupConfig {
     size_t keep = 10;
 };
 
-// The secrets from secrets.ms (overview §10, "Secrets: a separate file").
-// A secret with no hosts is engine-only (SMTP passwords and the like); one
-// with hosts will be usable by app code, only toward those hosts (M9).
-struct Secret {
-    std::string value;
-    std::vector<std::string> hosts;
-};
-
 struct AppConfig {
     ConfigMode mode = ConfigMode::Dev;
     SiteConfig site;
@@ -129,10 +126,12 @@ struct AppConfig {
     DatabaseConfig db;
     DeployConfig deploy;
     BackupConfig backups;
+    // Outbound HTTP (config.outbound): tightens code/outbound.ms.
+    OutboundSettings outbound;
     // Sends mail as configured; null if the transport is None. Thread-safe.
     std::shared_ptr<Mailer> mailer;
-    // By name. Only `config` reads the values.
-    std::map<std::string, Secret> secrets;
+    // By name. Only `config` and the OutboundClient read the values.
+    SecretMap secrets;
 };
 
 struct ConfigLoad {

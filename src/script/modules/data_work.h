@@ -26,6 +26,9 @@ AsyncResult fail(const Error& e);
 // Parks the run and does `work` on the worker pool.
 MiniScript::IntrinsicResult startWork(MiniScript::Context& ctx, Run& run, std::function<AsyncResult()> work);
 
+// The same, on the network pool: for work that waits on other servers.
+MiniScript::IntrinsicResult startNetworkWork(MiniScript::Context& ctx, Run& run, std::function<AsyncResult()> work);
+
 // Parks the run, takes the lock `lockKey`, then does `work` on the worker
 // pool and releases the lock. The lock is released even if the run has
 // ended meanwhile.

@@ -39,9 +39,14 @@ else()
 endif()
 find_package(CURL REQUIRED)
 fourfold_component(mail DEPS base platform LIBS CURL::libcurl)   # sending email: SMTP, Postmark, or a dev log
-fourfold_component(script DEPS base partition platform template markdown compiledapp appdata
+fourfold_component(outbound DEPS base platform compiledapp LIBS CURL::libcurl)   # outbound HTTP, secrets (overview §6)
+if(TARGET test_outbound)
+    find_package(ZLIB REQUIRED)   # the tests make compressed responses
+    target_link_libraries(test_outbound PRIVATE ZLIB::ZLIB)
+endif()
+fourfold_component(script DEPS base partition platform template markdown compiledapp appdata outbound
     LIBS fourfold::ms2)                                 # the script thread; the only user of MS2
-fourfold_component(config DEPS base partition compiledapp appdata script state mail)   # private/config/ → AppConfig
+fourfold_component(config DEPS base partition compiledapp appdata script state mail outbound)   # private/config/ → AppConfig
 fourfold_component(compiler DEPS base partition template markdown compiledapp script)
 
 # --- Engine ---

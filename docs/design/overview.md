@@ -1156,6 +1156,17 @@ end function
 - The dev-mode request inspector shows each outbound call made during a request.
 - A dev-mode **outbound report**, alongside the access report, lists allowed hosts, which secrets are tied to which hosts, any `"*"`, and all `webhook` endpoints.
 
+### Email from app code (decided 2026-11-12, M9)
+
+`mail.send(to, subject, template, fields)` sends one message. `to` is a user's `id` (the engine looks up the address) or an address that `code/outbound.ms` allows with `mailTo = ["owner@example.com", "*@staff.example.com"]`; `"*"` allows any address and is flagged like `allow = ["*"]`. The body is a Markdown template in `code/mail/`, sent as text (its Markdown) and HTML; the subject is one line of text. Blind copies (decided 2026-11-12, with the user): `{"bcc": ...}` in a fifth `options` argument, up to 10 recipients by the same rules as `to`, in no header; each recipient counts against the hourly limit, and if any is refused nothing is sent. No CC, since it would show users' addresses to each other. There are no raw headers anywhere, so nothing a visitor types can add a header or a recipient (PHP's `mail()` hole). A per-app hourly limit (`config.mail.appPerHour`, default 100), and `config.mail.appMail = false` turns it off.
+
+### As built in M9
+
+- **`http`**: `get`, `head`, `delete`, `post`, `put`, `patch` and `request`; a response is `{status, headers, body, raw, json}` (`raw` is `RawData` when the body isn't text). Any status is a response; only a refused or failed request is an error value. Requests run on their own worker pool, so slow APIs can't hold up session and database work.
+- **Addresses are checked as they're connected to**, through libcurl's socket hook, rather than by resolving first and pinning: there's no gap between check and connect, and a name with both public and private addresses is only ever connected to at the public ones. An IPv6 address that carries an IPv4 one (mapped, compatible, NAT64's `64:ff9b::/96`, 6to4) is judged by the IPv4 address inside. No proxy from the environment, no `.netrc`.
+- **Secrets**: besides `hosts`, a secret may have `"verify": true`, for checking webhook signatures with `hmac.verify(algorithm, secret, message, signature)` (SHA-256 only so far; hex or base64). App code never gets an HMAC it can see. A secret in a URL can go only in its path or query, percent-encoded. A redirect to another host drops `Authorization` and `Cookie` headers that carry no secret, and fails if any header carries one.
+- **Webhooks** get `req.rawBody` and, for JSON, `req.json`; their routes skip CSRF, the timing check and puzzles, but not access rules or rate limits. A `post.x` and `webhook.x` of the same name are a compile error.
+
 ---
 
 ## 7. Partial page updates and server push
@@ -1400,7 +1411,7 @@ secrets.dbPassword   = {"value": "…"}
 ```
 
 - Keeping secrets separate means `app.ms` can be shared, reviewed, or checked into version control, while `secrets.ms` never is. `app.ms` refers to secrets by name only.
-- **`hosts` decides visibility.** A secret with `hosts` appears in the app's `secrets` map as a host-bound handle (see §6). A secret with no `hosts` (or an empty list) is **engine-only**: used for things like SMTP and database credentials, and never visible to MiniScript code at all.
+- **`hosts` decides visibility.** A secret with `hosts` appears in the app's `secrets` map as a host-bound handle (see §6). A secret with no `hosts` (or an empty list) is **engine-only**: used for things like SMTP and database credentials, and never visible to MiniScript code at all. *(M9: a secret with `"verify": true` is also visible, as a handle that can only check signatures; see §6, As built in M9.)*
 - This fails safe: forgetting `hosts` makes a secret unavailable to the app, not exposed. In dev mode, the resulting error explains why ("secret `weatherKey` exists but has no `hosts`, so app code can't use it"), and the generated `secrets.ms` template has a comment stating the rule.
 
 ### Defaults for everything
@@ -1442,7 +1453,7 @@ All the settings the design has called for so far:
 - **Serving on the open internet** (TLS, proxies, connection limits, security headers, CSP). Designed in §8, [Serving on the open internet](#serving-on-the-open-internet); remaining questions are listed there.
 - **Schema changes and migrations.** Designed in §3, [Schema changes and migrations](#schema-changes-and-migrations); remaining questions are listed there.
 - **Forms and input validation.** Designed in §4, [Forms and validation](#forms-and-validation); remaining questions are listed there.
-- **Email from app code** (contact forms, notifications). A `mail` module taking structured fields, never raw headers (PHP's `mail()` header injection is the classic hole), with bodies from templates. A per-app send rate limit, and perhaps a recipient restriction (signed-in users only, or an allowlist) in the "can only tighten" style of `outbound.ms`.
+- **Email from app code.** Decided in M9: see §6, [Email from app code](#email-from-app-code-decided-2026-11-12-m9).
 - **Abuse of app endpoints** (spam). Designed in §5, [Rate limits and spam](#rate-limits-and-spam); remaining questions are listed there.
 - **Testing.** A `fourfold test` command that calls handlers with synthetic requests and fake users against a throwaway `data/`. The per-request model makes this easy: a handler is nearly a pure function of the request, `session`, and `data`.
 - **Non-browser clients.** `json()` exists, but CSRF and cookie sessions assume a browser. Mobile apps, scripts, and integrations need API tokens or keys, and CORS rules. Decide whether this is v1 or explicitly later.

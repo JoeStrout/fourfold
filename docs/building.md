@@ -28,6 +28,7 @@ To run a sample app:
 ./build/dev/bin/fourfold dev examples/markdown-site   # a site made only of .md files, with code (M4, M6.1)
 ./build/dev/bin/fourfold dev examples/clubhouse       # sign-in and access rules (M6)
 ./build/dev/bin/fourfold dev examples/tasks           # a database, queries and migrations (M8)
+./build/dev/bin/fourfold dev examples/weather         # outbound HTTP, a webhook and app mail (M9)
 ```
 
 `fourfold dev` watches `code/`: save a file, and open pages reload (or, for a stylesheet, swap it in place). Compile errors show as an overlay on open pages, while the last version that compiled keeps serving. Touching `code/.deploy` recompiles at once.

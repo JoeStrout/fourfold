@@ -200,3 +200,51 @@ TEST_CASE("config: limits and trusted proxies") {
         CHECK_FALSE(f.load(ConfigMode::Serve).ok());
     }
 }
+
+TEST_CASE("config: outbound, secrets for app code, and app mail (M9)") {
+    Fixture f;
+    f.write("secrets.ms", "secrets = {}\n"
+                          "secrets.weatherKey = {\"value\": \"k\", \"hosts\": [\"API.weather.gov\", \"*.stripe.com\"]}\n"
+                          "secrets.hookKey = {\"value\": \"h\", \"verify\": true}\n"
+                          "secrets.smtpPassword = {\"value\": \"p\"}\n");
+    f.write("app.ms", "config = {}\n"
+                      "config.outbound = {\"enabled\": true, \"allow\": [\"api.weather.gov\"], "
+                      "\"allowAddresses\": [\"10.1.2.0/24\"], \"perMinute\": 30, \"maxResponseKB\": 512, "
+                      "\"timeoutSeconds\": 4}\n"
+                      "config.mail = {\"appMail\": true, \"appPerHour\": 20}\n");
+    ConfigLoad load = f.load();
+    REQUIRE_MESSAGE(load.ok(), all(load));
+    const AppConfig& c = *load.config;
+    CHECK(c.secrets.at("weatherKey").hosts == std::vector<std::string>{"api.weather.gov", "*.stripe.com"});
+    CHECK(c.secrets.at("weatherKey").allowsHost("api.stripe.com"));
+    CHECK(!c.secrets.at("weatherKey").allowsHost("stripe.com"));
+    CHECK(c.secrets.at("hookKey").verify);
+    CHECK(c.secrets.at("smtpPassword").engineOnly());
+    REQUIRE(c.outbound.cap);
+    CHECK(c.outbound.cap->size() == 1);
+    CHECK(c.outbound.allowAddresses.size() == 1);
+    CHECK(c.outbound.perMinute == 30);
+    CHECK(c.outbound.maxResponseBytes == 512u * 1024);
+    CHECK(c.outbound.timeout == std::chrono::milliseconds(4000));
+    CHECK(c.mail.appPerHour == 20);
+
+    // A secret app code can use can't also be an engine secret.
+    f.write("app.ms", "config = {}\nconfig.mail = {\"transport\": \"smtp\", \"from\": \"a@b.co\", "
+                      "\"smtpHost\": \"smtp.b.co\", \"smtpUser\": \"u\", \"passwordSecret\": \"hookKey\"}\n");
+    load = f.load();
+    CHECK(!load.ok());
+    CHECK(contains(all(load), "visible to app code"));
+
+    for (const char* bad : {"config.outbound = {\"allow\": [\"https://x.com/path\"]}\n",
+                            "config.outbound = {\"allowAddresses\": [\"not an address\"]}\n",
+                            "config.outbound = {\"perMinute\": 0}\n",
+                            "config.outbound = {\"widen\": true}\n"}) {
+        f.write("app.ms", std::string("config = {}\n") + bad);
+        load = f.load();
+        CHECK_MESSAGE(!load.ok(), bad);
+    }
+    f.write("app.ms", "config = {}\n");
+    f.write("secrets.ms", "secrets = {}\nsecrets.x = {\"value\": \"v\", \"hosts\": [\"*.com\"]}\n");
+    load = f.load();
+    CHECK(!load.ok());
+}

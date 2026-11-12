@@ -59,6 +59,9 @@ public:
     // Dev mode: the request inspector).
     virtual void limitsCounted(const std::string& /*request*/,
                                const std::vector<std::pair<std::string, double>>& /*counts*/) {}
+    // App code sent (or tried to send) a request to another server
+    // (overview §6, Visibility). Never holds a secret's value.
+    virtual void outboundCall(const OutboundCall&) {}
 };
 
 // Passes each event on to several observers, in order.
@@ -72,6 +75,7 @@ public:
     void scriptError(const ScriptError& error) override;
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
     void limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) override;
+    void outboundCall(const OutboundCall& call) override;
 
 private:
     std::vector<Observer*> observers_;   // fixed once events start

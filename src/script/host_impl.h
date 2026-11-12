@@ -59,6 +59,8 @@ struct Run {
     std::vector<RenderWarning> warnings;      // from frag(), so far
     ScriptHost::Done done;
     EventLoop::TimerId deadline = 0;
+    // When the run was scheduled, for its wall-clock budget.
+    std::chrono::steady_clock::time_point started{};
 
     // An async intrinsic's result, set just before the run resumes.
     std::optional<AsyncResult> async;
@@ -93,6 +95,9 @@ struct ScriptHost::Impl {
     ScriptHostOptions options;
     std::unique_ptr<EventLoop> loop;       // the script thread's loop (post() is thread-safe)
     std::unique_ptr<WorkerPool> workers;   // submit() is thread-safe
+    // For work that waits on other servers (http, mail), so a slow API
+    // can't hold up the session, database and file work in `workers`.
+    std::unique_ptr<WorkerPool> network;
     std::thread thread;
 
     // Script thread only.
@@ -109,6 +114,8 @@ struct ScriptHost::Impl {
                         ScriptHost::Done done);
     // The budget for `run`: its own, or the host's.
     const ScriptBudget& budgetOf(const Run& run) const;
+    // What's left of the run's wall-clock budget.
+    std::chrono::milliseconds timeLeft(const Run& run) const;
     // Schedules a prepared run (a request or a discovery run), with its
     // wall-clock deadline.
     void schedule(std::unique_ptr<Run> run);

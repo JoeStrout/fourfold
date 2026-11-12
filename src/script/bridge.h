@@ -56,6 +56,18 @@ MiniScript::Value makeHtmlHandle(Html html);
 // The handle's HTML, or null if `v` isn't one of these handles.
 const Html* htmlHandleOf(MiniScript::Value v);
 
+// A secret from secrets.ms, as app code holds it (overview §6, Secrets): a
+// handle with the secret's name only. Its value never reaches the script
+// thread; the OutboundClient puts it in as a request goes out. A secret
+// handle prints as "handle", and toDatum and template fields refuse it.
+struct SecretHandle {
+    std::string name;
+};
+
+MiniScript::Value makeSecretHandle(std::string name);
+// The handle's contents, or null if `v` isn't a secret handle.
+const SecretHandle* secretHandleOf(MiniScript::Value v);
+
 // A template's fields from a MiniScript map (or null, for no fields): the
 // script side of FieldSource (Arch §5 template). Numbers are formatted the
 // MiniScript way; Html handles are rendered HTML; in a <script>, values go

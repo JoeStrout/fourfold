@@ -4,6 +4,7 @@
 #include <cmath>
 #include <unordered_set>
 
+#include "base/utf8.h"
 #include "host_impl.h"
 #include "modules/raw_data.h"
 #include "template/template.h"
@@ -41,6 +42,18 @@ std::unordered_set<const Html*>& liveHtml() {
 void finalizeHtmlHandle(void* p) {
     auto* h = static_cast<Html*>(p);
     liveHtml().erase(h);
+    delete h;
+}
+
+// The same, for secret handles.
+std::unordered_set<const SecretHandle*>& liveSecrets() {
+    static std::unordered_set<const SecretHandle*> live;
+    return live;
+}
+
+void finalizeSecretHandle(void* p) {
+    auto* h = static_cast<SecretHandle*>(p);
+    liveSecrets().erase(h);
     delete h;
 }
 
@@ -97,7 +110,8 @@ std::optional<Datum> toDatumAt(Value v, std::string& error, int depth) {
     } else if (v.IsError()) {
         error = "contains an error value";
     } else {
-        error = "contains a handle (e.g. rendered HTML or a file)";
+        error = secretHandleOf(v) ? "contains a secret (a secret can only be sent, by http, to its own hosts)"
+                                  : "contains a handle (e.g. rendered HTML or a file)";
     }
     return std::nullopt;
 }
@@ -176,6 +190,18 @@ const Html* htmlHandleOf(Value v) {
     return liveHtml().count(h) ? h : nullptr;
 }
 
+Value makeSecretHandle(std::string name) {
+    auto* h = new SecretHandle{std::move(name)};
+    liveSecrets().insert(h);
+    return Value::NewHandle(h, finalizeSecretHandle);
+}
+
+const SecretHandle* secretHandleOf(Value v) {
+    if (!v.IsHandle()) return nullptr;
+    auto* h = static_cast<const SecretHandle*>(v.HandlePtr());
+    return liveSecrets().count(h) ? h : nullptr;
+}
+
 namespace {
 
 // A value as a field value (not yet in a <script>).
@@ -195,6 +221,7 @@ FieldValue fieldFrom(Value v, bool forScript) {
     if (v.IsList()) return FieldValue::composite("a list");
     if (v.IsFuncRef()) return FieldValue::error("is a function (did you mean to call it?)");
     if (v.IsError()) return FieldValue::error("is an error value");
+    if (secretHandleOf(v)) return FieldValue::error("is a secret, which a page can never show");
     return FieldValue::error("is a handle that isn't rendered HTML");
 }
 
@@ -268,6 +295,17 @@ Value makeRequestValue(Run& run) {
     req.MapSet("htmx", htmx ? Value::one : Value::zero);
     req.MapSet("user", facts.user ? userValue(*facts.user) : Value::Null);
     req.MapSet("format", toValue(facts.format));
+    if (facts.rawBody) {
+        // Text as a string; bytes a string can't hold exactly (NUL, or
+        // anything that isn't UTF-8) as RawData, so a signature over them
+        // can still be checked.
+        const std::string& body = *facts.rawBody;
+        bool text = isValidUtf8(body) && body.find('\0') == std::string::npos;
+        Value raw = text ? toValue(body) : newRawData(run, body);
+        if (raw.IsError()) return raw;
+        req.MapSet("rawBody", raw);
+        req.MapSet("json", facts.json ? toValue(*facts.json) : Value::Null);
+    }
     req.Freeze();   // deep: handlers can read req, never change it
     return req;
 }

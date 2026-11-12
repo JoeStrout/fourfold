@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "compiledapp/outbound_policy.h"
 #include "compiledapp/sql.h"
 #include "partition/paths.h"
 #include "template/template.h"
@@ -47,10 +48,11 @@ enum class RouteKind {
 const char* routeKindName(RouteKind kind);
 
 // A function in a page's .ms file that a URL can reach (overview §4,
-// Handler model): the global `render`, or a function in the `get` or `post`
-// map.
+// Handler model): the global `render`, or a function in the `get`, `post`
+// or `webhook` map. A webhook (overview §6, Inbound webhooks) is a POST
+// handler without CSRF protection, for callers that aren't browsers.
 struct HandlerRef {
-    enum class Kind { Render, Get, Post };
+    enum class Kind { Render, Get, Post, Webhook };
 
     Kind kind = Kind::Render;
     RelPath source;      // "pages/guestbook.ms"
@@ -170,6 +172,9 @@ struct RouteEntry {
     std::optional<HandlerRef> render = std::nullopt;   // Page: its .ms file's render, if any
     std::optional<HandlerRef> get = std::nullopt;      // Handler: get.x, if any
     std::optional<HandlerRef> post = std::nullopt;     // Handler: post.x, if any
+    // Handler: webhook.x, if any (never with post.x): POST without CSRF
+    // protection, with the body as `req.rawBody`.
+    std::optional<HandlerRef> webhook = std::nullopt;
     // The route's code uses the session (its .ms file, or a lib it imports,
     // names `session` or `flash`), or its page has a {{flash}} field: the
     // session is loaded, and locked while its code runs.
@@ -347,6 +352,11 @@ struct CompiledApp {
     // code/seed.ms (overview §3, Dev mode), if present: run in dev mode after
     // "reset dev data".
     std::optional<RelPath> seed;
+    // code/outbound.ms: where `http` may send requests, and `mail` mail.
+    OutboundPolicy outbound;
+    // Mail templates (code/mail/welcome.md), by name ("welcome"): Markdown
+    // templates, sent as text (their Markdown) and HTML.
+    std::map<std::string, CompiledTemplate> mailTemplates;
     // The app has queries or database migrations, so it uses a database.
     bool usesDatabase() const;
     // Null if the app has no .ms files. Shared by every request on this

@@ -5,6 +5,7 @@
 //   frags/**/*.md     Markdown fragments (Dynamic Markdown, with fields)
 //   frags/layout/markdown.html   the wrapper for Markdown pages: a whole document
 //   frags/auth/layout.html       the wrapper for the engine's sign-in pages: a whole document
+//   mail/**/*.md      mail templates, by name ("welcome"), for the mail module
 //   pages/**/*.html   pages
 //
 // Fragments' includes are resolved first, then the pages'.
@@ -98,6 +99,31 @@ void templatesPass(const CodeListing& listing, const CodeTree& code, CompiledApp
     if (authLayout) {
         report(resolveIncludes(*authLayout, fragments), diagnostics);
         app.authLayout = std::move(authLayout);
+    }
+
+    // Mail templates (code/mail/welcome.md): Dynamic Markdown, like a
+    // Markdown fragment, sent as text (the Markdown) and HTML.
+    const RelPath mail = RelPath::parse("mail").value();
+    for (const CodeEntry& entry : listing.files) {
+        if (!entry.path.isWithin(mail)) continue;
+        std::string fileName = codeFileName(entry.path);
+        if (lowerExtension(entry.path) != ".md") {
+            diagnostics.warning(fileName, "only .md files are mail templates; ignored");
+            continue;
+        }
+        auto file = code.read(entry.path);
+        if (!file) {
+            diagnostics.error(fileName, file.error().message);
+            continue;
+        }
+        ParsedTemplate parsed = parseMarkdownTemplate(file.value(), TemplateKind::Fragment);
+        report(parsed.errors, diagnostics);
+        if (!parsed.ok()) continue;
+        std::vector<TemplateProblem> problems = resolveIncludes(parsed.compiled, fragments);
+        report(problems, diagnostics);
+        std::string name = entry.path.str().substr(5);   // past "mail/"
+        name.resize(name.size() - 3);                     // without ".md"
+        if (problems.empty()) app.mailTemplates.emplace(name, std::move(parsed.compiled));
     }
 
     for (const CodeEntry& entry : listing.files) {

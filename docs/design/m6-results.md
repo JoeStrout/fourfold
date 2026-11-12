@@ -9,7 +9,7 @@
 | Can declarations be evaluated at compile time, separately from the file's runtime behavior (R10)? | **Yes; R10 retired.** `code/access.ms` and the config files run in a restricted VM (`DataEvaluator`); a page's `access =` is read from its top level during the compile-time discovery run, which has no data, session or files. Only inert values come out. |
 | Is every route gated, static files included? | **Yes.** The policy gate now runs for every route kind (pages, handlers, Markdown, static files), not only handlers, before anything is served. |
 | Does access resolve per route, at compile time? | **Yes.** Each `RouteEntry` carries its effective `AccessLevel` and the rules that produced it; the request path does a lookup, never pattern matching. |
-| Does magic-link sign-in work end to end? | **Yes, against an SMTP server in the test process.** Against a real mail server: to be checked by hand (see below). |
+| Does magic-link sign-in work end to end? | **Yes,** against an SMTP server in the test process, and by hand against a real one (DreamHost SMTP, 2026-11-12; see below). |
 | Does an invalid config fail safe? | **Yes.** Unknown settings are errors; an invalid reload keeps the previous config; `fourfold serve` won't start with an invalid one. |
 
 ---
@@ -68,9 +68,9 @@
 
 All 21 suites pass with the `dev`, `ci` and `asan` presets.
 
-## Still to check by hand
+## Checked by hand
 
-**Sign-in against a real mail server** (the last exit criterion). The tests can't reach one from the sandbox they run in. (Setting mail up is covered in the [admin guide](../admin/admin_guide.md#mail-for-sign-in).) To check:
+**Sign-in against a real mail server** (the last exit criterion), which the tests can't reach. Checked 2026-11-12 with DreamHost's SMTP server (STARTTLS on port 587, with a login): the link arrived and signed in. (Setting mail up is covered in the [admin guide](../admin/admin_guide.md#mail-for-sign-in).) To repeat it:
 
 1. In `examples/clubhouse/private/config/secrets.ms`: `secrets = {"smtpPassword": {"value": "<password>"}}` (or a Postmark server token).
 2. In `app.ms`, uncomment and fill in `config.mail` (SMTP or Postmark), with a `from` address the server may send as.

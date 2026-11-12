@@ -153,8 +153,14 @@ const ScriptBudget& ScriptHost::Impl::budgetOf(const Run& run) const {
     return run.context.budget ? *run.context.budget : options.budget;
 }
 
+std::chrono::milliseconds ScriptHost::Impl::timeLeft(const Run& run) const {
+    auto used = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - run.started);
+    return std::max(std::chrono::milliseconds(0), budgetOf(run).wallClock - used);
+}
+
 void ScriptHost::Impl::schedule(std::unique_ptr<Run> run) {
     run->id = nextRunId++;
+    run->started = std::chrono::steady_clock::now();
     uint64_t id = run->id;
     std::chrono::milliseconds wallClock = budgetOf(*run).wallClock;
     run->deadline = loop->addTimer(wallClock, [this, id, wallClock] {
@@ -320,6 +326,7 @@ Result<std::unique_ptr<ScriptHost>> ScriptHost::create(ScriptHostOptions options
     if (impl->options.sliceInstructions == 0) impl->options.sliceInstructions = 1;
     impl->loop = std::move(loop).value();
     impl->workers = std::make_unique<WorkerPool>(impl->options.workerThreads);
+    impl->network = std::make_unique<WorkerPool>(impl->options.networkThreads);
 
     Impl* p = impl.get();
     std::promise<void> started;
@@ -348,6 +355,7 @@ ScriptHost::ScriptHost(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 ScriptHost::~ScriptHost() {
     impl_->loop->stop();
     impl_->thread.join();
+    impl_->network.reset();   // as workers: they may still post to the loop
     impl_->workers.reset();   // workers may still post to the loop, which outlives them
     impl_.reset();
     g_hostExists = false;

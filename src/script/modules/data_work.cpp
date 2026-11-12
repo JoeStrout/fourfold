@@ -38,6 +38,15 @@ IntrinsicResult startWork(Context& ctx, Run& run, std::function<AsyncResult()> w
     return IntrinsicResult(Value(kWorking), false);
 }
 
+IntrinsicResult startNetworkWork(Context& ctx, Run& run, std::function<AsyncResult()> work) {
+    ScriptHost::Impl* host = run.host;
+    uint64_t id = run.id;
+    host->park(run);
+    host->network->submit([host, id, work = std::move(work)] { host->complete(id, work()); });
+    ctx.vm.yielding = true;
+    return IntrinsicResult(Value(kWorking), false);
+}
+
 IntrinsicResult startLockedWork(Context& ctx, Run& run, DataFiles* data, std::string lockKey,
                                 std::function<AsyncResult()> work) {
     ScriptHost::Impl* host = run.host;

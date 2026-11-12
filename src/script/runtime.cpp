@@ -354,6 +354,8 @@ void initMiniScriptRuntime(const ScriptHostOptions& options) {
     addForms();
     addRateLimit();
     addDb();
+    addHttp();
+    addMail();
     addTestSlowWork();
     addTestWithValue();
     g_callbackStub = compileCallbackStub();
@@ -383,6 +385,7 @@ void prepareInterpreter(Run& run, const MiniScript::List<MiniScript::FuncDef>& p
     // The engine creates these before the file runs (overview §4).
     run.interp.SetGlobalValue("get", Value::make_map(4));
     run.interp.SetGlobalValue("post", Value::make_map(4));
+    run.interp.SetGlobalValue("webhook", Value::make_map(4));
     run.interp.SetGlobalValue("form", Value::make_map(4));
 }
 

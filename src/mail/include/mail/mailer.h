@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "base/result.h"
 
@@ -28,14 +29,20 @@ struct MailMessage {
     std::string subject;
     std::string text;      // the plain-text body
     std::optional<std::string> html;   // an HTML alternative, if any
+    // Blind copies: sent the same message, and named in no header, so no
+    // recipient sees them (or each other). At most kMaxBcc.
+    std::vector<std::string> bcc;
 };
+
+constexpr size_t kMaxBcc = 10;
 
 // A plain address: local@domain, printable ASCII, no spaces, quotes, angle
 // brackets or line breaks, at most 254 bytes.
 bool isValidEmailAddress(std::string_view address);
 
 // Checks a message before it's sent: valid addresses (`from` may have a
-// display name), and no line breaks or control characters in the subject.
+// display name; at most kMaxBcc blind copies), and no line breaks or
+// control characters in the subject.
 Status validateMessage(const MailMessage& message);
 
 class Mailer {
@@ -72,7 +79,7 @@ std::unique_ptr<Mailer> makePostmarkMailer(PostmarkSettings settings);
 // the engine log), and sends nothing.
 std::unique_ptr<Mailer> makeLogMailer(std::function<void(const std::string&)> out);
 
-// The message as sent over SMTP: headers, then the body as quoted-printable
+// The message as sent over SMTP: headers (never a Bcc), then the body as quoted-printable
 // (multipart/alternative with an HTML part), with CRLF line ends.
 // `date` is RFC 5322's, e.g. "Tue, 27 Oct 2026 14:05:00 +0000".
 std::string formatMessage(const MailMessage& message, const std::string& date, const std::string& messageId);

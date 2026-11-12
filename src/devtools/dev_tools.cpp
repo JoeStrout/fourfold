@@ -136,6 +136,8 @@ struct DevTools::Hub : std::enable_shared_from_this<Hub> {
     // The latest requests counted against rate limits, and refusals, newest
     // last (for /__dev/limits).
     std::vector<std::string> recentLimits;
+    // The latest outbound requests, newest last (for /__dev/outbound).
+    std::vector<std::string> recentOutbound;
 
     Datum warningList() const {
         Datum::ListItems list;
@@ -275,6 +277,20 @@ void DevTools::scriptError(const ScriptError& error) {
     if (hub_->recentLimits.size() > kRecentLimits) hub_->recentLimits.erase(hub_->recentLimits.begin());
 }
 
+void DevTools::outboundCall(const OutboundCall& call) {
+    std::string line = call.method + " " + call.url;
+    if (call.refused.empty()) {
+        line += " → " + std::to_string(call.status) + " (" + std::to_string(call.durationMs) + " ms, " +
+                std::to_string(call.bytes) + " bytes" +
+                (call.redirects ? ", " + std::to_string(call.redirects) + " redirects" : "") + ")";
+    } else {
+        line += " → refused: " + call.refused;
+    }
+    std::lock_guard<std::mutex> lock(hub_->mutex);
+    hub_->recentOutbound.push_back(line);
+    if (hub_->recentOutbound.size() > kRecentLimits) hub_->recentOutbound.erase(hub_->recentOutbound.begin());
+}
+
 void DevTools::limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) {
     std::string line = request + ":";
     for (const auto& [limit, count] : counts) {
@@ -320,6 +336,34 @@ Datum DevTools::accessReport(const CompiledApp& app) {
     }
     return Datum::map({{"generation", num(static_cast<double>(app.generation))},
                        {"routes", Datum::list(std::move(routes))},
+                       {"warnings", Datum::list(std::move(warnings))}});
+}
+
+Datum DevTools::outboundReport(const CompiledApp& app, Datum secrets) {
+    const OutboundPolicy& p = app.outbound;
+    Datum::ListItems allow, mailTo, webhooks, warnings;
+    for (const HostRule& r : p.hosts) allow.push_back(str(r.text));
+    for (const std::string& m : p.mailTo) mailTo.push_back(str(m));
+    for (const auto& [url, entry] : app.routes) {
+        if (!entry.webhook) continue;
+        webhooks.push_back(Datum::map({{"url", str(url)},
+                                       {"handler", str(entry.webhook->label() + " in code/" + entry.webhook->source.str())},
+                                       {"access", str(entry.access.describe())}}));
+    }
+    for (const Diagnostic& d : app.diagnostics) {
+        if (d.file == "code/outbound.ms" || d.message.find("webhook") != std::string::npos) {
+            warnings.push_back(str(d.toString()));
+        }
+    }
+    if (secrets.kind() != Datum::Kind::List) secrets = Datum::list({});
+    return Datum::map({{"generation", num(static_cast<double>(app.generation))},
+                       {"declared", num(p.declared ? 1 : 0)},
+                       {"allow", Datum::list(std::move(allow))},
+                       {"anyHost", num(p.anyHost() ? 1 : 0)},
+                       {"mailTo", Datum::list(std::move(mailTo))},
+                       {"anyMail", num(p.anyMail() ? 1 : 0)},
+                       {"secrets", std::move(secrets)},
+                       {"webhooks", Datum::list(std::move(webhooks))},
                        {"warnings", Datum::list(std::move(warnings))}});
 }
 
@@ -435,6 +479,76 @@ std::optional<HttpResponse> DevTools::reserved(const HttpRequest& request, const
             std::lock_guard<std::mutex> lock(hub_->mutex);
             recent = hub_->recentLimits;
         }
+        for (auto it = recent.rbegin(); it != recent.rend(); ++it) html += "<li>" + escapeHtml(*it) + "</li>\n";
+        html += "</ul>\n</main></body></html>\n";
+        r.body = std::move(html);
+        return r;
+    }
+    if (path == "/__dev/outbound" || path == "/__dev/outbound.json") {
+        std::shared_ptr<const CompiledApp> app = currentApp_ ? currentApp_() : nullptr;
+        if (!app) return HttpResponse::text(503, "The app hasn't compiled yet.\n");
+        Datum report = outboundReport(*app, secrets_ ? secrets_() : Datum::list({}));
+        std::vector<std::string> recent;
+        {
+            std::lock_guard<std::mutex> lock(hub_->mutex);
+            recent = hub_->recentOutbound;
+        }
+        HttpResponse r;
+        r.headers.set("Cache-Control", "no-store");
+        if (path == "/__dev/outbound.json") {
+            Datum::MapItems items = report.asMap();
+            Datum::ListItems calls;
+            for (const std::string& line : recent) calls.push_back(str(line));
+            items["recent"] = Datum::list(std::move(calls));
+            r.headers.set("Content-Type", "application/json");
+            r.body = toJson(Datum::map(std::move(items)));
+            return r;
+        }
+        const auto& m = report.asMap();
+        auto list = [](const Datum& items) {
+            std::string out;
+            for (const Datum& d : items.asList()) out += "<li><code>" + escapeHtml(d.asString()) + "</code></li>\n";
+            return out.empty() ? std::string("<li>(none)</li>\n") : out;
+        };
+        r.headers.set("Content-Type", "text/html; charset=utf-8");
+        std::string html = "<!DOCTYPE html>\n<html><head><meta charset=\"utf-8\"><title>Outbound report</title><style>";
+        html += kReportStyle;
+        html += "</style></head>\n<body><main>\n<h1>Outbound report</h1>\n<p class=\"note\">Where app code may send "
+                "requests and mail (code/outbound.ms, generation " + std::to_string(app->generation) + "), which "
+                "secrets may go where (private/config/secrets.ms), the webhooks that take posts without a CSRF token, "
+                "and the latest requests. Private and internal addresses are always refused, unless "
+                "<code>config.outbound.allowAddresses</code> names them. Dev mode only.</p>\n";
+        for (const Datum& w : m.at("warnings").asList()) {
+            html += "<p class=\"warning\">" + escapeHtml(w.asString()) + "</p>\n";
+        }
+        if (m.at("declared").asNumber() == 0) {
+            html += "<p class=\"warning\">There's no code/outbound.ms, so app code can't send requests, and can "
+                    "mail only its users.</p>\n";
+        }
+        if (m.at("anyHost").asNumber() == 1) {
+            html += "<p class=\"warning\">allow has \"*\": app code may reach any public host.</p>\n";
+        }
+        if (m.at("anyMail").asNumber() == 1) {
+            html += "<p class=\"warning\">mailTo has \"*\": app code may mail any address.</p>\n";
+        }
+        html += "<h2>Hosts (allow)</h2>\n<ul>\n" + list(m.at("allow")) + "</ul>\n";
+        html += "<h2>Mail to (mailTo), besides users</h2>\n<ul>\n" + list(m.at("mailTo")) + "</ul>\n";
+        html += "<h2>Secrets</h2>\n<table>\n<tr><th>Name</th><th>Use</th><th>Hosts</th></tr>\n";
+        for (const Datum& d : m.at("secrets").asList()) {
+            const auto& sm = d.asMap();
+            std::string hosts;
+            for (const Datum& h : sm.at("hosts").asList()) hosts += (hosts.empty() ? "" : ", ") + escapeHtml(h.asString());
+            html += "<tr><td>" + escapeHtml(sm.at("name").asString()) + "</td><td>" + escapeHtml(sm.at("use").asString()) +
+                    "</td><td>" + hosts + "</td></tr>\n";
+        }
+        html += "</table>\n<h2>Webhooks</h2>\n<table>\n<tr><th>URL</th><th>Handler</th><th>Access</th></tr>\n";
+        for (const Datum& d : m.at("webhooks").asList()) {
+            const auto& wm = d.asMap();
+            html += "<tr><td>POST " + escapeHtml(wm.at("url").asString()) + "</td><td>" +
+                    escapeHtml(wm.at("handler").asString()) + "</td><td>" + escapeHtml(wm.at("access").asString()) +
+                    "</td></tr>\n";
+        }
+        html += "</table>\n<h2>Latest requests</h2>\n<ul>\n";
         for (auto it = recent.rbegin(); it != recent.rend(); ++it) html += "<li>" + escapeHtml(*it) + "</li>\n";
         html += "</ul>\n</main></body></html>\n";
         r.body = std::move(html);

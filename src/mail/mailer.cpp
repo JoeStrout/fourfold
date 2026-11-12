@@ -196,6 +196,8 @@ public:
         std::string url = std::string(tls ? "smtps://" : "smtp://") + settings_.host + ":" +
                           std::to_string(settings_.port);
         curl_slist* recipients = curl_slist_append(nullptr, ("<" + message.to + ">").c_str());
+        // Blind copies are recipients of the envelope only.
+        for (const std::string& b : message.bcc) recipients = curl_slist_append(recipients, ("<" + b + ">").c_str());
         std::string mailFrom = "<" + from + ">";
         char error[CURL_ERROR_SIZE] = {0};
         curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
@@ -241,6 +243,11 @@ public:
                                {"TextBody", Datum::string(message.text)},
                                {"MessageStream", Datum::string(settings_.messageStream)}};
         if (message.html) fields["HtmlBody"] = Datum::string(*message.html);
+        if (!message.bcc.empty()) {
+            std::string bcc;
+            for (const std::string& b : message.bcc) bcc += (bcc.empty() ? "" : ",") + b;
+            fields["Bcc"] = Datum::string(bcc);
+        }
         std::string body = toJson(Datum::map(std::move(fields)));
         std::string response;
 
@@ -296,8 +303,11 @@ public:
     Status send(const MailMessage& message) override {
         if (Status s = validateMessage(message); !s) return s;
         if (out_) {
+            std::string bcc;
+            for (const std::string& b : message.bcc) bcc += (bcc.empty() ? "" : ", ") + b;
             out_("Mail (not sent; dev mode prints it instead)\nFrom: " + message.from + "\nTo: " + message.to +
-                 "\nSubject: " + message.subject + "\n\n" + message.text);
+                 (bcc.empty() ? "" : "\nBcc (not in the message's headers): " + bcc) + "\nSubject: " +
+                 message.subject + "\n\n" + message.text);
         }
         return {};
     }
@@ -334,6 +344,12 @@ Status validateMessage(const MailMessage& message) {
     }
     if (!isValidEmailAddress(message.to)) {
         return makeError(ErrorCode::Invalid, "the recipient's address isn't valid: " + message.to);
+    }
+    if (message.bcc.size() > kMaxBcc) {
+        return makeError(ErrorCode::TooLarge, "more than " + std::to_string(kMaxBcc) + " blind copies");
+    }
+    for (const std::string& b : message.bcc) {
+        if (!isValidEmailAddress(b)) return makeError(ErrorCode::Invalid, "a blind copy's address isn't valid: " + b);
     }
     if (hasControl(message.subject) || message.subject.size() > kMaxSubject) {
         return makeError(ErrorCode::Invalid, "the subject has a line break or control character, or is too long");

@@ -251,20 +251,43 @@ The risks most likely to change the design, and where each is retired:
 
 ---
 
-## M9 — Outbound HTTP, secrets, webhooks, and jobs
+## M9 — Outbound HTTP, secrets, webhooks, and app mail
 
-**Goal:** the app can reach out, be called in, and do work outside a request (§6; §2, Background jobs).
+**Goal:** the app can reach out and be called in (§6), and send its own mail. The first half of what was planned as one M9; jobs and push follow in M9.1.
+
+**Decisions (2026-11-12, with the user):**
+- **Split M9.** The security core (outbound HTTP, secret handles, webhooks, app mail) is a milestone of its own, so it can be reviewed before jobs and push build on it. Jobs, the schedule and SSE are M9.1.
+- **App mail goes to users and an allowlist**, closing the overview's open question. `mail.send(to, subject, template, fields)`: `to` is a user's `id` (the engine looks up the address, so the app never needs it) or an address the app allows in `code/outbound.ms` (`mailTo = ["owner@example.com", "*@example.com"]`), for things like a contact form sent to the site owner. `mailTo = ["*"]` allows any address, flagged in the outbound report like `allow = ["*"]`. Structured fields only, never raw headers; the subject has its control characters refused; the body is a Markdown template in `code/mail/` (`welcome.md`), sent as text (its Markdown form) and HTML. A per-app send limit (`config.mail.appPerHour`, default 100); `config.mail.appMail = false` turns it off. Sent through the transport in `config.mail`, on the worker pool with the VM parked.
 
 **Scope:**
-- `outbound.OutboundClient`: `outbound.ms` allowlist, the host config's tightening, private and reserved IP blocking, resolve-check-pin, redirect handling, size and time limits, outbound rate limit, logging with secrets redacted.
-- `SecretVault` and `SecretRef`, secret handles in scripts, header and URL parts as lists of strings and handles.
-- `webhook.x` handlers with `req.rawBody`, exempt from CSRF.
-- The `mail` intrinsic for app code (from the open question in the overview, if decided by then).
-- `jobs`: `code/jobs/`, the `job` map, `enqueue` with commit-on-success and unique keys, `schedule.ms`, no self-overlap, missed runs run once, retries with backoff, dead jobs, the job budget and worker cap, jobs on whichever version of the app is current.
-- `push`: SSE channels and `publish`, from requests and jobs.
-- `devtools`: the outbound report, the jobs panel, outbound calls and enqueued jobs in the request inspector.
+- `outbound.OutboundClient` (libcurl, already used for Postmark): `code/outbound.ms` read at compile time (`allow`: hostnames, `*.` for subdomains, `"host:port"`, `"*"`; HTTPS only unless written `"http://host"`); `config.outbound`, which can only tighten (`enabled`, `allow` as a cap, `allowAddresses` for named internal addresses, `perMinute`, `maxResponseKB`, `timeoutSeconds`). Always on: private and reserved addresses refused (loopback, RFC 1918, link-local, CGNAT, ULA, `0.0.0.0/8`, multicast, broadcast, documentation ranges; IPv4-mapped and -compatible IPv6, NAT64 and 6to4 judged by the IPv4 address inside); every address checked as it's connected to (Host and SNI kept); redirects followed by the engine, each hop checked again, at most 5, never HTTPS to HTTP; response size limited after decompression; connect and total timeouts within the request's budget; a per-app outbound rate.
+- `http` module: `http.get(url, headers)`, `http.post(url, body, headers)`, `http.put`, `http.patch`, `http.delete`, and `http.request(method, url, body, headers)`. A body map or list is sent as JSON. The response map: `status`, `headers` (lowercased names), `body` (text) or `raw` (a `RawData`, for bytes that aren't UTF-8 text), and `json` (inert values, or null). Failures are error values. Runs on the worker pool with the VM parked.
+- `SecretVault` and `SecretRef`: `secrets.name` is a handle. A URL or header value is a string, a handle, or a list of strings and handles, joined only as the request goes out, and only to the secret's `hosts` (checked on every redirect hop; a hop to another host drops the request). A handle prints as its type, and `data`, `session`, `json`, template fields and `enqueue` refuse it. An engine-only secret (no `hosts`) is absent, with a dev-mode error saying why.
+- `webhook.x`: `POST /<page>/x` with no CSRF token; `req.rawBody` only there; access rules and rate limits apply. `hmac.verify(algorithm, secret, message, signature)` checks a provider's signature (constant time; SHA-256, hex or base64), with a key that's a handle: a secret with `"verify": true` in `secrets.ms` (it's never sent anywhere) or one with `hosts`. There's no way to compute an HMAC that script can see.
+- `mail` module, as decided above.
+- Logging: each outbound call and each app mail in the engine log (host or recipient, status, time, bytes), with secrets and query strings redacted.
+- `devtools`: the outbound report at `/__dev/outbound` (allowed hosts and `"*"`, `mailTo`, which secrets go to which hosts, webhook endpoints, and the recent outbound calls with refusals).
 
-**Exit criteria:** SSRF tests (metadata address, localhost, DNS rebinding, redirect to a private address, IPv4-mapped IPv6) are all refused; a secret can't be made to appear in a page, a log, a `data` file, or a request to the wrong host; a weather-API sample works; a job killed mid-run is retried; a feed-polling job publishes to open pages over SSE.
+**Exit criteria:** SSRF tests (the metadata address, localhost by name and by number, every blocked range including IPv4-mapped IPv6, a name resolving to both a public and a private address (never connected to at the private one), DNS rebinding, a redirect to a private address and to a host off the list, HTTPS to HTTP) are all refused; a secret can't be made to appear in a page, a log, a `data` file, the session, a mail, or a request to the wrong host (including through a redirect); size, time, decompression-bomb and rate limits hold; a webhook with a good signature is accepted, and one with a bad or missing one refused, without a CSRF token; app mail goes to a user by id and to an allowed address, and is refused to others; a weather-API sample works (tested against a local server allowed by `allowAddresses`, and by hand against the real API).
+
+**Decisions made here** (details in [m9-results.md](m9-results.md)): addresses are checked in libcurl's open-socket hook as each connection is made, not resolved and pinned first, so a name with public and private addresses is connected to only at the public ones; NAT64 and 6to4 addresses are judged by the IPv4 address inside rather than refused, so IPv6-only hosts still work. `http` and `mail` run on a separate network pool (8 threads), so a slow API can't hold up session and database work; a call's deadline is fixed when it's made. A response of any status is a map; only a refused or failed request is an error value; `raw` holds a body that isn't text. Header names go out as the app wrote them. A redirect to another host drops `Authorization` and `Cookie` (without secrets) and fails if a header carries a secret. `hmac.verify` is SHA-256 only; a sending secret may verify too, an engine-only one never. Webhooks also get `req.json`, and skip the timing check and puzzle (a `limits.ms` rule asking for them warns); `post.x` beside `webhook.x` is a compile error. Mail templates are `code/mail/*.md`; `mail.send` returns null, and counts each recipient against `appPerHour` in the `RateStore`. Blind copies (added with the user after the first build): `options.bcc`, up to 10, by the same rules as `to`, in no header; no CC. The outbound report is `/__dev/outbound`; there's still no request inspector.
+
+---
+
+## M9.1 — Jobs and push
+
+**Goal:** the app can do work outside a request, and push updates to open pages (§2, Background jobs; §7).
+
+**Decisions (2026-11-12, with the user):**
+- **SSE channels are paths under the access rules.** A page subscribes to `/live/<name>`; `access.ms` rules apply to that path like any page's (public, signed in, a role), and a channel no rule or route covers is refused as an unmatched route would be. `publish "orders", html` sends to subscribers of `/live/orders` only. Per-user channels can come later.
+- **Schedules use IANA time zones** (`config.jobs.timeZone = "America/Denver"`, default UTC), read from the system's zoneinfo files. A time skipped by a DST change runs at the jump; a time that happens twice runs once.
+
+**Scope:**
+- `jobs`: `code/jobs/`, the `job` map, `enqueue` with commit-on-success (in jobs too: a job's enqueues commit only if it succeeds) and unique keys, `code/schedule.ms` (friendly forms and cron), no self-overlap, missed runs run once, retries with backoff, dead jobs, the job budget and worker cap, jobs on whichever version of the app is current; `JobQueue` in `private/state/`.
+- `push`: `PushHub`, SSE channels and `publish`, from requests and jobs; HTMX's SSE extension served by the engine.
+- `devtools`: the jobs panel (queue, recent runs, dead jobs with retry and discard, the schedule with next run times, run now, pause), and channels in the access report.
+
+**Exit criteria:** a job killed mid-run is retried; enqueues from a failed request are dropped; a unique key enqueues once; schedules fire on time across a DST change in a named zone; missed runs run once after downtime; a feed-polling job publishes to open pages over SSE; a channel under a members-only rule refuses a visitor who isn't signed in.
 
 ---
 

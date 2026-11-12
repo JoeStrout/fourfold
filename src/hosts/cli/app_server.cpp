@@ -298,6 +298,23 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
         panel.redoLast = [self] { return self->instance_->redoLast().message; };
         panel.resetData = [self] { return self->instance_->resetData().message; };
         server->devtools_->setMigrationPanel(std::move(panel));
+        // The secrets' names, uses and hosts (never their values).
+        server->devtools_->setSecretSource([self] {
+            Datum::ListItems list;
+            std::shared_ptr<const AppConfig> config = self->config();
+            for (const auto& [name, secret] : config->secrets) {
+                Datum::ListItems hosts;
+                for (const std::string& h : secret.hosts) hosts.push_back(Datum::string(h));
+                std::string use = secret.engineOnly() ? "engine only"
+                                  : secret.hosts.empty() ? "verify (hmac.verify)"
+                                  : secret.verify       ? "send, verify"
+                                                        : "send";
+                list.push_back(Datum::map({{"name", Datum::string(name)},
+                                           {"use", Datum::string(use)},
+                                           {"hosts", Datum::list(std::move(hosts))}}));
+            }
+            return Datum::list(std::move(list));
+        });
         server->observers_.add(server->devtools_.get());
     }
 

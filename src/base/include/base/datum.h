@@ -80,4 +80,8 @@ struct JsonLimits {
 // Every Datum toJson writes reads back equal.
 Result<Datum> parseJson(std::string_view text, const JsonLimits& limits = {});
 
+// Whether a Content-Type header names JSON: application/json, text/json, or
+// any type ending in +json ("application/ld+json"), with any parameters.
+bool isJsonMediaType(std::string_view contentType);
+
 }  // namespace fourfold

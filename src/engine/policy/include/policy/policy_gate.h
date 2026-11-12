@@ -17,7 +17,9 @@
 // The token is a keyed hash of the cookie, so a site that can't read the
 // cookie (which is HttpOnly, and same-site) can't make one. The engine puts
 // tokens into every <form method="post"> and into HTMX's headers when it
-// renders a page, so app code never sees any of this.
+// renders a page, so app code never sees any of this. A POST to a webhook
+// (webhook.x, overview §6) is exempt, as are its timing check and puzzle:
+// its caller is another server, and its handler checks a signature instead.
 //
 // The CSRF cookie is separate from the session's, so a visitor who never
 // writes to `session` still gets no session record.

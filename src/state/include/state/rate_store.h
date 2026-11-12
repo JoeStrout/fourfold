@@ -29,6 +29,8 @@ struct RateCheck {
     std::string key;       // what's counted together: the rule, and who ("default|ip:1.2.3.4")
     int64_t count = 0;     // at most this many...
     int64_t seconds = 60;  // ...in this long
+    // How many this request counts as (app mail: one per recipient).
+    int64_t cost = 1;
 };
 
 struct RateResult {
@@ -47,7 +49,7 @@ public:
     // (StateDir::sqlitePath). The clock must outlive the store.
     static Result<std::unique_ptr<RateStore>> open(const std::string& path, const Clock& clock = systemClock());
 
-    // Counts one request against every check, if all of them allow it; if
+    // Counts one request (its `cost`) against every check, if all of them allow it; if
     // any is over its limit, counts nothing and says which. In one
     // transaction, so concurrent requests (and processes) count exactly.
     Result<RateResult> hit(const std::vector<RateCheck>& checks);

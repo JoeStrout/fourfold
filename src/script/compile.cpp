@@ -422,13 +422,15 @@ struct CompileJob : std::enable_shared_from_this<CompileJob> {
                 program.stubs["render"] = {*stub};
             }
         }
-        for (const char* method : {"get", "post"}) {
+        for (const char* method : {"get", "post", "webhook"}) {
             Value map = run.interp.GetGlobalValue(method);
             if (!map.IsMap()) {
                 pageError(std::string(method) + " must stay a map of handler functions");
                 continue;
             }
-            std::vector<std::string>& names = std::string(method) == "get" ? handlers.get : handlers.post;
+            std::vector<std::string>& names = std::string(method) == "get"    ? handlers.get
+                                              : std::string(method) == "post" ? handlers.post
+                                                                              : handlers.webhook;
             MiniScript::MapIterator it = map.Iterator();
             Value key, value;
             while (MiniScript::map_iterator_next(&it, &key, &value)) {

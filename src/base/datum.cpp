@@ -1,5 +1,6 @@
 #include "base/datum.h"
 
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstdint>
@@ -446,6 +447,16 @@ Result<Datum> parseJson(std::string_view text, const JsonLimits& limits) {
         return makeError(ErrorCode::TooLarge, "JSON text is over " + std::to_string(limits.maxBytes) + " bytes");
     }
     return JsonReader(text, limits).read();
+}
+
+bool isJsonMediaType(std::string_view contentType) {
+    std::string media(contentType.substr(0, contentType.find(';')));
+    while (!media.empty() && (media.back() == ' ' || media.back() == '\t')) media.pop_back();
+    size_t start = media.find_first_not_of(" \t");
+    media = start == std::string::npos ? "" : media.substr(start);
+    for (char& c : media) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (media == "application/json" || media == "text/json") return true;
+    return media.size() > 5 && media.compare(media.size() - 5, 5, "+json") == 0 && media.find('/') != std::string::npos;
 }
 
 }  // namespace fourfold

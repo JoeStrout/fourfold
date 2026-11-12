@@ -10,6 +10,9 @@
 // - formState, reshow: showing a declared form again, with its errors.
 // - ratelimit: rate limits from code.
 // - db: the app's database (db.query).
+// - http, secrets, hmac: outbound requests, secret handles, and checking
+//   webhook signatures (http.cpp).
+// - mail: email from app code (mail.send).
 #pragma once
 
 #include <string>
@@ -31,6 +34,8 @@ void addUsers();
 void addForms();
 void addRateLimit();
 void addDb();
+void addHttp();
+void addMail();
 
 // An intrinsic's error result.
 MiniScript::IntrinsicResult intrinsicError(const std::string& message);

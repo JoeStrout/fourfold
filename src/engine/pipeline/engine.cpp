@@ -1,5 +1,6 @@
 #include "pipeline/engine.h"
 
+#include <algorithm>
 #include <cctype>
 
 #include "base/crypto.h"
@@ -108,6 +109,82 @@ private:
     RateStore& store_;
 };
 
+// The `mail` module's sender (overview §6): finds a user's address, counts
+// the app's hourly limit, and sends through the config's transport.
+class EngineMail : public AppMailer {
+public:
+    EngineMail(std::shared_ptr<const AppConfig> config, AuthStore* auth, RateStore* rates, EngineLog* log)
+        : config_(std::move(config)), auth_(auth), rates_(rates), log_(log) {}
+
+    Result<std::string> send(const AppMailMessage& m) override {
+        const AppConfig& c = *config_;
+        if (!c.mail.appMail) return makeError(ErrorCode::Denied, "app mail is turned off (config.mail.appMail)");
+        if (!c.mailer) {
+            return makeError(ErrorCode::Denied, "no way to send mail is set up (config.mail.transport is \"none\")");
+        }
+        auto to = addressOf(m.to);
+        if (!to) return to.error();
+        std::vector<std::string> bcc;
+        for (const AppMailRecipient& r : m.bcc) {
+            auto address = addressOf(r);
+            if (!address) return address.error();
+            // A copy to the main recipient, or the same one twice, is dropped.
+            if (address.value() != to.value() && std::find(bcc.begin(), bcc.end(), address.value()) == bcc.end()) {
+                bcc.push_back(address.value());
+            }
+        }
+        std::string all = to.value();
+        for (const std::string& b : bcc) all += ", bcc " + b;
+        if (rates_) {
+            // Each recipient counts: all of them, or none.
+            RateCheck check{"engine:mail|app", c.mail.appPerHour, 3600, static_cast<int64_t>(1 + bcc.size())};
+            auto r = rates_->hit({check});
+            if (r && !r.value().allowed) {
+                if (log_) log_->write("mail", "app mail to " + all + " refused: over " +
+                                                  std::to_string(c.mail.appPerHour) + " an hour");
+                return makeError(ErrorCode::TooLarge, "over the app's limit of " + std::to_string(c.mail.appPerHour) +
+                                                          " messages an hour (config.mail.appPerHour; each recipient "
+                                                          "counts)");
+            }
+        }
+        MailMessage message;
+        message.from = c.mail.from;
+        message.to = to.value();
+        message.bcc = std::move(bcc);
+        message.subject = m.subject;
+        message.text = m.text;
+        message.html = m.html;
+        if (Status s = c.mailer->send(message); !s) {
+            if (log_) log_->write("mail", "app mail to " + all + " failed: " + s.error().message);
+            return s.error();
+        }
+        if (log_) log_->write("mail", "app mail sent to " + all + ": " + m.subject);
+        return to.value();
+    }
+
+private:
+    // A recipient's address: a user's, looked up, or the one given.
+    Result<std::string> addressOf(const AppMailRecipient& r) {
+        std::string address = r.address;
+        if (!r.userId.empty()) {
+            if (!auth_) return makeError(ErrorCode::Denied, "there are no users here to send mail to");
+            auto user = auth_->get(r.userId);
+            if (!user) return user.error();
+            if (!user.value()) return makeError(ErrorCode::NotFound, "there's no user with the id " + r.userId);
+            address = user.value()->email;
+        }
+        if (!isValidEmailAddress(address)) {
+            return makeError(ErrorCode::Invalid, "\"" + address + "\" isn't an email address");
+        }
+        return address;
+    }
+
+    std::shared_ptr<const AppConfig> config_;
+    AuthStore* auth_;
+    RateStore* rates_;
+    EngineLog* log_;
+};
+
 const char* const kTooManyPage =
     "<!DOCTYPE html>\n<html><head><title>Too many requests</title></head>\n"
     "<body><h1>Too many requests</h1>\n"
@@ -157,6 +234,7 @@ struct Engine::Flow {
     AdmittedRequest admitted;
     std::shared_ptr<const CompiledApp> app;
     std::shared_ptr<const AppConfig> config;
+    std::shared_ptr<OutboundClient> outbound;   // made with `config`
     std::shared_ptr<const EngineOptions> options;
     RenderOptions render;
     // A new CSRF cookie, to set on an HTML response: the visitor had none
@@ -195,7 +273,28 @@ Engine::Engine(std::shared_ptr<const CompiledApp> app, CodeTree code, ScriptHost
       rates_(options.rates ? std::make_unique<StoreRates>(*options.rates) : nullptr),
       code_(std::move(code)),
       scripts_(scripts),
-      options_(std::make_shared<const EngineOptions>(std::move(options))) {}
+      options_(std::make_shared<const EngineOptions>(std::move(options))) {
+    outbound_ = makeOutbound(*config_);
+}
+
+std::shared_ptr<OutboundClient> Engine::makeOutbound(const AppConfig& config) const {
+    std::shared_ptr<const EngineOptions> options = options_;
+    return std::make_shared<OutboundClient>(config.outbound, config.secrets, [options](const OutboundCall& call) {
+        // Every call, with secrets and query strings left out (overview §6, Visibility).
+        if (options->log) {
+            std::string line = call.method + " " + call.url;
+            if (call.refused.empty()) {
+                line += " " + std::to_string(call.status) + " " + std::to_string(call.durationMs) + " ms " +
+                        std::to_string(call.bytes) + " bytes";
+                if (call.redirects) line += " (" + std::to_string(call.redirects) + " redirects)";
+            } else {
+                line += " refused: " + call.refused;
+            }
+            options->log->write("outbound", line);
+        }
+        if (options->observer) options->observer->outboundCall(call);
+    });
+}
 
 void Engine::setApp(std::shared_ptr<const CompiledApp> app) {
     std::shared_ptr<const CompiledApp> old;
@@ -214,8 +313,10 @@ std::shared_ptr<const CompiledApp> Engine::app() const {
 }
 
 void Engine::setConfig(std::shared_ptr<const AppConfig> config) {
+    std::shared_ptr<OutboundClient> outbound = makeOutbound(*config);
     std::lock_guard<std::mutex> lock(appMutex_);
     config_ = std::move(config);
+    outbound_ = std::move(outbound);
 }
 
 std::shared_ptr<const AppConfig> Engine::config() const {
@@ -298,8 +399,12 @@ void Engine::proceed(std::shared_ptr<Flow> f) const {
     const HttpRequest& request = f->request;
     const std::string& path = f->admitted.path.path;
     // Pin this generation of the app, and the config, for the whole request.
-    f->app = this->app();
-    f->config = this->config();
+    {
+        std::lock_guard<std::mutex> lock(appMutex_);
+        f->app = app_;
+        f->config = config_;
+        f->outbound = outbound_;
+    }
     bool auth = hasPrefix(path, "/__auth");
     if (!f->app && !auth) {
         HttpResponse response;
@@ -608,6 +713,16 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
 
     RunContext context;
     facts.ip = f->client;
+    if (decision.handler->kind == HandlerRef::Kind::Webhook) {
+        // The body as sent, for checking the caller's signature, and parsed
+        // if it's JSON.
+        facts.rawBody = request.body;
+        const std::string* type = request.headers.get("Content-Type");
+        if (type && isJsonMediaType(*type)) {
+            auto parsed = parseJson(request.body);
+            facts.json = parsed ? std::move(parsed).value() : Datum();
+        }
+    }
     context.request = std::move(facts);
     context.request.format = decision.markdown ? "markdown" : "html";
     if (f->user) context.request.user = userFacts(*f->user);
@@ -620,6 +735,8 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
     }
     context.users = users_.get();
     context.rates = rates_.get();
+    context.outbound = f->outbound;
+    context.mailer = std::make_shared<EngineMail>(f->config, options.auth, options.rates, options.log);
     std::string group = addressGroup(f->client);
     context.rateIp = "ip:" + group;
     context.rateUser = f->user ? "user:" + f->user->id : "ip:" + group;

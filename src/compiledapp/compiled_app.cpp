@@ -232,6 +232,7 @@ std::string HandlerRef::label() const {
         case Kind::Render: return "render";
         case Kind::Get: return "get." + name;
         case Kind::Post: return "post." + name;
+        case Kind::Webhook: return "webhook." + name;
     }
     return name;
 }
@@ -318,7 +319,7 @@ std::string describe(const CompiledApp& app) {
                 if (!title.empty()) s += "  title: " + title;
             }
         }
-        for (const std::optional<HandlerRef>* h : {&entry.render, &entry.get, &entry.post}) {
+        for (const std::optional<HandlerRef>* h : {&entry.render, &entry.get, &entry.post, &entry.webhook}) {
             if (*h) s += "  " + (*h)->label() + " in " + (*h)->source.str();
         }
         if (entry.usesSession) s += "  session";

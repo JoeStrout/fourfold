@@ -47,7 +47,7 @@ Result<RateResult> RateStore::hit(const std::vector<RateCheck>& checks) {
         result = RateResult();
         struct Pending {
             std::string key;
-            int64_t seconds, window;
+            int64_t seconds, window, cost;
         };
         std::vector<Pending> pending;
         for (size_t i = 0; i < checks.size(); i++) {
@@ -68,7 +68,8 @@ Result<RateResult> RateStore::hit(const std::vector<RateCheck>& checks) {
                 (stmt.value()->integer(0) == window ? current : previous) = stmt.value()->integer(1);
             }
             double estimate = static_cast<double>(previous) * (1 - into) + static_cast<double>(current);
-            if (estimate + 1 > static_cast<double>(c.count) + 1e-9) {
+            double cost = static_cast<double>(std::max<int64_t>(c.cost, 1));
+            if (estimate + cost > static_cast<double>(c.count) + 1e-9) {
                 result.allowed = false;
                 result.refusedIndex = i;
                 // Until the estimate falls below the limit: at the latest,
@@ -76,22 +77,22 @@ Result<RateResult> RateStore::hit(const std::vector<RateCheck>& checks) {
                 double wait = (1 - into) * static_cast<double>(c.seconds);
                 if (previous > 0 && current < c.count) {
                     // The previous window's share shrinks as time passes.
-                    double needed = (estimate + 1 - static_cast<double>(c.count)) / static_cast<double>(previous);
+                    double needed = (estimate + cost - static_cast<double>(c.count)) / static_cast<double>(previous);
                     wait = std::min(wait, needed * static_cast<double>(c.seconds));
                 }
                 result.retryAfterSeconds = std::max<int64_t>(1, static_cast<int64_t>(std::ceil(wait)));
                 result.counts.push_back(estimate);
                 return {};   // nothing is counted
             }
-            result.counts.push_back(estimate + 1);
-            pending.push_back({key, c.seconds, window});
+            result.counts.push_back(estimate + cost);
+            pending.push_back({key, c.seconds, window, static_cast<int64_t>(cost)});
         }
         for (const Pending& p : pending) {
             auto stmt = db_->statement(
-                "INSERT INTO rate_counts (key, seconds, win, count) VALUES (?1, ?2, ?3, 1) "
-                "ON CONFLICT (key, seconds, win) DO UPDATE SET count = count + 1");
+                "INSERT INTO rate_counts (key, seconds, win, count) VALUES (?1, ?2, ?3, ?4) "
+                "ON CONFLICT (key, seconds, win) DO UPDATE SET count = count + ?4");
             if (!stmt) return stmt.error();
-            stmt.value()->bindText(1, p.key).bindInt(2, p.seconds).bindInt(3, p.window);
+            stmt.value()->bindText(1, p.key).bindInt(2, p.seconds).bindInt(3, p.window).bindInt(4, p.cost);
             if (Status r = stmt.value()->run(); !r) return r;
         }
         return {};

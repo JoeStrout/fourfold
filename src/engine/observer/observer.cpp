@@ -23,4 +23,8 @@ void ObserverList::limitsCounted(const std::string& request,
     for (Observer* o : observers_) o->limitsCounted(request, counts);
 }
 
+void ObserverList::outboundCall(const OutboundCall& call) {
+    for (Observer* o : observers_) o->outboundCall(call);
+}
+
 }  // namespace fourfold

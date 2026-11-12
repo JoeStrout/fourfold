@@ -7,7 +7,7 @@ the server. The person writing the site needs the
 config file, deploying), this guide covers what the server needs and links to
 the user guide for the rest.
 
-*Status: covers what works as of Milestone 8. Fourfold isn't ready yet to
+*Status: covers what works as of Milestone 9. Fourfold isn't ready yet to
 face the internet on its own: see [Known gaps](#known-gaps). CGI and FastCGI
 hosting, TLS and a production server will be added here as they arrive.*
 
@@ -21,17 +21,18 @@ hosting, TLS and a production server will be added here as they arrive.*
 4. [Running `fourfold serve`](#running-fourfold-serve)
 5. [Behind a reverse proxy](#behind-a-reverse-proxy)
 6. [Rate limits](#rate-limits)
-7. [Keeping it running](#keeping-it-running)
-8. [Mail for sign-in](#mail-for-sign-in)
-9. [The first admin](#the-first-admin)
-10. [Server limits: `--server-config`](#server-limits---server-config)
-11. [Deploying an app's changes](#deploying-an-apps-changes)
-12. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
-13. [A Postgres database](#a-postgres-database)
-14. [Logs](#logs)
-15. [Backups](#backups)
-16. [Known gaps](#known-gaps)
-17. [Quick reference](#quick-reference)
+7. [Outbound requests and app mail](#outbound-requests-and-app-mail)
+8. [Keeping it running](#keeping-it-running)
+9. [Mail for sign-in](#mail-for-sign-in)
+10. [The first admin](#the-first-admin)
+11. [Server limits: `--server-config`](#server-limits---server-config)
+12. [Deploying an app's changes](#deploying-an-apps-changes)
+13. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
+14. [A Postgres database](#a-postgres-database)
+15. [Logs](#logs)
+16. [Backups](#backups)
+17. [Known gaps](#known-gaps)
+18. [Quick reference](#quick-reference)
 
 ---
 
@@ -272,6 +273,62 @@ school or office behind one address counts as one visitor, so raise
 
 ---
 
+## Outbound requests and app mail
+
+An app's code can call other servers (`http`) and send its own mail
+(`mail.send`); see the user guide's
+[Calling other servers](../user/user_guide.md#calling-other-servers-http) and
+[Sending email](../user/user_guide.md#sending-email-mailsend). The app lists
+the hosts it may reach, and the addresses besides its users it may mail, in
+`code/outbound.ms`. Without that file it can reach nothing.
+
+What the app can never do, whatever it lists: connect to a private or
+internal address (loopback, your private networks, link-local addresses
+such as the cloud metadata service at 169.254.169.254, and the like). The
+engine checks the address it connects to, every time, so a name that points
+there is refused too. If the app really needs a service on your network,
+allow that address, and only it:
+
+```
+config.outbound = {"allowAddresses": ["10.0.5.20"]}
+```
+
+Your settings can only tighten what the app asks for:
+
+```
+config.outbound = {
+    "enabled": true,                       // false: no outbound requests at all
+    "allow": ["api.weather.gov"],          // a cap: the app's list must fit within it
+    "perMinute": 120,                      // requests a minute, for the whole app
+    "maxResponseKB": 5120,                 // after decompression
+    "timeoutSeconds": 10,                  // one request, redirects included
+}
+config.mail = {..., "appMail": true, "appPerHour": 100}   // mail.send on or off, and its hourly limit
+```
+
+**Secrets for the app's code** go in `private/config/secrets.ms` like the
+engine's, with where they may be used:
+
+```
+secrets.weatherKey = {"value": "...", "hosts": ["api.weather.gov"]}   // sent only to these hosts
+secrets.stripeHook = {"value": "whsec_...", "verify": true}           // for checking webhook signatures
+```
+
+The app's code holds only a handle to each: it can send the key to those
+hosts, or check a signature with it, and nothing else. It can't read it,
+show it, store it, or send it anywhere else. Secrets with neither `hosts`
+nor `verify` stay the engine's own.
+
+Each outbound request goes in the [engine log](#logs) (`outbound`): method,
+URL without its query string, status, time and size, or why it was refused.
+App mail is logged too (`mail`). The app's `webhook.x` handlers take posts
+from other servers without a CSRF token (they check a signature instead);
+access rules and rate limits still apply to them. A busy webhook caller
+(a payment provider sending bursts) counts against `limits.anonymous` like
+anyone else, from its address; raise that limit if it's refused.
+
+---
+
 ## Keeping it running
 
 Fourfold doesn't run itself in the background. Use your system's service
@@ -379,9 +436,10 @@ verified in Postmark.
 ### Secrets
 
 A secret is a map with a `value`. A secret the engine uses for mail must
-have no `hosts`: a secret with `hosts` is meant for the app's own code (a
-later feature), and Fourfold won't use one for both. So the app's code can
-never see the mail password.
+have no `hosts` and no `verify`: those are for the app's own code (see
+[Outbound requests and app mail](#outbound-requests-and-app-mail)), and
+Fourfold won't use one secret for both. So the app's code can never see the
+mail password.
 
 ### Testing it
 
@@ -597,7 +655,8 @@ The word after the time says what kind of event it is:
 | `spam` | a form sent too soon after it was shown, without its timing token, or without a solved puzzle |
 | `session` | session problems, like one too big to save |
 | `auth` | sign-in links sent, refused, throttled or failed to send; sign-ins and sign-outs; new users |
-| `mail` | the whole message, when `mail.transport` is `"log"` |
+| `mail` | the whole message, when `mail.transport` is `"log"`; app mail (`mail.send`) sent, refused or failed |
+| `outbound` | each request the app's code sent to another server: method, URL (without its query string or secrets), status, time and size; or why it was refused |
 | `migrate` | migrations applied, or why they failed |
 | `backup` | scheduled and requested backups |
 
@@ -732,6 +791,9 @@ in the user guide's [Configuration](../user/user_guide.md#configuration-privatec
 | `mail.postmarkTokenSecret`, `postmarkStream` | `"outbound"` | Postmark |
 | `proxy.trust` | `[]` | your reverse proxy's addresses (see [Behind a reverse proxy](#behind-a-reverse-proxy)) |
 | `limits.anonymous`, `limits.signedIn` | `"60/minute"`, `"300/minute"` | default rate limits (see [Rate limits](#rate-limits)) |
+| `outbound.enabled`, `allow`, `allowAddresses` | on, no cap, none | the app's outbound requests (see [Outbound requests and app mail](#outbound-requests-and-app-mail)) |
+| `outbound.perMinute`, `maxResponseKB`, `timeoutSeconds` | 120, 5120, 10 | their limits |
+| `mail.appMail`, `appPerHour` | on, 100 | the app's own mail (`mail.send`) |
 | `db.url`, `passwordSecret`, `schema`, `pool` | SQLite | a Postgres database (see [A Postgres database](#a-postgres-database)) |
 | `deploy.migrationWaitSeconds`, `migrationBudgetSeconds` | 30, 600 | how long requests wait for migrations; how long one may run |
 | `deploy.clearAnonymousSessions` | `false` | sign out anonymous visitors after migrations |

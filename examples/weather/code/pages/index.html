@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Weather</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main>
+    <h1>Weather</h1>
+    <form method="get" action="/">
+      <label>Latitude <input name="lat" value="{{lat}}" size="9"></label>
+      <label>Longitude <input name="lon" value="{{lon}}" size="9"></label>
+      <button>Forecast</button>
+    </form>
+    <p class="error">{{problem}}</p>
+    <ul class="periods">{{periods}}</ul>
+    <p class="note">From the National Weather Service (US places only). The app may reach
+      only the hosts in <code>code/outbound.ms</code>; see
+      <a href="/__dev/outbound">the outbound report</a>.
+      <a href="/contact">Contact the owner</a>.</p>
+  </main>
+</body>
+</html>

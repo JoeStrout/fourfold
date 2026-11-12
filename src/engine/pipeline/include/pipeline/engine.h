@@ -45,6 +45,8 @@ public:
     struct Flow;   // private: one request past Admit
 
 private:
+    // The outbound client for `config`, logging each call.
+    std::shared_ptr<OutboundClient> makeOutbound(const AppConfig& config) const;
     // The rest of handle(), once the request is past the schema lock.
     void proceed(std::shared_ptr<Flow> flow) const;
     // The 503 for a request that waited too long for migrations.
@@ -59,6 +61,10 @@ private:
     mutable std::mutex appMutex_;
     std::shared_ptr<const CompiledApp> app_;   // guarded by appMutex_; swapped on recompile
     std::shared_ptr<const AppConfig> config_;  // guarded by appMutex_
+    // The app's outbound client, made with each config (its settings and
+    // secrets); guarded by appMutex_, and pinned by each request like the
+    // config.
+    std::shared_ptr<OutboundClient> outbound_;
     std::unique_ptr<UserDirectory> users_;     // over options.auth, for the `users` module
     std::unique_ptr<RateCounter> rates_;       // over options.rates, for ratelimit()
     CodeTree code_;

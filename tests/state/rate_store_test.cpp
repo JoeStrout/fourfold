@@ -124,3 +124,16 @@ TEST_CASE("RateStore: sweep forgets old counters; reset forgets all") {
     CHECK(f.hit(longKey, 1));
     CHECK_FALSE(f.hit(longKey, 1));
 }
+
+TEST_CASE("RateStore: a request can count as more than one (app mail's recipients)") {
+    Fixture f;
+    auto hit = [&](int64_t cost) {
+        auto r = f.store->hit({{"mail", 5, 3600, cost}});
+        REQUIRE(r);
+        return r.value().allowed;
+    };
+    CHECK(hit(3));
+    CHECK_FALSE(hit(3));   // 6 would be over 5: nothing counted
+    CHECK(hit(2));         // exactly 5
+    CHECK_FALSE(hit(1));
+}

@@ -6,8 +6,8 @@ assumes Fourfold is already installed and serving your app with
 `fourfold serve`; setting that up is covered in the
 [admin guide](../admin/admin_guide.md).
 
-*Status: covers what works as of Milestone 8. Features still to come
-(background jobs, outbound HTTP and more) will be added here as they
+*Status: covers what works as of Milestone 9. Features still to come
+(background jobs, server push and more) will be added here as they
 arrive.*
 
 Markdown has its own reference, [FourFold Flavored Markdown](MARKDOWN.md),
@@ -43,13 +43,17 @@ for the language. This guide covers what Fourfold adds to it.
 21. [Declaring a form: form.x](#declaring-a-form-formx)
 22. [File uploads](#file-uploads)
 23. [Spam and rate limits: code/limits.ms](#spam-and-rate-limits-codelimitsms)
-24. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
-25. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
-26. [Output: print and the dropbox](#output-print-and-the-dropbox)
-27. [Errors and limits](#errors-and-limits)
-28. [Deploying changes](#deploying-changes)
-29. [Developing on your own machine](#developing-on-your-own-machine)
-30. [Quick reference](#quick-reference)
+24. [Calling other servers: http](#calling-other-servers-http)
+25. [Secrets: API keys in your code](#secrets-api-keys-in-your-code)
+26. [Being called: webhooks](#being-called-webhooks)
+27. [Sending email: mail.send](#sending-email-mailsend)
+28. [HTMX: updating part of a page](#htmx-updating-part-of-a-page)
+29. [JavaScript and the Content Security Policy](#javascript-and-the-content-security-policy)
+30. [Output: print and the dropbox](#output-print-and-the-dropbox)
+31. [Errors and limits](#errors-and-limits)
+32. [Deploying changes](#deploying-changes)
+33. [Developing on your own machine](#developing-on-your-own-machine)
+34. [Quick reference](#quick-reference)
 
 ---
 
@@ -520,6 +524,8 @@ is **frozen**: you can read it but not change it.
 | `req.htmx` | 1 if HTMX sent the request, else 0 |
 | `req.user` | the [signed-in visitor](#signing-in-requser), or `null` |
 | `req.format` | `"html"`, or `"markdown"` when a [Markdown page](#markdown-as-markdown) was asked for as Markdown (`/about.md`) |
+| `req.rawBody` | in a [webhook](#being-called-webhooks) only: the body exactly as sent (a string, or `RawData` if it isn't text) |
+| `req.json` | in a webhook only: the body parsed, if it's JSON; else `null` |
 
 Things to know:
 
@@ -1507,6 +1513,14 @@ on a server is covered in the [admin guide](../admin/admin_guide.md#mail-for-sig
 | `db.pool` | 4 | connections to the database |
 | `db.queryTimeoutSeconds` | `budget.seconds` | how long one query may run |
 | `db.maxRows` | 10,000 | the most rows one query may return |
+| `outbound.enabled` | `true` | `false` turns off [`http`](#calling-other-servers-http) whatever `code/outbound.ms` says |
+| `outbound.allow` | none | a cap: hosts (as in `outbound.ms`) your code's list must also fit within |
+| `outbound.allowAddresses` | `[]` | internal addresses (or ranges) `http` may reach, which are otherwise always refused |
+| `outbound.perMinute` | 120 | the most outbound requests a minute, for the whole app |
+| `outbound.maxResponseKB` | 5,120 | the largest response (after decompression) |
+| `outbound.timeoutSeconds` | 10 | the longest one request may take, redirects included (and never past the request's own budget) |
+| `mail.appMail` | `true` | `false` turns off [`mail.send`](#sending-email-mailsend) |
+| `mail.appPerHour` | 100 | the most messages `mail.send` may send an hour, for the whole app |
 | `deploy.migrationWaitSeconds` | 30 | how long requests wait while migrations run, before a 503 |
 | `deploy.migrationBudgetSeconds` | 600 | how long one migration may run |
 | `deploy.clearAnonymousSessions` | `false` | sign out every anonymous visitor after migrations |
@@ -1524,9 +1538,9 @@ secrets.smtpPassword = {"value": "..."}
 ```
 
 `app.ms` names secrets; it never holds them. A secret with no `hosts` (like
-this one) is for Fourfold's own use and never visible to your code. (Secrets
-with `hosts`, for your code's requests to other services, will come with a
-later version.)
+this one) is for Fourfold's own use and never visible to your code. Secrets
+your code uses, for API keys and webhook signatures, are in
+[Secrets: API keys in your code](#secrets-api-keys-in-your-code).
 
 How changes are handled:
 
@@ -1898,6 +1912,256 @@ very easy in dev, so testing isn't slowed.
 
 ---
 
+## Calling other servers: `http`
+
+Your code can call other servers' APIs (weather, maps, payments, chat
+webhooks) with the `http` module:
+
+```
+get.weather = function(req)
+    resp = http.get("https://api.weather.gov/points/39.7,-97.1")
+    if resp isa error then return status(502, "The weather service didn't answer: " + resp.message)
+    return json(resp.json.properties)
+end function
+```
+
+### Which hosts: `code/outbound.ms`
+
+**Your code can reach only the hosts you list**, in `code/outbound.ms`,
+read when the app compiles (like `access.ms`). With no `outbound.ms`, `http`
+can reach nothing at all.
+
+```
+// code/outbound.ms
+allow = ["api.weather.gov", "*.stripe.com", "http://feeds.example.org", "api.example.com:8443"]
+```
+
+- A host name allows that host only; `"*.stripe.com"` allows its subdomains
+  (`api.stripe.com`), not `stripe.com` itself.
+- **HTTPS only**, on port 443, unless you write `"http://host"` (which
+  allows plain HTTP too) or a port (`"host:8443"`).
+- `"*"` allows any public host, for things like link previews or a feed
+  reader that fetch URLs visitors give you. It's allowed, with a warning, and
+  stands out in the outbound report.
+- Your host's admin can tighten this list (`config.outbound`), never widen it.
+
+### What comes back
+
+| Call | Sends |
+|---|---|
+| `http.get(url, headers=null)` | GET |
+| `http.head(url, headers=null)`, `http.delete(url, headers=null)` | HEAD, DELETE |
+| `http.post(url, body=null, headers=null)` | POST; `http.put` and `http.patch` the same |
+| `http.request(method, url, body=null, headers=null)` | any of those |
+
+Each returns a map:
+
+| Key | Is |
+|---|---|
+| `status` | the status code: 200, 404, ... |
+| `headers` | the response's headers, with **lowercase** names |
+| `body` | the body as text, or `null` if it isn't text |
+| `raw` | the body as [`RawData`](#binary-files-rawdata), when `body` is `null` (an image, say) |
+| `json` | the body parsed, if the response says it's JSON; else `null` |
+
+- **A response is a response, whatever its status**: a 404 or 500 comes back
+  as a map with that `status`. Check it.
+- **A request that couldn't be made returns an error value**: a host not on
+  your list, a refused address, a timeout, a response that's too big.
+  Check with `isa error`; `resp.message` says why.
+- **A body** that's a map or list is sent as JSON; a string as text; `RawData`
+  as bytes. Each gets a matching `Content-Type`, unless your headers set one.
+- **Headers** are a map: `{"Accept": "application/json"}`. A few belong to
+  the engine and can't be set (`Host`, `Content-Length` and the like).
+- Spaces and other characters a URL can't hold are encoded for you:
+  `"https://api.example.com/search?q=" + city` works with `"San Jose"`.
+- **What comes back is untrusted**, like anything a visitor types. Putting
+  it in a page is safe (fields are always escaped), but don't treat it as
+  code, and check what you use.
+- Calls wait, but the server doesn't: other visitors are served meanwhile.
+  The time counts against your request's budget.
+
+### What's always refused
+
+Whatever your list says, the engine never connects to private or internal
+addresses: `localhost` and 127.0.0.1, your network's private ranges
+(10.x, 192.168.x, ...), and 169.254.169.254, where cloud servers keep their
+credentials. It checks the address it actually connects to, every time, so
+a name that points there (or starts pointing there later) is refused too.
+If your app really needs an internal service, your admin can allow its
+address (`config.outbound.allowAddresses`).
+
+**Redirects** are followed, at most 5, and each one is checked the same way:
+a redirect to a host not on your list, to a private address, or from HTTPS
+to plain HTTP, fails. A 303 (and a 301 or 302 after a POST) becomes a GET,
+as in a browser.
+
+### Limits
+
+| Limit | Default |
+|---|---|
+| Time, for the whole request (redirects included) | 10 seconds, and never past your request's own budget |
+| Response size (after decompression) | 5 MB |
+| Requests, for the whole app | 120 a minute |
+
+Your admin can change these (`config.outbound`; see
+[Configuration](#configuration-privateconfig)).
+
+### Seeing what your code sent
+
+Every request is written to the engine log (`private/state/logs/`): host,
+status, time and size, with the query string and any secrets left out. In
+dev mode, `/__dev/outbound` shows your allowed hosts, your secrets (names
+only), your webhooks, and the latest requests, refused ones included, with
+why.
+
+---
+
+## Secrets: API keys in your code
+
+An API key goes in `private/config/secrets.ms`, with the hosts it may be
+sent to:
+
+```
+// private/config/secrets.ms
+secrets = {}
+secrets.weatherKey = {"value": "abc123", "hosts": ["api.weather.example"]}
+secrets.stripeHook = {"value": "whsec_...", "verify": true}
+secrets.smtpPassword = {"value": "..."}
+```
+
+Your code sees each one as `secrets.name`: **a handle, not the key**. It
+can't read the key, print it, or change it. It can only send it, in a URL or
+a header, and the engine puts the real value in as the request goes out,
+only to that secret's hosts:
+
+```
+resp = http.get("https://api.weather.example/today", {"Authorization": ["Bearer ", secrets.weatherKey]})
+resp = http.get(["https://api.weather.example/today?key=", secrets.weatherKey])
+```
+
+- A URL or header value can be **a list of strings and secrets**, joined as
+  the request goes out. That's how to write `"Bearer "` in front of a key.
+- **A secret goes only to its own hosts.** Sent anywhere else (a typo, or a
+  URL a visitor steered), the request isn't sent; a redirect elsewhere
+  fails too. `"*.example.com"` in `hosts` covers subdomains.
+- A secret in a URL goes only in its path or query (encoded for you), never
+  its host.
+- **It can't end up anywhere else.** `str(secrets.weatherKey)` is just a
+  placeholder; putting a secret in a page, `data`, the `session`, `json()`
+  or a mail is an error. So a bug can't leak a key into a page or a log.
+- **Three kinds:** a secret with `hosts` can be sent to them; one with
+  `"verify": true` can [check webhook signatures](#being-called-webhooks)
+  but is never sent anywhere; one with neither is for the engine only (mail
+  and database passwords), and your code can't use it at all.
+
+Keep `secrets.ms` out of version control. `app.ms` can be shared;
+`secrets.ms` can't.
+
+---
+
+## Being called: webhooks
+
+Payment providers, GitHub and others call **into** your app: they POST to a
+URL you give them when something happens. They aren't browsers, so they
+can't send a [CSRF token](#forms-and-csrf-protection), and an ordinary
+`post` handler refuses them. A webhook handler is for them:
+
+```
+// code/pages/pay.ms
+webhook.stripe = function(req)
+    sig = ""
+    if req.headers.hasIndex("x-signature") then sig = req.headers["x-signature"]
+    if not hmac.verify("sha256", secrets.stripeHook, req.rawBody, sig) then return status(400, "bad signature")
+    event = req.json
+    ...
+    return "ok"
+end function
+```
+
+- `webhook.stripe` in `pages/pay.ms` answers `POST /pay/stripe`, with **no
+  CSRF check**. It answers POST only.
+- **In place of the token, check the caller's signature.** Most providers
+  sign each call with a key you share with them: put it in `secrets.ms`
+  with `"verify": true`, and check with `hmac.verify`.
+- `req.rawBody` is the body exactly as sent (what the signature covers), and
+  `req.json` is the body parsed, if it's JSON. Only webhooks get them.
+- Access rules and rate limits still apply; a webhook URL is usually public,
+  since the caller isn't signed in. (A route's `minSeconds` and `challenge`
+  don't apply: there's no form.)
+- A `post.x` and a `webhook.x` with the same name are an error: both would
+  answer the same POST.
+
+`hmac.verify(algorithm, secret, message, signature)` returns 1 if
+`signature` is the HMAC of `message` with the secret, else 0. The algorithm
+is `"sha256"` (the only one so far); the signature may be hex or base64,
+and GitHub's `"sha256="` prefix is fine. Some providers sign more than the
+body (Stripe signs a timestamp, a dot, then the body): build the message as
+their docs say. The check takes the same time whether it matches or not.
+
+---
+
+## Sending email: `mail.send`
+
+```
+post.signup = function(req)
+    ...
+    mail.send req.user.id, "Welcome!", "welcome", {"name": req.user.name}
+    return redirect("/thanks")
+end function
+```
+
+```markdown
+<!-- code/mail/welcome.md -->
+# Welcome, {{name}}!
+
+Thanks for joining. Here's how to get started: ...
+```
+
+`mail.send(to, subject, template, fields=null, options=null)` sends one
+message:
+
+- **`to` is a user's id** (the engine finds their address), or an address
+  your `code/outbound.ms` lists in `mailTo`:
+
+  ```
+  mailTo = ["owner@example.com", "*@staff.example.com"]
+  ```
+
+  That's for things like a contact form that mails the site's owner. Any
+  other address is refused, so your app can't be made to mail strangers.
+  (`mailTo = ["*"]` allows any address, with a warning; it's rarely what
+  you want.)
+- **Blind copies**: `{"bcc": "owner@example.com"}` in `options` (or a
+  list of up to 10) sends each the same message, by the same rules as `to`:
+  a user's id, or an address in `mailTo`. They're in no header, so the
+  recipient doesn't see them, and they don't see each other:
+
+  ```
+  mail.send user.id, "Your order shipped", "shipped", order, {"bcc": "owner@example.com"}
+  ```
+
+  There's no CC, on purpose: it would show users' addresses to each other.
+  To copy someone openly, send them a message of their own.
+- **The body is a Markdown template** in `code/mail/` (`welcome` is
+  `code/mail/welcome.md`), filled with `fields` like a
+  [fragment](#fragments-and-includes), and sent both as text (the Markdown
+  itself) and as HTML. Includes of Markdown fragments work.
+- **The subject is plain text**, one line. Nothing a visitor typed can add a
+  header or a recipient: there are no raw headers to add.
+- It returns `null` once the mail server has the message, or an error value.
+- The message comes from `config.mail.from`, through the mail settings in
+  [Configuration](#configuration-privateconfig). In dev mode it's printed in
+  the terminal instead of sent.
+- The whole app may send 100 messages an hour (`config.mail.appPerHour`),
+  counting each recipient, blind copies included. If any recipient is
+  refused (or the message would go over the limit), nothing is sent.
+
+Sending waits for the mail server, which can take a second or two. (Sending
+in the background will come with background jobs.)
+
+---
+
 ## HTMX: updating part of a page
 
 Fourfold includes [HTMX](https://htmx.org), which lets a page update in place
@@ -2131,6 +2395,12 @@ loop:
   URL, who may use it, and why; and its rate limits, spam checks and form.
 - **Rate limits**, at `/__dev/limits` (also in the corner menu): the counters,
   the latest requests counted or refused, and a button to reset them.
+- **The outbound report**, at `/__dev/outbound` (also in the corner menu):
+  the hosts your code may reach, the addresses it may mail, your secrets
+  (names and hosts, never values), your webhooks, and the latest outbound
+  requests, refused ones included, with why.
+- **Mail from `mail.send`** is printed in the terminal too, like sign-in
+  emails.
 - **Migrations** are applied as soon as you save one (with a backup first),
   and `code/seed.ms` fills a fresh database with sample data. `/__dev/migrations`
   shows which are applied, pending, failed or changed, with two buttons:
@@ -2152,7 +2422,7 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | Path | Is |
 |---|---|
 | `code/pages/x.html` | the page at `/x` |
-| `code/pages/x.ms` | its code: `render`, `get.*`, `post.*` |
+| `code/pages/x.ms` | its code: `render`, `get.*`, `post.*`, `webhook.*` |
 | `code/pages/x.md` | a Markdown page at `/x`, and as Markdown at `/x.md` |
 | `code/pages/dir/index.html` | the page at `/dir/` |
 | `code/pages/404.html`, `500.html`, `429.html`, `503.html` | the error pages (503: while migrations run too long) |
@@ -2162,6 +2432,8 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `code/lib/x.ms` | the module for `import "x"` |
 | `code/access.ms` | access rules: `rules["/path"] = "login"` |
 | `code/limits.ms` | rate limits and spam checks: `limits["/path"] = "5/minute"` |
+| `code/outbound.ms` | hosts `http` may reach, `allow = [...]`, and addresses `mail.send` may write to, `mailTo = [...]` |
+| `code/mail/x.md` | the mail template `x` |
 | `code/queries/x.sql` | the named query `x`; `x.sqlite.sql`, `x.pg.sql` for one database |
 | `code/migrations/001_x.sql` | a migration: SQL, a folder with `migrate.ms`, or a `.ms` file |
 | `code/seed.ms` | sample data for a fresh dev database |
@@ -2222,6 +2494,10 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `users.get(id)`, `users.find(email)` | the user's map, or null |
 | `users.grant(id, role)`, `users.revoke(id, role)` | null |
 | `db.query(name, values=null)` | the rows, a list of maps |
+| `http.get(url, headers=null)` | `{status, headers, body, raw, json}`, or an error; also `head`, `delete` |
+| `http.post(url, body=null, headers=null)` | the same; also `put`, `patch`, and `http.request(method, url, body, headers)` |
+| `hmac.verify(algorithm, secret, message, signature)` | 1 if the signature matches, else 0 |
+| `mail.send(to, subject, template, fields=null, options=null)` | null, once sent; `to` (and each of `options.bcc`) is a user's id or an address in `mailTo` |
 
 ### Globals
 
@@ -2231,6 +2507,8 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `access` | set in a page's `.ms` file: who may use its page and handlers |
 | `session` | this visitor's map, saved if changed; `session.flash` is removed once a page shows it |
 | `get`, `post` | maps of handlers |
+| `webhook` | a map of handlers for POSTs from other servers, without CSRF checks |
+| `secrets` | handles for the secrets in `secrets.ms` that your code may use |
 | `form` | a map of form declarations: `form.sign` for `post.sign` |
 | `migrate` | in a migration: the function that makes the change |
 | `render` | the page's render function, if it has one |

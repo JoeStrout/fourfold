@@ -169,6 +169,12 @@ void limitsPass(const CodeListing& listing, const CodeTree& code, DataEvaluator*
                                                                 : rule.maxAgeSeconds;
             }
             entry->challenge = entry->challenge || rule.challenge;
+            if (entry->webhook && (rule.minSeconds > 0 || rule.challenge)) {
+                diagnostics.warning(fileName, "the rule for " + rule.path + " has " +
+                                                  (rule.challenge ? "a challenge" : "minSeconds") + ", which " +
+                                                  entry->webhook->label() + " (" + url +
+                                                  ") doesn't get: a webhook's caller isn't a browser");
+            }
         }
     }
     for (const LimitRule& rule : rules) {

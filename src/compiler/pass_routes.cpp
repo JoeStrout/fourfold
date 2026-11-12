@@ -81,14 +81,27 @@ void routeHandlers(const RelPath& source, const std::vector<std::string_view>& s
         auto [it, isNew] = entries.try_emplace(name, RouteEntry{RouteKind::Handler, source});
         it->second.usesSession = handlers.usesSession;
         HandlerRef ref{kind, source, name};
-        (kind == HandlerRef::Kind::Get ? it->second.get : it->second.post) = ref;
+        (kind == HandlerRef::Kind::Get    ? it->second.get
+         : kind == HandlerRef::Kind::Post ? it->second.post
+                                          : it->second.webhook) = ref;
     };
     for (const std::string& name : handlers.get) add(HandlerRef::Kind::Get, name);
     for (const std::string& name : handlers.post) add(HandlerRef::Kind::Post, name);
+    for (const std::string& name : handlers.webhook) add(HandlerRef::Kind::Webhook, name);
 
     for (auto& [name, entry] : entries) {
-        std::string what = entry.get ? entry.get->label() : entry.post->label();
-        if (entry.get && entry.post) what += " and " + entry.post->label();
+        if (entry.post && entry.webhook) {
+            // Both would answer POST, one with CSRF protection and one without.
+            diagnostics.error(codeFileName(source), "post." + name + " and webhook." + name +
+                                                        " can't both be defined: both answer POST to the same URL");
+            continue;
+        }
+        std::vector<std::string> labels;
+        for (const std::optional<HandlerRef>* h : {&entry.get, &entry.post, &entry.webhook}) {
+            if (*h) labels.push_back((*h)->label());
+        }
+        std::string what = labels[0];
+        for (size_t i = 1; i < labels.size(); i++) what += " and " + labels[i];
         addRoute(app, diagnostics, base + "/" + name, std::move(entry), what);
     }
 }
