@@ -6,7 +6,8 @@
 // One file per day (UTC), "logs/engine-2026-10-25.log", one line per entry:
 //   2026-10-25T20:31:02.123Z csrf POST /guestbook/sign: no CSRF cookie
 // Control characters in a message are escaped, so a message can't make a line
-// of its own. Rotation and retention come in M11.
+// of its own. A new file each day is the rotation; removeOldFiles() is the
+// retention (config.logging.keepDays).
 //
 // write() is thread-safe and never waits for the disk: lines go to a
 // background thread.
@@ -43,6 +44,10 @@ public:
     // The current file's path within private/state/, e.g.
     // "logs/engine-2026-10-25.log".
     std::string currentFile() const;
+
+    // Removes day files more than `keepDays` days old (today's is day 0).
+    // Returns how many it removed.
+    Result<size_t> removeOldFiles(int keepDays) const;
 
 private:
     void writerMain();

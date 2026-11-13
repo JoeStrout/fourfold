@@ -254,7 +254,9 @@ struct Engine::Flow {
     // The standard headers, a new CSRF cookie, cache rules, and the dev
     // tools' hook for full pages; then the response goes.
     void send(HttpResponse response, bool fullPage = true) const {
-        addStandardHeaders(response, render.nonce);
+        // HSTS: production, over HTTPS (dev mode is plain HTTP on localhost).
+        bool hsts = options->https && !options->showErrorDetails;
+        addStandardHeaders(response, render.nonce, config ? &config->headers : nullptr, hsts);
         if (personal) response.headers.set("Cache-Control", "private, no-store");
         if (newCsrfCookie && isHtml(response)) {
             response.headers.add("Set-Cookie", setCookie("csrf", *newCsrfCookie, options->https, kCsrfCookieSeconds));
@@ -332,12 +334,24 @@ void Engine::handle(const HttpRequest& request, Done done) const {
     // renders carries it, and the CSP allows no other inline script.
     f->render.nonce = randomBase64(kNonceBytes);
     const EngineOptions& options = *options_;
+    f->config = config();   // for the headers, whatever happens next
 
     if (auto rejected = admit(request, options, f->admitted)) {
         f->send(std::move(*rejected), false);
         return;
     }
     const std::string& path = f->admitted.path.path;
+
+    // CSP violation reports (overview §8): logged, at most so many a
+    // minute, and shown in dev mode's overlay. No CSRF token: browsers
+    // send them on their own.
+    if (path == kCspReportPath) {
+        if (request.method == "POST" && request.body.size() <= 64 * 1024) cspReport(request, f->config.get());
+        HttpResponse r;
+        r.status = request.method == "POST" ? 204 : 405;
+        f->send(std::move(r), false);
+        return;
+    }
 
     // Reserved paths go to their owners before routing (Arch §5, pipeline).
     if (hasPrefix(path, "/__dev")) {
@@ -375,6 +389,35 @@ void Engine::handle(const HttpRequest& request, Done done) const {
         return;
     }
     proceed(std::move(f));
+}
+
+void Engine::cspReport(const HttpRequest& request, const AppConfig* config) const {
+    std::vector<std::string> violations = describeCspReport(request.body);
+    if (violations.empty()) return;
+    std::string from = clientAddress(request, config ? config->proxy.trust : std::vector<AddressRange>{});
+    for (const std::string& v : violations) {
+        if (options_->observer) options_->observer->cspViolation(v);
+        bool logIt = false;
+        {
+            std::lock_guard<std::mutex> lock(cspMutex_);
+            auto now = std::chrono::steady_clock::now();
+            if (now - cspWindowStart_ >= std::chrono::minutes(1)) {
+                if (cspDropped_ > 0 && options_->log) {
+                    options_->log->write("csp", std::to_string(cspDropped_) + " more reports not logged");
+                }
+                cspWindowStart_ = now;
+                cspLogged_ = 0;
+                cspDropped_ = 0;
+            }
+            if (cspLogged_ < kCspReportsPerMinute) {
+                cspLogged_++;
+                logIt = true;
+            } else {
+                cspDropped_++;
+            }
+        }
+        if (logIt && options_->log) options_->log->write("csp", from + " " + v);
+    }
 }
 
 HttpResponse Engine::unavailable(const CompiledApp* app, const std::string& nonce) const {

@@ -2,6 +2,7 @@
 
 #include <fstream>
 #include <sstream>
+#include <sys/stat.h>
 
 #include "doctest.h"
 #include "partition/app_folder.h"
@@ -54,4 +55,25 @@ TEST_CASE("Engine key: made once, then the same") {
     REQUIRE(state.write(RelPath::parse("secret.key").value(), "short"));
     CHECK_FALSE(loadOrCreateEngineKey(state));
     CHECK(state.create(RelPath::parse("secret.key").value(), "x").error().code == ErrorCode::Conflict);
+}
+
+TEST_CASE("EngineLog: removes day files past the retention") {
+    TempDir dir;
+    auto app = AppFolder::open(dir.at("app"), AppFolder::Missing::Create).value();
+    ManualClock clock(1'761'436'262'123);   // 2025-10-25T23:51:02.123Z
+    EngineLog log(app.stateDir().value(), clock);
+    log.write("start", "today");
+    log.flush();
+    for (const char* old : {"engine-2025-10-15.log", "engine-2025-10-14.log", "engine-2025-09-01.log"}) {
+        dir.write(std::string("app/private/state/logs/") + old, "x\n");
+    }
+    dir.write("app/private/state/logs/other.txt", "kept\n");
+    auto removed = log.removeOldFiles(10);   // keeps 2025-10-15 onward
+    REQUIRE(removed.ok());
+    CHECK_EQ(removed.value(), 2u);
+    struct stat st;
+    CHECK_EQ(::stat(dir.at("app/private/state/logs/engine-2025-10-15.log").c_str(), &st), 0);
+    CHECK_NE(::stat(dir.at("app/private/state/logs/engine-2025-10-14.log").c_str(), &st), 0);
+    CHECK_EQ(::stat(dir.at("app/private/state/logs/other.txt").c_str(), &st), 0);
+    CHECK_EQ(::stat(dir.at("app/private/state/logs/engine-2025-10-25.log").c_str(), &st), 0);
 }

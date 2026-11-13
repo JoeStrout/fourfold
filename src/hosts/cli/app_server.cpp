@@ -1,6 +1,7 @@
 #include "app_server.h"
 
 #include <ostream>
+#include <sys/resource.h>
 #include <sys/stat.h>
 
 #include "partition/app_folder.h"
@@ -17,6 +18,29 @@ bool insidePartition(const std::string& folder, const std::string& root, const c
     std::string p = root + "/" + name;
     return folder == p || folder.rfind(p + "/", 0) == 0;
 }
+
+// Connections the server may hold: what the open-file limit allows (raised
+// to its hard limit, up to 65536), less room for the engine's own files.
+size_t connectionsForMachine() {
+    struct rlimit r;
+    if (getrlimit(RLIMIT_NOFILE, &r) != 0) return 1024;
+    rlim_t want = r.rlim_max == RLIM_INFINITY ? 65536 : std::min<rlim_t>(r.rlim_max, 65536);
+    if (r.rlim_cur < want) {
+        struct rlimit raised = r;
+        raised.rlim_cur = want;
+        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) r = raised;
+    }
+    rlim_t files = r.rlim_cur == RLIM_INFINITY ? 65536 : r.rlim_cur;
+    return files > 512 ? static_cast<size_t>(files - 256) : 256;
+}
+
+// "example.com:443" → "example.com".
+std::string hostOnly(const std::string& host) {
+    if (!host.empty() && host[0] == '[') return host.substr(0, host.find(']') + 1);
+    return host.substr(0, host.find(':'));
+}
+
+const char* const kChallengePrefix = "/.well-known/acme-challenge/";
 
 }  // namespace
 
@@ -337,7 +361,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     engineOptions.rates = server->rates_.get();
     engineOptions.db = server->database_.get();
     engineOptions.schema = &server->schema_;
-    engineOptions.https = options.https;
+    engineOptions.https = options.https || options.tls;
     engineOptions.engineKey = std::move(key).value();
     engineOptions.jobs = server->jobQueue_.get();
     engineOptions.jobsAdded = [self] {
@@ -427,7 +451,24 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     if (!options.listen) return server;
     server->jobRunner_->start();
 
-    server->server_ = std::make_unique<HttpServer>(*server->loop_, [self](HttpRequest request, Responder respond) {
+    // The connection and request limits (overview §8): config.server's, or
+    // in dev mode, generous ones (every tab is localhost).
+    const ServerConfig& sc = config->server;
+    HttpServerLimits limits;
+    limits.maxConnections = sc.connections ? sc.connections : connectionsForMachine();
+    limits.maxConnectionsPerAddress = options.dev ? limits.maxConnections : sc.connectionsPerAddress;
+    // A trusted proxy carries many visitors; so does a local one that isn't
+    // listed (and no one outside can connect from loopback).
+    limits.perAddressExempt = config->proxy.trust;
+    limits.perAddressExempt.push_back(*AddressRange::parse("127.0.0.0/8"));
+    limits.perAddressExempt.push_back(*AddressRange::parse("::1"));
+    limits.maxStreams = sc.streams;
+    limits.maxStreamsPerAddress = options.dev ? sc.streams : sc.streamsPerAddress;
+    limits.headerTimeout = sc.headerTimeout;
+    limits.minBodyBytesPerSecond = sc.minUploadBytesPerSecond;
+    limits.idleTimeout = sc.keepAlive;
+
+    RequestHandler handler = [self](HttpRequest request, Responder respond) {
         std::string line = request.method + " " + request.target;
         bool quiet = request.target.compare(0, 7, "/__dev/") == 0;   // the dev tools' own traffic
         // The visitor's address, as the engine sees it (a trusted proxy's
@@ -447,15 +488,45 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
                 respond(std::move(*shared));
             });
         });
-    });
-    if (Status s = server->server_->listen(options.address, options.port); !s) {
-        err << command << "can't listen on " << options.address << " port " << options.port << ": "
-            << s.error().message << "\n";
+    };
+    AdmissionLimits admission;
+    admission.maxRunning = sc.requests;
+    admission.maxWait = sc.requestWait;
+    server->server_ = std::make_unique<HttpServer>(*server->loop_, limitConcurrency(*server->loop_, handler, admission),
+                                                   limits);
+    server->server_->setClientAddress(
+        [self](const HttpRequest& request) { return clientAddress(request, self->engine_->config()->proxy.trust); });
+
+    if (options.tls) {
+        if (Status s = server->startTls(*config, hosts, options); !s) {
+            err << command << s.error().message << "\n";
+            return nullptr;
+        }
+    }
+
+    auto listenOn = [&](HttpServer& http, const std::shared_ptr<Fd>& inherited, const std::string& address,
+                        uint16_t port) -> bool {
+        Status s = inherited && inherited->valid() ? http.adopt(std::move(*inherited)) : http.listen(address, port);
+        if (s) return true;
+        err << command << "can't listen on " << address << " port " << port << ": " << s.error().message;
+        if (port < 1024 && s.error().message.find("ermission") != std::string::npos) {
+            err << " (ports under 1024 need systemd's socket activation, or CAP_NET_BIND_SERVICE; "
+                   "see the admin guide)";
+        }
+        err << "\n";
+        return false;
+    };
+    if (!listenOn(*server->server_, options.listenSocket, options.address, options.port)) return nullptr;
+    if (server->redirect_ &&
+        !listenOn(*server->redirect_, options.redirectSocket, options.redirectAddress, options.redirectPort)) {
         return nullptr;
     }
+    if (server->certificates_) server->certificates_->start();
     server->log_->write("start", std::string(options.dev ? "dev" : "serve") + " mode, listening on " +
                                      options.address + " port " + std::to_string(server->port()) +
-                                     (options.https ? ", behind HTTPS" : ", plain HTTP"));
+                                     (options.tls ? ", TLS" : options.https ? ", behind HTTPS" : ", plain HTTP") +
+                                     (server->redirect_ ? "; redirecting port " + std::to_string(server->redirectPort())
+                                                        : std::string()));
     server->scheduleSweep(std::chrono::milliseconds(0));
     server->scheduleControl(kControlInterval);
     if (config->backups.everyHours > 0) {
@@ -464,11 +535,120 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     return server;
 }
 
+Status AppServer::startTls(const AppConfig& config, const std::vector<std::string>& hosts,
+                           const ServerOptions& options) {
+    auto tls = ServerTls::create(config.tls.http2);
+    if (!tls) return tls.error();
+    tls_ = std::move(tls).value();
+    server_->setTls(tls_);
+
+    if (!config.tls.certFile.empty()) {
+        // The app's own certificate, from private/config/.
+        auto cert = configDir_->read(config.tls.certFile);
+        auto key = configDir_->read(config.tls.keyFile);
+        if (!cert || !key) return (!cert ? cert.error() : key.error());
+        if (!cert.value() || !key.value()) {
+            return makeError(ErrorCode::NotFound, "config.tls names " +
+                                                      (!cert.value() ? config.tls.certFile : config.tls.keyFile) +
+                                                      ", which isn't in private/config/");
+        }
+        if (Status s = tls_->install(cert.value()->contents(), key.value()->contents()); !s) {
+            return makeError(s.error().code, "config.tls's certificate: " + s.error().message);
+        }
+        auto info = inspectCertificate(cert.value()->contents());
+        if (info && info.value().notAfter < static_cast<int64_t>(std::time(nullptr)) + 14 * 86400) {
+            sayError("Warning: the certificate in private/config/" + config.tls.certFile +
+                     (info.value().notAfter < static_cast<int64_t>(std::time(nullptr)) ? " has expired."
+                                                                                      : " expires within two weeks."));
+        }
+    } else {
+        // From an ACME CA (Let's Encrypt), for the public names the app
+        // answers to.
+        CertificateManagerOptions o;
+        for (const std::string& h : hosts) {
+            if (CertificateManager::certifiable(h)) o.names.push_back(h);
+        }
+        if (o.names.empty()) {
+            return makeError(ErrorCode::Invalid,
+                             "TLS needs the site's public name, to get a certificate for it: set config.domain in "
+                             "private/config/app.ms (or give --host), or give a certificate with config.tls.certFile");
+        }
+        o.acme.directoryUrl = config.tls.acmeDirectory.empty() ? kLetsEncryptDirectory : config.tls.acmeDirectory;
+        o.acme.email = config.tls.email;
+        o.acmeCaBundle = config.tls.acmeCaBundle;
+        std::shared_ptr<ServerTls> serverTls = tls_;
+        o.install = [serverTls](const std::string& chain, const std::string& key) { return serverTls->install(chain, key); };
+        AppServer* self = this;
+        o.log = [self](const std::string& line) {
+            self->log_->write("tls", line);
+            self->say("TLS: " + line);
+        };
+        auto manager = CertificateManager::create(*state_, std::move(o));
+        if (!manager) return manager.error();
+        certificates_ = std::move(manager).value();
+    }
+
+    if (options.redirectAddress.empty() && !(options.redirectSocket && options.redirectSocket->valid())) return {};
+    // Port 80: ACME's challenges, and a redirect to HTTPS for everything
+    // else. The redirect goes to one of the app's own names (never one a
+    // visitor made up), and keeps the path.
+    std::vector<std::string> names = hosts;
+    CertificateManager* certificates = certificates_.get();
+    HttpServer* https = server_.get();
+    RequestHandler redirect = [names, https, certificates](HttpRequest request, Responder respond) {
+        uint16_t httpsPort = https->port();   // as bound (socket activation, or port 0)
+        const std::string& target = request.target;
+        if (target.compare(0, std::char_traits<char>::length(kChallengePrefix), kChallengePrefix) == 0) {
+            std::string token = target.substr(std::char_traits<char>::length(kChallengePrefix));
+            std::optional<std::string> answer;
+            if (certificates) answer = certificates->challenges().get(token);
+            HttpResponse r = answer ? HttpResponse::text(200, *answer) : HttpResponse::text(404, "Not Found\n");
+            if (answer) r.headers.set("Content-Type", "application/octet-stream");
+            respond(std::move(r));
+            return;
+        }
+        std::string host = names.empty() ? std::string() : names[0];
+        if (const std::string* h = request.headers.get("Host")) {
+            for (const std::string& n : names) {
+                if (equalsIgnoreCase(hostOnly(*h), n)) host = n;
+            }
+        }
+        if (host.empty() || target.empty() || target[0] != '/') {
+            respond(HttpResponse::text(400, "Bad Request\n"));
+            return;
+        }
+        bool safe = request.method == "GET" || request.method == "HEAD";
+        HttpResponse r = HttpResponse::text(safe ? 301 : 308, "Moved to HTTPS\n");
+        r.headers.set("Location", "https://" + host + (httpsPort == 443 ? "" : ":" + std::to_string(httpsPort)) + target);
+        respond(std::move(r));
+    };
+    HttpServerLimits limits;
+    limits.maxBodyBytes = 16 * 1024;
+    limits.maxUploadBodyBytes = 16 * 1024;
+    limits.maxConnections = 1024;
+    limits.perAddressExempt = config.proxy.trust;
+    redirect_ = std::make_unique<HttpServer>(*loop_, std::move(redirect), limits);
+    return {};
+}
+
+void AppServer::shutdown(std::chrono::milliseconds deadline) {
+    log_->write("stop", "shutting down: finishing requests in flight");
+    if (redirect_) redirect_->shutdown(std::chrono::milliseconds(1000), [] {});
+    if (!server_) {
+        loop_->stop();
+        return;
+    }
+    EventLoop* loop = loop_.get();
+    server_->shutdown(deadline, [loop] { loop->stop(); });
+}
+
 AppServer::~AppServer() {
     // The server first (closing connections), then the app instance (no more
     // compiles), then the script host (its thread and workers stop, so no
     // run calls back into the engine's options, hooks or stores), and the
     // rest after.
+    certificates_.reset();
+    redirect_.reset();
     server_.reset();
     if (controlThread_.joinable()) controlThread_.join();
     instance_.reset();
@@ -500,6 +680,9 @@ void AppServer::scheduleSweep(std::chrono::milliseconds delay) {
             if (!tokens) log_->write("auth", "sweeping old sign-in links failed: " + tokens.error().message);
             auto counters = rates_->sweep();
             if (!counters) log_->write("limits", "sweeping old rate-limit counters failed: " + counters.error().message);
+            // Retention for the engine's logs (config.logging.keepDays).
+            auto logs = log_->removeOldFiles(engine_->config()->logging.keepDays);
+            if (!logs) log_->write("log", "removing old log files failed: " + logs.error().message);
         });
         scheduleSweep(kSweepInterval);
     });
@@ -662,6 +845,11 @@ void AppServer::jobsEnqueued(const std::string& source, const std::vector<std::s
     std::string list;
     for (size_t i = 0; i < names.size(); i++) list += (i ? ", " : "") + names[i];
     sayError("Note: " + source + " failed, so the jobs it enqueued were dropped (" + list + ").");
+}
+
+void AppServer::cspViolation(const std::string& description) {
+    // In production the engine logs it (rate-limited).
+    if (dev_) sayError("Content Security Policy: " + description);
 }
 
 void AppServer::say(const std::string& line) {

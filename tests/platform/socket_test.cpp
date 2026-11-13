@@ -1,6 +1,10 @@
 #include "platform/socket.h"
 #include "platform/address.h"
 
+#include <cstdlib>
+#include <sys/wait.h>
+#include <unistd.h>
+
 #include "doctest.h"
 
 using namespace fourfold;
@@ -88,4 +92,42 @@ TEST_CASE("AddressRange: addresses and CIDR ranges, IPv4 and IPv6") {
         CAPTURE(bad);
         CHECK_FALSE(fourfold::AddressRange::parse(bad));
     }
+}
+
+TEST_CASE("takeSystemdSockets: only this process's, with their names, and the variables go") {
+    setenv("LISTEN_PID", "1", 1);   // not this process
+    setenv("LISTEN_FDS", "1", 1);
+    setenv("LISTEN_FDNAMES", "https", 1);
+    CHECK(takeSystemdSockets().empty());
+    CHECK(getenv("LISTEN_PID") == nullptr);
+    CHECK(getenv("LISTEN_FDS") == nullptr);
+    CHECK(getenv("LISTEN_FDNAMES") == nullptr);
+    CHECK(takeSystemdSockets().empty());   // nothing set
+
+    // As systemd does it: listening sockets at fds 3 and 4, in a child.
+    auto https = listenTcp("127.0.0.1", 0);
+    auto http = listenTcp("127.0.0.1", 0);
+    REQUIRE(https.ok());
+    REQUIRE(http.ok());
+    uint16_t httpsPort = localPort(https.value().get()).value();
+    uint16_t httpPort = localPort(http.value().get()).value();
+    pid_t child = fork();
+    REQUIRE(child >= 0);
+    if (child == 0) {
+        int a = dup(https.value().get()), b = dup(http.value().get());
+        dup2(a, 3);
+        dup2(b, 4);
+        setenv("LISTEN_PID", std::to_string(getpid()).c_str(), 1);
+        setenv("LISTEN_FDS", "2", 1);
+        setenv("LISTEN_FDNAMES", "https:http", 1);
+        auto got = takeSystemdSockets();
+        bool ok = got.size() == 2 && got[0].name == "https" && got[1].name == "http" &&
+                  localPort(got[0].fd.get()).value() == httpsPort && localPort(got[1].fd.get()).value() == httpPort &&
+                  getenv("LISTEN_FDS") == nullptr;
+        _exit(ok ? 0 : 1);
+    }
+    int status = 0;
+    waitpid(child, &status, 0);
+    CHECK(WIFEXITED(status));
+    CHECK_EQ(WEXITSTATUS(status), 0);
 }

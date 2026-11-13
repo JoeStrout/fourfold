@@ -2,12 +2,17 @@
 
 #include <sys/socket.h>
 
+#include <algorithm>
+
+#include "http2.h"
+
 namespace fourfold {
 
 namespace {
 
 constexpr size_t kReadChunk = 16 * 1024;
 constexpr std::chrono::milliseconds kDrainTimeout{2000};
+constexpr std::chrono::milliseconds kBodyCheckInterval{1000};
 
 bool hasLineBreak(const std::string& s) {
     return s.find_first_of("\r\n") != std::string::npos;
@@ -49,6 +54,7 @@ HttpConnection::HttpConnection(HttpServer& server, Fd fd, std::string peerAddres
       limits_(server.limits_),
       fd_(std::move(fd)),
       peerAddress_(std::move(peerAddress)) {
+    if (server.tls_) tls_ = std::make_unique<TlsSession>(server.tls_);
     llhttp_settings_init(&settings_);
     settings_.on_message_begin = onMessageBegin;
     settings_.on_url = onUrl;
@@ -79,19 +85,69 @@ void HttpConnection::start() {
         return;
     }
     interest_ = io::kReadable;
-    armTimer(limits_.idleTimeout);
+    // The first request (and the TLS handshake before it) must come
+    // promptly: a connection that sends nothing is a slowloris too.
+    armTimer(limits_.headerTimeout);
 }
 
 void HttpConnection::close() {
     if (state_ == State::Closed) return;
+    auto keep = shared_from_this();
     state_ = State::Closed;
     loop_.cancelTimer(timer_);
     loop_.unwatch(fd_.get());
     fd_.reset();
+    releaseStream();
+    if (h2_) h2_->closed();
     server_.removeConnection(this);
 }
 
-void HttpConnection::setInterest(uint32_t interest) {
+void HttpConnection::goAway() {
+    if (state_ == State::Closed || goingAway_) return;
+    goingAway_ = true;
+    switch (state_) {
+        case State::Reading:
+            if (!requestStarted_) {
+                close();
+            } else {
+                closeAfterWrite_ = true;   // answer it, then close
+            }
+            break;
+        case State::Handling:
+        case State::Writing:
+            closeAfterWrite_ = true;
+            break;
+        case State::Streaming:
+            endStream();
+            break;
+        case State::Http2:
+            h2_->goAway();
+            flush();
+            break;
+        case State::Draining:
+        case State::Closed:
+            break;
+    }
+}
+
+void HttpConnection::updateInterest() {
+    if (state_ == State::Closed) return;
+    bool pending = outSent_ < outbuf_.size();
+    uint32_t interest = pending ? io::kWritable : 0;
+    switch (state_) {
+        case State::Reading:
+        case State::Streaming:
+        case State::Draining:
+        case State::Http2:
+            interest |= io::kReadable;
+            break;
+        case State::Writing:
+            interest = io::kWritable;
+            break;
+        case State::Handling:
+        case State::Closed:
+            break;
+    }
     if (interest == interest_) return;
     interest_ = interest;
     if (!loop_.setInterest(fd_.get(), interest)) close();
@@ -99,12 +155,9 @@ void HttpConnection::setInterest(uint32_t interest) {
 
 void HttpConnection::onIo(uint32_t events) {
     auto keep = shared_from_this();   // close() may drop the server's reference
-    if ((events & io::kWritable) && (state_ == State::Writing || state_ == State::Streaming)) flush();
-    if ((events & io::kReadable) && (state_ == State::Reading || state_ == State::Draining)) {
-        onReadable();
-    } else if ((events & io::kReadable) && state_ == State::Streaming) {
-        discardInput();
-    }
+    if ((events & io::kWritable) && outSent_ < outbuf_.size()) flush();
+    if (state_ == State::Closed) return;
+    if (events & io::kReadable) onReadable();
 }
 
 void HttpConnection::onReadable() {
@@ -112,7 +165,8 @@ void HttpConnection::onReadable() {
     bool peerClosed = false;
     // Parse after each chunk, so at most one chunk waits while a request is
     // being handled.
-    while (state_ == State::Reading || state_ == State::Draining) {
+    while (state_ == State::Reading || state_ == State::Draining || state_ == State::Streaming ||
+           state_ == State::Http2) {
         auto n = readSome(fd_.get(), buffer, sizeof buffer);
         if (!n) {
             if (n.error().code == ErrorCode::WouldBlock) break;
@@ -123,9 +177,8 @@ void HttpConnection::onReadable() {
             peerClosed = true;
             break;
         }
-        if (state_ == State::Draining) continue;   // discard
-        inbuf_.append(buffer, n.value());
-        parseBuffered();
+        if (!ingest(buffer, n.value(), peerClosed)) return;
+        if (peerClosed) break;
     }
     if (!peerClosed) return;
     if (state_ == State::Handling || state_ == State::Writing) {
@@ -134,6 +187,64 @@ void HttpConnection::onReadable() {
     } else {
         close();
     }
+}
+
+bool HttpConnection::ingest(const char* data, size_t size, bool& peerClosed) {
+    std::string decrypted;
+    const std::string* plain = nullptr;
+    std::string direct;
+    if (tls_) {
+        TlsSession::State st = tls_->receive(data, size, decrypted);
+        if (tls_->hasOutput()) tls_->takeOutput(outbuf_);
+        if (st == TlsSession::State::Failed) {
+            (void)writeOut();   // the alert, if it fits
+            close();
+            return false;
+        }
+        if (st == TlsSession::State::Closed) peerClosed = true;
+        if (!h2_ && tls_->handshakeDone() && tls_->protocol() == "h2" && state_ == State::Reading &&
+            !requestStarted_ && inbuf_.empty()) {
+            startHttp2();
+            if (state_ == State::Closed) return false;
+        }
+        plain = &decrypted;
+    } else {
+        direct.assign(data, size);
+        plain = &direct;
+    }
+    if (outSent_ < outbuf_.size()) {
+        flush();
+        if (state_ == State::Closed) return false;
+    }
+    if (plain->empty()) return true;
+    switch (state_) {
+        case State::Reading:
+            inbuf_ += *plain;
+            parseBuffered();
+            break;
+        case State::Http2:
+            if (!h2_->receive(*plain)) {
+                flush();   // the GOAWAY
+                if (state_ != State::Closed) close();
+                return false;
+            }
+            flush();
+            break;
+        default:
+            break;   // draining or streaming: input is discarded
+    }
+    return state_ != State::Closed;
+}
+
+void HttpConnection::startHttp2() {
+    h2_ = std::make_unique<Http2Session>(*this);
+    if (!h2_->start()) {
+        close();
+        return;
+    }
+    state_ = State::Http2;
+    armTimer(limits_.idleTimeout);
+    flush();
 }
 
 void HttpConnection::parseBuffered() {
@@ -164,14 +275,16 @@ void HttpConnection::parseBuffered() {
 void HttpConnection::dispatch() {
     state_ = State::Handling;
     loop_.cancelTimer(timer_);
-    setInterest(0);
+    timer_ = 0;
+    updateInterest();
     if (state_ == State::Closed) return;
 
     HttpRequest request = std::move(request_);
     request.peerAddress = peerAddress_;
     headRequest_ = request.method == "HEAD";
     http10_ = request.versionMajor == 1 && request.versionMinor == 0;
-    closeAfterWrite_ = closeAfterWrite_ || !keepAlive_;
+    closeAfterWrite_ = closeAfterWrite_ || !keepAlive_ || goingAway_;
+    clientAddress_ = server_.clientAddress_ ? server_.clientAddress_(request) : peerAddress_;
 
     std::weak_ptr<HttpConnection> weak = shared_from_this();
     server_.handler_(std::move(request), [weak](HttpResponse response) {
@@ -188,14 +301,23 @@ void HttpConnection::respond(HttpResponse response) {
     int status = response.status;
     bool mayHaveBody = !(status < 200 || status == 204 || status == 304);
     bool streamed = response.stream && mayHaveBody && !headRequest_;
+    if (streamed && !server_.startStream(clientAddress_)) {
+        // Too many open streams: the client (HTMX's SSE extension, an
+        // EventSource) retries later.
+        response = HttpResponse::text(503, "Service Unavailable: too many open event streams\n");
+        response.headers.set("Retry-After", "10");
+        status = 503;
+        streamed = false;
+    } else if (streamed) {
+        streamCounted_ = true;
+    }
     if (streamed) {
         // The body ends when the connection does.
         closeAfterWrite_ = true;
         pendingStream_ = std::move(response.stream);
     }
 
-    std::string& out = outbuf_;
-    out = "HTTP/1.1 " + std::to_string(status) + " " + statusReason(status) + "\r\n";
+    std::string out = "HTTP/1.1 " + std::to_string(status) + " " + statusReason(status) + "\r\n";
     for (const Headers::Field& f : response.headers) {
         // Fields with line breaks would let a value inject headers.
         if (isFramingHeader(f.name) || hasLineBreak(f.name) || hasLineBreak(f.value)) continue;
@@ -210,10 +332,10 @@ void HttpConnection::respond(HttpResponse response) {
     }
     out += "\r\n";
     if (mayHaveBody && !headRequest_ && !streamed) out += response.body;
-    outSent_ = 0;
+    queue(out);
 
     state_ = State::Writing;
-    armTimer(limits_.requestTimeout);   // a client that never reads is dropped
+    armTimer(limits_.sendTimeout);   // a client that never reads is dropped
     flush();
 }
 
@@ -224,32 +346,98 @@ void HttpConnection::sendError(int status) {
     respond(HttpResponse::text(status, std::string(statusReason(status)) + "\n"));
 }
 
-void HttpConnection::flush() {
+void HttpConnection::queue(const std::string& bytes) {
+    queue(bytes.data(), bytes.size());
+}
+
+void HttpConnection::queue(const char* data, size_t size) {
+    if (outSent_ > 0 && outSent_ == outbuf_.size()) {
+        outbuf_.clear();
+        outSent_ = 0;
+    }
+    if (tls_) {
+        tls_->send(data, size);
+        tls_->takeOutput(outbuf_);
+    } else {
+        outbuf_.append(data, size);
+    }
+}
+
+HttpConnection::WireState HttpConnection::writeOut() {
+    size_t before = outSent_;
     while (outSent_ < outbuf_.size()) {
         auto n = writeSome(fd_.get(), outbuf_.data() + outSent_, outbuf_.size() - outSent_);
         if (!n) {
-            if (n.error().code == ErrorCode::WouldBlock) {
-                setInterest(io::kWritable);
-                return;
-            }
-            close();
-            return;
+            if (n.error().code == ErrorCode::WouldBlock) break;
+            return WireState::Failed;
         }
         outSent_ += n.value();
     }
+    // Progress restarts the clock on a client that's slow to read.
+    if (outSent_ > before && state_ == State::Writing) armTimer(limits_.sendTimeout);
+    if (outSent_ < outbuf_.size()) {
+        // Don't let the sent part grow without bound.
+        if (outSent_ > 64 * 1024) {
+            outbuf_.erase(0, outSent_);
+            outSent_ = 0;
+        }
+        return WireState::Blocked;
+    }
     outbuf_.clear();
     outSent_ = 0;
-    if (state_ == State::Streaming) {
-        if (streamEnding_) {
-            pendingStream_ = nullptr;
-            state_ = State::Writing;
-            finishResponse();   // closeAfterWrite_ is set: drains, then closes
-        } else {
-            setInterest(io::kReadable);   // to notice the client leaving
+    return WireState::Done;
+}
+
+void HttpConnection::flush() {
+    if (state_ == State::Closed) return;
+    auto keep = shared_from_this();
+    for (;;) {
+        WireState w = writeOut();
+        if (w == WireState::Failed) {
+            close();
+            return;
         }
-        return;
+        if (w == WireState::Blocked) {
+            updateInterest();
+            return;
+        }
+        // HTTP/2 makes its output as there's room for it.
+        if (state_ == State::Http2 && h2_->produce()) continue;
+        break;
     }
-    finishResponse();
+    switch (state_) {
+        case State::Writing:
+            finishResponse();
+            return;
+        case State::Streaming:
+            if (streamEnding_) {
+                pendingStream_ = nullptr;
+                state_ = State::Writing;
+                finishResponse();   // closeAfterWrite_ is set: drains, then closes
+                return;
+            }
+            break;
+        case State::Draining:
+            if (!shutWrite_) {
+                shutWrite_ = true;
+                ::shutdown(fd_.get(), SHUT_WR);
+            }
+            break;
+        case State::Http2:
+            if (h2_->finished()) {
+                close();
+                return;
+            }
+            if (h2_->idle() && goingAway_) {
+                close();
+                return;
+            }
+            if (!timer_) armTimer(h2_->idle() ? limits_.idleTimeout : kBodyCheckInterval);
+            break;
+        default:
+            break;
+    }
+    updateInterest();
 }
 
 void HttpConnection::finishResponse() {
@@ -258,28 +446,33 @@ void HttpConnection::finishResponse() {
         state_ = State::Streaming;
         loop_.cancelTimer(timer_);
         timer_ = 0;
-        setInterest(io::kReadable);
+        updateInterest();
         if (state_ == State::Closed) return;
         auto start = std::move(pendingStream_);
         pendingStream_ = nullptr;
         auto keep = shared_from_this();
         start(std::make_shared<ConnectionStreamWriter>(weak_from_this()));
+        if (goingAway_ && state_ == State::Streaming) endStream();
         return;
     }
+    releaseStream();
     if (closeAfterWrite_) {
         // Shut our side and discard what the client still sends, so closing
         // doesn't reset the connection before the client reads the response.
         state_ = State::Draining;
-        shutdown(fd_.get(), SHUT_WR);
         inbuf_.clear();
-        setInterest(io::kReadable);
+        if (tls_) {
+            tls_->close();   // close_notify
+            tls_->takeOutput(outbuf_);
+        }
         armTimer(kDrainTimeout);
+        flush();
         return;
     }
     state_ = State::Reading;
     resetRequest();
     llhttp_resume(&parser_);
-    setInterest(io::kReadable);
+    updateInterest();
     armTimer(limits_.idleTimeout);
     parseBuffered();   // a pipelined request may already be waiting
 }
@@ -290,7 +483,7 @@ bool HttpConnection::streamWrite(std::string bytes) {
         close();   // the client isn't reading
         return false;
     }
-    outbuf_ += bytes;
+    queue(bytes);
     flush();
     return state_ == State::Streaming;
 }
@@ -301,20 +494,10 @@ void HttpConnection::endStream() {
     flush();   // finishes at once if nothing is waiting
 }
 
-void HttpConnection::discardInput() {
-    char buffer[kReadChunk];
-    for (;;) {
-        auto n = readSome(fd_.get(), buffer, sizeof buffer);
-        if (!n) {
-            if (n.error().code == ErrorCode::WouldBlock) return;
-            close();
-            return;
-        }
-        if (n.value() == 0) {
-            close();   // the client has gone
-            return;
-        }
-    }
+void HttpConnection::releaseStream() {
+    if (!streamCounted_) return;
+    streamCounted_ = false;
+    server_.endStream(clientAddress_);
 }
 
 void HttpConnection::armTimer(std::chrono::milliseconds delay) {
@@ -329,10 +512,44 @@ void HttpConnection::armTimer(std::chrono::milliseconds delay) {
 }
 
 void HttpConnection::onTimeout() {
-    if (state_ == State::Reading && requestStarted_) {
-        sendError(408);
-    } else {
-        close();
+    auto keep = shared_from_this();
+    switch (state_) {
+        case State::Reading:
+            if (!requestStarted_) {
+                close();   // idle, or never sent anything
+            } else if (!headersDone_) {
+                sendError(408);   // headers too slow
+            } else {
+                // The body: is it arriving fast enough, on average?
+                auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - bodyStart_);
+                double expected = static_cast<double>(limits_.minBodyBytesPerSecond) *
+                                  static_cast<double>((elapsed - limits_.bodyGrace).count()) / 1000.0;
+                if (static_cast<double>(bodyBytes_) < expected) {
+                    sendError(408);
+                } else {
+                    armTimer(std::min(kBodyCheckInterval, limits_.bodyGrace));
+                }
+            }
+            break;
+        case State::Http2:
+            if (h2_->idle()) {
+                auto idleFor = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - h2_->idleSince());
+                if (idleFor >= limits_.idleTimeout) {
+                    h2_->goAway();
+                    goingAway_ = true;
+                } else {
+                    armTimer(limits_.idleTimeout - idleFor);
+                }
+            } else {
+                h2_->checkTimers();
+            }
+            flush();   // arms the next check, if none is armed
+            break;
+        default:
+            close();   // not reading the response, or not finishing the drain
+            break;
     }
 }
 
@@ -342,6 +559,8 @@ void HttpConnection::resetRequest() {
     headerValue_.clear();
     headerBytes_ = 0;
     requestStarted_ = false;
+    headersDone_ = false;
+    bodyBytes_ = 0;
     keepAlive_ = false;
     errorStatus_ = 0;
     headRequest_ = false;
@@ -355,7 +574,7 @@ int HttpConnection::reject(int status) {
 int HttpConnection::onMessageBegin(llhttp_t* p) {
     HttpConnection& c = self(p);
     c.requestStarted_ = true;
-    c.armTimer(c.limits_.requestTimeout);
+    c.armTimer(c.limits_.headerTimeout);
     return 0;
 }
 
@@ -406,12 +625,15 @@ int HttpConnection::onHeadersComplete(llhttp_t* p) {
     if ((p->flags & F_CONTENT_LENGTH) && p->content_length > c.bodyLimit_) {
         return c.reject(413);
     }
+    // The headers are in; from here, the body is held to a minimum rate.
+    c.headersDone_ = true;
+    c.bodyStart_ = std::chrono::steady_clock::now();
+    c.bodyBytes_ = 0;
+    c.armTimer(c.limits_.bodyGrace);
     const std::string* expect = c.request_.headers.get("Expect");
     if (expect && equalsIgnoreCase(*expect, "100-continue")) {
-        // Best effort: if it doesn't fit in the socket buffer, the client
-        // sends the body anyway after a short wait.
-        static const char kContinue[] = "HTTP/1.1 100 Continue\r\n\r\n";
-        (void)writeSome(c.fd_.get(), kContinue, sizeof kContinue - 1);
+        c.queue("HTTP/1.1 100 Continue\r\n\r\n");
+        (void)c.writeOut();   // the rest, if any, goes with the next flush
     }
     return 0;
 }
@@ -420,6 +642,7 @@ int HttpConnection::onBody(llhttp_t* p, const char* at, size_t length) {
     HttpConnection& c = self(p);
     if (c.request_.body.size() + length > c.bodyLimit_) return c.reject(413);
     c.request_.body.append(at, length);
+    c.bodyBytes_ += length;
     return 0;
 }
 

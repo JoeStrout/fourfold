@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "compiledapp/compiled_app.h"
+#include "config/app_config.h"
 #include "http/message.h"
 #include "observer/observer.h"
 #include "partition/code_tree.h"
@@ -213,6 +214,13 @@ bool isHtmxRequest(const HttpRequest& request);
 // Security headers (overview §8, "Security headers by default") and cache
 // rules, with `nonce` in the CSP's script-src: only <script> elements the
 // engine rendered (which all carry it) run, and same-origin script files.
-void addStandardHeaders(HttpResponse& response, const std::string& nonce);
+// `headers`: the config's (null: the defaults). HSTS only if `hsts`
+// (production, over HTTPS).
+void addStandardHeaders(HttpResponse& response, const std::string& nonce, const HeadersConfig* headers, bool hsts);
+
+// A CSP violation report's body (report-uri's application/csp-report, or
+// the Reporting API's application/reports+json), described in one line
+// each; empty if it isn't one.
+std::vector<std::string> describeCspReport(const std::string& body);
 
 }  // namespace fourfold

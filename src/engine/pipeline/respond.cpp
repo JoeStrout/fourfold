@@ -1,5 +1,7 @@
 #include "pipeline/stages.h"
 
+#include "base/datum.h"
+
 namespace fourfold {
 
 namespace {
@@ -139,19 +141,82 @@ bool isHtmxRequest(const HttpRequest& request) {
     return h && *h == "true";
 }
 
-void addStandardHeaders(HttpResponse& response, const std::string& nonce) {
+void addStandardHeaders(HttpResponse& response, const std::string& nonce, const HeadersConfig* config, bool hsts) {
+    static const HeadersConfig defaults = defaultHeaders();
+    const HeadersConfig& c = config ? *config : defaults;
     Headers& h = response.headers;
-    std::string csp = kCspScripts;
+    std::string csp = c.cspBeforeNonce;
     if (!nonce.empty()) csp += " 'nonce-" + nonce + "'";
-    h.set("Content-Security-Policy", csp + kCspRest);
-    h.set("X-Frame-Options", "DENY");
+    h.set("Content-Security-Policy", csp + c.cspAfterNonce);
+    h.set("Reporting-Endpoints", std::string("csp=\"") + kCspReportPath + "\"");
+    if (!c.frameOptions.empty()) h.set("X-Frame-Options", c.frameOptions);
     h.set("X-Content-Type-Options", "nosniff");
     h.set("Referrer-Policy", "strict-origin-when-cross-origin");
     h.set("Cross-Origin-Opener-Policy", "same-origin");
-    h.set("Permissions-Policy", kPermissionsPolicy);
-    // Dev mode: always revalidate, so edits show on reload. (Production
-    // caching rules come with ETags, later.)
+    if (!c.permissionsPolicy.empty()) h.set("Permissions-Policy", c.permissionsPolicy);
+    if (hsts && !c.hsts.empty()) h.set("Strict-Transport-Security", c.hsts);
+    // Always revalidate, so edits show on reload. (Caching rules with
+    // ETags come later.)
     if (!h.has("Cache-Control")) h.set("Cache-Control", "no-cache");
+}
+
+namespace {
+
+std::string reportField(const Datum& d, const char* name) {
+    if (d.kind() != Datum::Kind::Map) return "";
+    auto it = d.asMap().find(name);
+    if (it == d.asMap().end()) return "";
+    if (it->second.kind() == Datum::Kind::String) return it->second.asString();
+    if (it->second.kind() == Datum::Kind::Number) return std::to_string(static_cast<long long>(it->second.asNumber()));
+    return "";
+}
+
+// "script-src-elem blocked inline at https://example.com/page line 12".
+std::string describeViolation(const Datum& r, bool reportingApi) {
+    std::string directive = reportField(r, reportingApi ? "effectiveDirective" : "effective-directive");
+    if (directive.empty()) directive = reportField(r, reportingApi ? "violatedDirective" : "violated-directive");
+    std::string blocked = reportField(r, reportingApi ? "blockedURL" : "blocked-uri");
+    std::string page = reportField(r, reportingApi ? "documentURL" : "document-uri");
+    std::string line = reportField(r, reportingApi ? "lineNumber" : "line-number");
+    std::string source = reportField(r, reportingApi ? "sourceFile" : "source-file");
+    if (directive.empty() && blocked.empty()) return "";
+    std::string out = (directive.empty() ? std::string("the policy") : directive) + " blocked " +
+                      (blocked.empty() ? std::string("something") : blocked);
+    if (!page.empty()) out += " on " + page;
+    if (!source.empty() && source != page) out += " (" + source + (line.empty() ? "" : " line " + line) + ")";
+    else if (!line.empty()) out += " (line " + line + ")";
+    // One line, of reasonable length.
+    for (char& ch : out) {
+        if (static_cast<unsigned char>(ch) < 0x20) ch = ' ';
+    }
+    if (out.size() > 400) out = out.substr(0, 400) + "…";
+    return out;
+}
+
+}  // namespace
+
+std::vector<std::string> describeCspReport(const std::string& body) {
+    std::vector<std::string> out;
+    JsonLimits limits;
+    auto d = parseJson(body, limits);
+    if (!d) return out;
+    if (d.value().kind() == Datum::Kind::Map) {
+        auto it = d.value().asMap().find("csp-report");
+        if (it != d.value().asMap().end()) {
+            std::string s = describeViolation(it->second, false);
+            if (!s.empty()) out.push_back(s);
+        }
+    } else if (d.value().kind() == Datum::Kind::List) {
+        for (const Datum& item : d.value().asList()) {
+            if (reportField(item, "type") != "csp-violation" || item.kind() != Datum::Kind::Map) continue;
+            auto body2 = item.asMap().find("body");
+            if (body2 == item.asMap().end()) continue;
+            std::string s = describeViolation(body2->second, true);
+            if (!s.empty()) out.push_back(s);
+            if (out.size() >= 20) break;
+        }
+    }
+    return out;
 }
 
 }  // namespace fourfold

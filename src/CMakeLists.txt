@@ -38,12 +38,38 @@ else()
     message(STATUS "Postgres support: no (libpq not found; install it, or set FOURFOLD_PG_CONFIG)")
 endif()
 find_package(CURL REQUIRED)
+# TLS for the server and certificates from ACME (M11): OpenSSL 3. On macOS,
+# Homebrew's (or MacPorts') unless OPENSSL_ROOT_DIR says otherwise.
+if(APPLE AND NOT OPENSSL_ROOT_DIR)
+    foreach(prefix /usr/local/opt/openssl@3 /opt/homebrew/opt/openssl@3 /opt/local)
+        if(EXISTS ${prefix}/include/openssl/ssl.h)
+            set(OPENSSL_ROOT_DIR ${prefix})
+            break()
+        endif()
+    endforeach()
+endif()
+find_package(OpenSSL 3.0 REQUIRED)
+# HTTP/2 (M11): nghttp2. FOURFOLD_NGHTTP2_LIBRARY may name it exactly (the
+# static build gives the .a).
+find_path(FOURFOLD_NGHTTP2_INCLUDE nghttp2/nghttp2.h
+    HINTS /usr/local/opt/libnghttp2/include /opt/homebrew/opt/libnghttp2/include)
+find_library(FOURFOLD_NGHTTP2_LIBRARY NAMES nghttp2
+    HINTS /usr/local/opt/libnghttp2/lib /opt/homebrew/opt/libnghttp2/lib)
+if(NOT FOURFOLD_NGHTTP2_INCLUDE OR NOT FOURFOLD_NGHTTP2_LIBRARY)
+    message(FATAL_ERROR "nghttp2 not found (brew install libnghttp2; apt install libnghttp2-dev)")
+endif()
+add_library(fourfold_nghttp2 INTERFACE)
+target_include_directories(fourfold_nghttp2 SYSTEM INTERFACE ${FOURFOLD_NGHTTP2_INCLUDE})
+target_link_libraries(fourfold_nghttp2 INTERFACE ${FOURFOLD_NGHTTP2_LIBRARY})
+message(STATUS "TLS: OpenSSL ${OPENSSL_VERSION}; HTTP/2: ${FOURFOLD_NGHTTP2_LIBRARY}")
+fourfold_component(tls DEPS base LIBS OpenSSL::SSL OpenSSL::Crypto)   # keys, certificates, server TLS (overview §8)
 fourfold_component(mail DEPS base platform LIBS CURL::libcurl)   # sending email: SMTP, Postmark, or a dev log
 fourfold_component(outbound DEPS base platform compiledapp LIBS CURL::libcurl)   # outbound HTTP, secrets (overview §6)
 if(TARGET test_outbound)
     find_package(ZLIB REQUIRED)   # the tests make compressed responses
     target_link_libraries(test_outbound PRIVATE ZLIB::ZLIB)
 endif()
+fourfold_component(acme DEPS base partition platform tls LIBS CURL::libcurl)   # certificates from Let's Encrypt (overview §8)
 fourfold_component(script DEPS base partition platform template markdown compiledapp appdata outbound
     LIBS fourfold::ms2)                                 # the script thread; the only user of MS2
 fourfold_component(config DEPS base partition compiledapp appdata script state mail outbound)   # private/config/ → AppConfig
@@ -69,9 +95,9 @@ fourfold_component(jobs DIR engine/jobs   # the schedule and the job worker loop
 
 # --- Hosts ---
 fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform push)
-fourfold_component(httpserver DIR hosts/http-server DEPS base platform http LIBS llhttp)
+fourfold_component(httpserver DIR hosts/http-server DEPS base platform http tls LIBS llhttp fourfold_nghttp2)   # HTTP/1.1, HTTP/2, TLS
 fourfold_component(cgi DIR hosts/cgi   # CGI and FastCGI (overview §8)
     DEPS base partition platform compiledapp script compiler config state appdata http pipeline authflow)   # CGI and FastCGI (overview §8)
 fourfold_executable(fourfold DIR hosts/cli
     DEPS base partition script compiler config mail observer pipeline authflow lifecycle devtools platform httpserver state
-         appdata jobs push cgi)
+         appdata jobs push cgi tls acme)

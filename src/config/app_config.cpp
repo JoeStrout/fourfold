@@ -190,10 +190,13 @@ Ceilings readServer(const Datum& server, const std::string& file, Problems& prob
     Ceilings out;
     Section top(server, "server", file, problems);
     Section ceilings = top.section("ceilings");
-    for (const char* group : {"budget", "session", "jobs"}) {
+    for (const char* group : {"budget", "session", "jobs", "server"}) {
         Section g = ceilings.section(group);
         const std::vector<const char*> keys =
             std::string(group) == "budget"    ? std::vector<const char*>{"instructions", "seconds"}
+            : std::string(group) == "server"
+                ? std::vector<const char*>{"connections", "connectionsPerAddress", "streams", "streamsPerAddress",
+                                           "requests"}
             : std::string(group) == "jobs" ? std::vector<const char*>{"instructions", "seconds", "workers"}
                                            : std::vector<const char*>{"capKB", "anonIdleHours", "anonMaxDays",
                                                                       "userIdleDays", "userMaxDays", "anonPerAddress",
@@ -596,7 +599,246 @@ void readBackups(Section backups, AppConfig& c) {
     backups.finish();
 }
 
+// --- config.tls, config.headers, config.server, config.logging (M11) ---
+
+void readTls(Section tls, AppConfig& c) {
+    if (auto acme = tls.string("acme")) {
+        if (*acme == "letsencrypt") {
+            c.tls.acmeDirectory = "https://acme-v02.api.letsencrypt.org/directory";
+        } else if (*acme == "letsencrypt-staging") {
+            c.tls.acmeDirectory = "https://acme-staging-v02.api.letsencrypt.org/directory";
+        } else if (acme->rfind("https://", 0) == 0 && acme->find_first_of(" \t\r\n") == std::string::npos) {
+            c.tls.acmeDirectory = *acme;
+        } else {
+            tls.error("acme", "must be \"letsencrypt\", \"letsencrypt-staging\", or a CA's https:// directory URL");
+        }
+    }
+    if (auto email = tls.string("email")) {
+        if (email->find('@') == std::string::npos || email->find_first_of(" \t\r\n,<>\"") != std::string::npos) {
+            tls.error("email", "must be an email address");
+        } else {
+            c.tls.email = *email;
+        }
+    }
+    if (auto bundle = tls.string("acmeCaBundle")) {
+        if (bundle->empty() || (*bundle)[0] != '/') {
+            tls.error("acmeCaBundle", "must be a full path to a PEM file");
+        } else {
+            c.tls.acmeCaBundle = *bundle;
+        }
+    }
+    auto file = [&](const char* key, std::string& out) {
+        auto v = tls.string(key);
+        if (!v) return;
+        auto path = RelPath::parse(*v);
+        if (!path || path.value().segments().size() != 1) {
+            tls.error(key, "must be the name of a file in private/config/, like \"cert.pem\"");
+        } else {
+            out = *v;
+        }
+    };
+    file("certFile", c.tls.certFile);
+    file("keyFile", c.tls.keyFile);
+    if (c.tls.certFile.empty() != c.tls.keyFile.empty()) {
+        tls.error(c.tls.certFile.empty() ? "certFile" : "keyFile", "needs its partner (certFile and keyFile go together)");
+    }
+    if (auto h2 = tls.boolean("http2")) c.tls.http2 = *h2;
+    tls.finish();
+}
+
+// One CSP source an app may add: a host ("cdn.example.com",
+// "*.example.com", with a scheme, port or path), or a scheme ("https:",
+// "data:", "blob:", "wss:"). No keywords: 'unsafe-inline' and 'unsafe-eval'
+// are never allowed for scripts, and the others are the engine's to set.
+bool validCspSource(const std::string& s, bool forScripts, std::string& why) {
+    if (s.empty() || s.find_first_of(" \t\r\n;,'\"") != std::string::npos) {
+        why = "isn't a source (no spaces, quotes, ; or ,)";
+        return false;
+    }
+    if (s == "*") {
+        why = "would allow anything";
+        return false;
+    }
+    if (s.back() == ':') {
+        std::string scheme = lowered(s.substr(0, s.size() - 1));
+        static const std::set<std::string> schemes = {"https", "wss", "data", "blob", "mediastream"};
+        if (!schemes.count(scheme)) {
+            why = "isn't a scheme an app may add (https:, wss:, data:, blob:)";
+            return false;
+        }
+        if (forScripts) {
+            why = "would let scripts come from anywhere; name the host";
+            return false;
+        }
+        return true;
+    }
+    std::string rest = s;
+    size_t scheme = rest.find("://");
+    if (scheme != std::string::npos) {
+        std::string sch = lowered(rest.substr(0, scheme));
+        if (sch != "https" && sch != "wss" && sch != "http" && sch != "ws") {
+            why = "has a scheme other than https://, wss://, http:// or ws://";
+            return false;
+        }
+        rest = rest.substr(scheme + 3);
+    }
+    std::string host = rest.substr(0, rest.find_first_of(":/"));
+    if (host.rfind("*.", 0) == 0) host = host.substr(2);
+    if (!isHostName(lowered(host))) {
+        why = "doesn't name a host";
+        return false;
+    }
+    return true;
+}
+
+const char* const kFeatures[] = {"accelerometer", "autoplay", "bluetooth", "camera", "display-capture",
+                                 "fullscreen", "geolocation", "gyroscope", "magnetometer", "microphone",
+                                 "midi", "payment", "picture-in-picture", "screen-wake-lock", "serial",
+                                 "usb", "web-share", "xr-spatial-tracking"};
+// Off unless enabled; the rest of kFeatures are left at the browser's default.
+const char* const kFeaturesOff[] = {"camera", "microphone", "geolocation", "payment", "usb",
+                                    "serial", "bluetooth", "display-capture"};
+
+std::string joinSources(const std::string& base, const std::vector<std::string>& extra) {
+    std::string out = base;
+    for (const std::string& e : extra) out += " " + e;
+    return out;
+}
+
+void readHeaders(Section headers, HeadersConfig& h) {
+    std::map<std::string, std::vector<std::string>> added;
+    static const char* const kinds[] = {"script", "style", "img", "connect", "font", "media", "frame", "form"};
+    {
+        Section csp = headers.section("csp");
+        for (const char* kind : kinds) {
+            auto list = csp.strings(kind);
+            if (!list) continue;
+            for (const std::string& src : *list) {
+                std::string why;
+                if (validCspSource(src, std::string(kind) == "script", why)) {
+                    added[kind].push_back(src);
+                } else {
+                    csp.error(kind, "has \"" + src + "\", which " + why);
+                }
+            }
+        }
+        csp.finish();
+    }
+    bool strictStyles = headers.boolean("strictStyles").value_or(false);
+    std::vector<std::string> ancestors;
+    if (auto list = headers.strings("frameAncestors")) {
+        for (const std::string& a : *list) {
+            std::string why;
+            if (a == "self") {
+                ancestors.push_back("'self'");
+            } else if (a.find("://") != std::string::npos && validCspSource(a, false, why)) {
+                ancestors.push_back(a);
+            } else {
+                headers.error("frameAncestors", "has \"" + a + "\": give \"self\" or sites like \"https://example.com\"");
+            }
+        }
+    }
+
+    h.cspBeforeNonce = joinSources("default-src 'self'; script-src 'self'", added["script"]);
+    std::string rest = "; style-src " + joinSources(strictStyles ? "'self'" : "'self' 'unsafe-inline'", added["style"]) +
+                       "; img-src " + joinSources("'self' https: data:", added["img"]) +
+                       "; connect-src " + joinSources("'self'", added["connect"]);
+    if (!added["font"].empty()) rest += "; font-src " + joinSources("'self'", added["font"]);
+    if (!added["media"].empty()) rest += "; media-src " + joinSources("'self'", added["media"]);
+    if (!added["frame"].empty()) rest += "; frame-src " + joinSources("'self'", added["frame"]);
+    rest += "; object-src 'none'; base-uri 'none'; form-action " + joinSources("'self'", added["form"]);
+    rest += "; frame-ancestors " + (ancestors.empty() ? std::string("'none'") : joinSources("", ancestors).substr(1));
+    rest += std::string("; report-uri ") + kCspReportPath + "; report-to csp";
+    h.cspAfterNonce = rest;
+    // X-Frame-Options can't list sites: with any allowed, CSP alone decides.
+    h.frameOptions = ancestors.empty() ? "DENY"
+                     : (ancestors.size() == 1 && ancestors[0] == "'self'") ? "SAMEORIGIN"
+                                                                            : "";
+
+    if (auto hsts = headers.raw("hsts")) {
+        if (hsts->kind() == Datum::Kind::Number && hsts->asNumber() == 0) {
+            h.hsts.clear();
+        } else {
+            Section hs = headers.section("hsts");
+            double days = hs.number("maxAgeDays", 1, 3650).value_or(365);
+            bool sub = hs.boolean("includeSubDomains").value_or(false);
+            bool preload = hs.boolean("preload").value_or(false);
+            if (preload && (!sub || days < 365)) {
+                hs.error("preload", "needs includeSubDomains and maxAgeDays of at least 365 (the preload list's rules)");
+            }
+            h.hsts = "max-age=" + std::to_string(static_cast<long long>(days * 86400)) +
+                     (sub ? "; includeSubDomains" : "") + (preload ? "; preload" : "");
+            hs.finish();
+        }
+    }
+
+    std::set<std::string> enabled;
+    if (auto list = headers.strings("permissions")) {
+        for (const std::string& f : *list) {
+            bool known = false;
+            for (const char* k : kFeatures) known = known || f == k;
+            if (!known) {
+                headers.error("permissions", "has \"" + f + "\", which isn't a browser feature Fourfold knows");
+            } else {
+                enabled.insert(f);
+            }
+        }
+    }
+    std::string policy;
+    for (const char* f : kFeaturesOff) {
+        if (enabled.count(f)) continue;
+        policy += (policy.empty() ? "" : ", ") + std::string(f) + "=()";
+    }
+    for (const std::string& f : enabled) policy += (policy.empty() ? "" : ", ") + f + "=(self)";
+    h.permissionsPolicy = policy;
+    headers.finish();
+}
+
+void readServerLimits(Section server, AppConfig& c, const Ceilings& ceilings, Problems& problems) {
+    ServerConfig& sc = c.server;
+    auto count = [&](const char* key, size_t fallback, double max) {
+        return static_cast<size_t>(limited(server, "server", key, static_cast<double>(fallback), 1, max, ceilings, problems));
+    };
+    // 0 (sized to the machine) unless the app or the server sets it.
+    if (server.has("connections") || ceilings.count("server.connections")) {
+        sc.connections = count("connections", ceilings.count("server.connections")
+                                                  ? static_cast<size_t>(ceilings.at("server.connections"))
+                                                  : 1024,
+                               1e6);
+    } else {
+        (void)server.raw("connections");
+    }
+    sc.connectionsPerAddress = count("connectionsPerAddress", sc.connectionsPerAddress, 1e6);
+    sc.streams = count("streams", sc.streams, 1e6);
+    sc.streamsPerAddress = count("streamsPerAddress", sc.streamsPerAddress, 1e6);
+    sc.requests = count("requests", sc.requests, 1e5);
+    auto seconds = [&](const char* key, std::chrono::milliseconds& out, double min, double max) {
+        if (auto v = server.number(key, min, max)) out = std::chrono::milliseconds(static_cast<int64_t>(*v * 1000));
+    };
+    seconds("requestWaitSeconds", sc.requestWait, 0, 60);
+    seconds("headerSeconds", sc.headerTimeout, 1, 300);
+    seconds("keepAliveSeconds", sc.keepAlive, 1, 3600);
+    if (auto rate = server.number("minUploadBytesPerSecond", 0, 1e9)) sc.minUploadBytesPerSecond = static_cast<size_t>(*rate);
+    server.finish();
+}
+
+void readLogging(Section logging, AppConfig& c) {
+    if (auto days = logging.number("keepDays", 1, 3650)) c.logging.keepDays = static_cast<int>(*days);
+    logging.finish();
+}
+
 }  // namespace
+
+const char* const kCspReportPath = "/__fourfold/csp-report";
+
+HeadersConfig defaultHeaders() {
+    // As readHeaders makes them from no settings.
+    Problems problems;
+    HeadersConfig h;
+    h.hsts = "max-age=31536000";
+    readHeaders(Section(Datum::map({}), "config.headers", "", problems), h);
+    return h;
+}
 
 ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     Problems problems;
@@ -657,6 +899,10 @@ ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     readDeploy(top.section("deploy"), *c);
     readBackups(top.section("backups"), *c);
     readJobs(top.section("jobs"), *c, ceilings, problems);
+    readTls(top.section("tls"), *c);
+    readHeaders(top.section("headers"), c->headers);
+    readServerLimits(top.section("server"), *c, ceilings, problems);
+    readLogging(top.section("logging"), *c);
     top.finish();
 
     if (c->mail.transport == MailConfig::Transport::Log) {

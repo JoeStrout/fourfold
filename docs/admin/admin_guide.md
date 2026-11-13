@@ -7,10 +7,12 @@ the server. The person writing the site needs the
 config file, deploying), this guide covers what the server needs and links to
 the user guide for the rest.
 
-*Status: covers what works as of Milestone 10, including shared hosting
-through CGI and FastCGI. Fourfold isn't ready yet to face the internet on its
-own: see [Known gaps](#known-gaps). TLS and a production server will be added
-here as they arrive.*
+*Status: covers what works as of Milestone 11: Fourfold can face the
+internet on its own (HTTPS with certificates from Let's Encrypt, HTTP/2, and
+limits on slow and abusive clients), or sit behind a reverse proxy, or run
+on shared hosting through CGI and FastCGI. What's still missing is in
+[Known gaps](#known-gaps). Hosting several apps on one server, each as its
+own OS user, comes next (M11.1).*
 
 ---
 
@@ -20,22 +22,25 @@ here as they arrive.*
 2. [Installing](#installing)
 3. [The app folder](#the-app-folder)
 4. [Running `fourfold serve`](#running-fourfold-serve)
-5. [Behind a reverse proxy](#behind-a-reverse-proxy)
-6. [Rate limits](#rate-limits)
-7. [Outbound requests and app mail](#outbound-requests-and-app-mail)
-8. [Background jobs and live updates](#background-jobs-and-live-updates)
-9. [Keeping it running](#keeping-it-running)
-10. [Shared hosting: CGI and FastCGI](#shared-hosting-cgi-and-fastcgi)
-11. [Mail for sign-in](#mail-for-sign-in)
-12. [The first admin](#the-first-admin)
-13. [Server limits: `--server-config`](#server-limits---server-config)
-14. [Deploying an app's changes](#deploying-an-apps-changes)
-15. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
-16. [A Postgres database](#a-postgres-database)
-17. [Logs](#logs)
-18. [Backups](#backups)
-19. [Known gaps](#known-gaps)
-20. [Quick reference](#quick-reference)
+5. [On the internet: `--tls`](#on-the-internet---tls)
+6. [Behind a reverse proxy](#behind-a-reverse-proxy)
+7. [Connection limits](#connection-limits)
+8. [Security headers](#security-headers)
+9. [Rate limits](#rate-limits)
+10. [Outbound requests and app mail](#outbound-requests-and-app-mail)
+11. [Background jobs and live updates](#background-jobs-and-live-updates)
+12. [Keeping it running](#keeping-it-running)
+13. [Shared hosting: CGI and FastCGI](#shared-hosting-cgi-and-fastcgi)
+14. [Mail for sign-in](#mail-for-sign-in)
+15. [The first admin](#the-first-admin)
+16. [Server limits: `--server-config`](#server-limits---server-config)
+17. [Deploying an app's changes](#deploying-an-apps-changes)
+18. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
+19. [A Postgres database](#a-postgres-database)
+20. [Logs](#logs)
+21. [Backups](#backups)
+22. [Known gaps](#known-gaps)
+23. [Quick reference](#quick-reference)
 
 ---
 
@@ -48,8 +53,12 @@ process.
 
 The process:
 
-- listens for plain HTTP, by default on `127.0.0.1:8090`. HTTPS comes from a
-  reverse proxy in front of it (nginx, Caddy, Apache, a hosting service).
+- either faces the internet itself (`--tls`): HTTPS on port 443, with
+  certificates it gets and renews from Let's Encrypt, and port 80 sending
+  visitors to HTTPS;
+- or listens for plain HTTP, by default on `127.0.0.1:8090`, behind a
+  reverse proxy that provides HTTPS (nginx, Caddy, Apache, a hosting
+  service, a cloud load balancer).
 - needs no database server: its own state is in an SQLite file in the app
   folder, and so is the app's database, unless you give it a Postgres one.
 - reads its settings from files in the app folder, and picks up changes to
@@ -150,7 +159,10 @@ fourfold serve /srv/club --host club.example.com
 
 | Option | Default | Is |
 |---|---|---|
-| `--listen ADDRESS:PORT` | `127.0.0.1:8090` | where to listen. An IPv6 address goes in brackets: `[::1]:8090` |
+| `--tls` | off | serve HTTPS itself (see [On the internet](#on-the-internet---tls)) |
+| `--listen ADDRESS:PORT` | `127.0.0.1:8090`; with `--tls`, `[::]:443` | where to listen. An IPv6 address goes in brackets: `[::1]:8090`; `[::]` is every address, IPv4 too |
+| `--redirect-listen ADDRESS:PORT` | `[::]:80` | with `--tls`: where port 80's redirects and Let's Encrypt's checks are answered |
+| `--no-redirect` | | with `--tls`: no port 80 (then certificates must come from files) |
 | `--host NAME` | none | a host name the site answers to; give it more than once for several (`example.com`, `www.example.com`) |
 | `--plain-http` | off | the site is reached over plain HTTP, not HTTPS (see below) |
 | `--server-config FILE` | none | limits on the app's settings (see [Server limits](#server-limits---server-config)) |
@@ -163,7 +175,8 @@ fourfold serve /srv/club --host club.example.com
 given, it answers only to `localhost`, and won't listen on any address but
 `127.0.0.1` or `::1`.
 
-**HTTPS.** Fourfold assumes visitors reach it over HTTPS (from the proxy), so
+**HTTPS.** Without `--tls`, Fourfold assumes visitors reach it over HTTPS
+(from the proxy), so
 it marks its cookies `Secure`, and browsers send them only over HTTPS. If
 visitors really do use plain HTTP, say on a private network, give
 `--plain-http`; then cookies aren't marked `Secure`, and sign-in links start
@@ -189,6 +202,90 @@ error until a deploy fixes it. The errors are in the engine log.
 
 When it starts, it prints what it's serving, and reminds you of the
 [known gaps](#known-gaps).
+
+---
+
+## On the internet: `--tls`
+
+On a server of its own (a VPS, say), Fourfold needs nothing in front of it:
+
+```sh
+fourfold serve /srv/club --tls
+```
+
+with the site's name in its config:
+
+```
+// private/config/app.ms
+config = {}
+config.domain = "club.example.com"
+config.tls = {"email": "you@example.com"}   // optional: Let's Encrypt's contact for the account
+```
+
+It then:
+
+- listens for HTTPS on port 443 (every address, IPv4 and IPv6), with
+  HTTP/2 for browsers that offer it;
+- on port 80, sends every request to the same page over HTTPS (a 301, or
+  308 for a form post), and answers Let's Encrypt's checks;
+- gets a certificate for `config.domain` and each `--host` name from
+  [Let's Encrypt](https://letsencrypt.org) when it starts, and renews it
+  when it has 30 days (or a third of its life) left, checking twice a day.
+  Using Let's Encrypt means agreeing to its
+  [subscriber agreement](https://letsencrypt.org/repository/).
+
+Before the first start, point the name's DNS (A and AAAA records) at the
+server, and open ports 80 and 443 in its firewall: Let's Encrypt checks the
+name by fetching a file from port 80. Until the first certificate arrives
+(a few seconds), HTTPS connections fail; if it can't get one, the log says
+why (`tls` lines), and it tries again after 1 minute, 10 minutes, an hour,
+then every 6 hours. A certificate that can't be renewed keeps being served
+until it expires, so there are weeks to notice.
+
+**Trying it out.** Let's Encrypt limits how many certificates a name gets
+a week. While experimenting, use its staging service, whose certificates
+browsers don't trust but which has generous limits:
+
+```
+config.tls = {"acme": "letsencrypt-staging"}
+```
+
+Then remove the setting (and `private/state/tls/`) for real certificates.
+`"acme"` can also be any other CA's ACME directory URL.
+
+**Your own certificate.** To use a certificate from elsewhere (a company
+CA, a wildcard certificate), put its PEM files in `private/config/` and
+name them:
+
+```
+config.tls = {"certFile": "cert.pem", "keyFile": "key.pem"}
+```
+
+The certificate file holds the site's certificate followed by its
+intermediates. Fourfold reads them at startup (restart after renewing
+them), and warns when the certificate has less than two weeks left.
+
+**Where certificates live.** In `private/state/tls/`: the ACME account's
+key and record, and each certificate with its key (readable by Fourfold's
+user only). Backups include them; deleting the folder just means new ones
+are fetched.
+
+**What visitors get.** TLS 1.2 and 1.3 only, with forward-secret,
+authenticated ciphers (Mozilla's "intermediate" profile), and
+`Strict-Transport-Security` on every response (see
+[Security headers](#security-headers)). `config.tls.http2 = false` turns
+HTTP/2 off.
+
+**Ports below 1024 without root.** Fourfold never needs to run as root.
+Either let systemd open the ports and hand them over (socket activation;
+see [Keeping it running](#keeping-it-running)), or give the binary the one
+privilege it needs:
+
+```sh
+sudo setcap cap_net_bind_service=+ep /usr/local/bin/fourfold
+```
+
+(`setcap` must be run again whenever the binary is replaced.)
 
 ---
 
@@ -235,10 +332,13 @@ config.proxy = {"trust": ["127.0.0.1"]}
 ```
 
 Addresses and ranges both work (`"10.0.0.0/8"`, `"::1"`). From those
-addresses only, Fourfold reads `X-Forwarded-For`, from the right: the
-rightmost address that isn't a trusted proxy is the visitor. From anywhere
-else the header is ignored, so a visitor can't claim another address to
-slip past a limit. Caddy adds the header on its own; nginx needs:
+addresses only, Fourfold reads the standard `Forwarded` header if there is
+one, else `X-Forwarded-For`, from the right: the rightmost address that
+isn't a trusted proxy is the visitor. From anywhere else the headers are
+ignored, so a visitor can't claim another address to slip past a limit. A
+trusted proxy's connections also aren't counted against the per-address
+[connection limits](#connection-limits). Caddy adds `X-Forwarded-For` on
+its own; nginx needs:
 
 ```nginx
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -251,6 +351,73 @@ and anonymous sessions (1,000 per address).
 
 **Trust only your own proxy.** If the list includes an address anyone can
 send from, anyone can choose their address.
+
+---
+
+## Connection limits
+
+Whether it faces the internet or sits behind a proxy, Fourfold holds every
+client to limits, so a few slow or greedy ones can't tie it up:
+
+| Limit | Default | Setting (`config.server`) |
+|---|---|---|
+| Time to send a request's headers (and, over TLS, to finish the handshake) | 10 seconds; then 408 | `headerSeconds` |
+| A request body's speed, after its first 10 seconds | 1 KB a second on average; then 408 | `minUploadBytesPerSecond` |
+| A keep-alive connection sitting idle | 60 seconds | `keepAliveSeconds` |
+| Connections open at once | what the open-file limit allows, less 256 | `connections` |
+| Connections from one address | 100 (a trusted proxy's, and local ones, aren't counted) | `connectionsPerAddress` |
+| Requests being handled at once | 64; more wait, up to 5 seconds, then 503 | `requests`, `requestWaitSeconds` |
+| Open live-update streams (server-sent events) | 1,000; 20 per visitor address; then 503 | `streams`, `streamsPerAddress` |
+| Request headers | 16 KB, 100 fields | |
+| Request bodies | 1 MB; 33 MB for forms with file uploads | |
+| HTTP/2 streams at once, per connection | 100 | |
+
+For example:
+
+```
+// private/config/app.ms
+config.server = {"connectionsPerAddress": 50, "requests": 128}
+```
+
+These are read at startup; restart to change them. On a shared server, the
+server config can put ceilings on `connections`, `connectionsPerAddress`,
+`streams`, `streamsPerAddress` and `requests` (see
+[Server limits](#server-limits---server-config)).
+
+Fourfold raises its own open-file limit to the system's hard limit (up to
+65,536) when it starts. With systemd, `LimitNOFILE=65536` makes sure the
+hard limit is that high.
+
+---
+
+## Security headers
+
+Every response carries these, with nothing to set:
+
+| Header | Sent |
+|---|---|
+| `Content-Security-Policy` | a strict policy: scripts only from the site, or inline ones the engine wrote (each response's own nonce) |
+| `Strict-Transport-Security` | `max-age=31536000` (a year), over HTTPS in `fourfold serve` |
+| `X-Frame-Options` | `DENY` (other sites can't put the site in a frame) |
+| `X-Content-Type-Options` | `nosniff` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Cross-Origin-Opener-Policy` | `same-origin` |
+| `Permissions-Policy` | camera, microphone, location, payment, USB, serial, Bluetooth and screen capture off |
+
+The site's author adjusts them in `config.headers` (sources to add to the
+policy, sites allowed to frame it, HSTS's options, browser features to
+allow); see the user guide's
+[JavaScript and the Content Security Policy](../user/user_guide.md#javascript-and-the-content-security-policy).
+
+**Policy violations.** Browsers report scripts and styles the policy
+blocked to `/__fourfold/csp-report`; each report is a `csp` line in the
+engine log (30 a minute at most, then a count of the rest). A burst of them
+after a deploy usually means the site needs a source added; out of the blue,
+it may mean someone is trying to inject a script.
+
+**HSTS, once sent, sticks:** browsers remember for a year to use only
+HTTPS for the site. Before turning on `includeSubDomains` or `preload`, be
+sure every subdomain has HTTPS.
 
 ---
 
@@ -407,14 +574,60 @@ WantedBy=multi-user.target
 Then `systemctl enable --now fourfold-club`. The startup message and any
 config errors go to the journal (`journalctl -u fourfold-club`).
 
-**Stopping.** There's no graceful shutdown yet: stopping the process ends it
-at once, and requests in progress get no response. What's stored is safe:
-`data/` files are replaced whole (written aside, then renamed), and
-`state.db` is SQLite, which survives being stopped mid-write. The last few
-engine log lines may be lost.
+**With `--tls`, as a user with no privileges,** let systemd open ports 443
+and 80 and hand them over (socket activation).
+`/etc/systemd/system/fourfold-club.socket`:
 
-**Restart after** changing `config.domain`, a `--host`, or the server config;
-those are read only at startup. Everything else in `private/config/` is
+```ini
+[Unit]
+Description=Fourfold's ports: club.example.com
+
+[Socket]
+# In this order: HTTPS first, then port 80.
+ListenStream=443
+ListenStream=80
+
+[Install]
+WantedBy=sockets.target
+```
+
+And `/etc/systemd/system/fourfold-club.service`:
+
+```ini
+[Unit]
+Description=Fourfold: club.example.com
+After=network.target
+Requires=fourfold-club.socket
+
+[Service]
+User=fourfold
+ExecStart=/usr/local/bin/fourfold serve /srv/club --tls
+Restart=on-failure
+MemoryMax=2G
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/srv/club
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then `systemctl enable --now fourfold-club.socket fourfold-club`. Fourfold
+uses the sockets it's given in place of `--listen` and `--redirect-listen`:
+the first for HTTPS and the second for port 80, or by name, if the socket
+units set `FileDescriptorName=https` and `http`.
+
+**Stopping.** `systemctl stop` (SIGTERM) or Ctrl-C stops it gracefully: it
+stops taking connections, closes idle ones, ends live-update streams (the
+browsers reconnect), and lets requests in progress finish, for up to 30
+seconds; then it exits. A second signal stops it at once. Even then, what's
+stored is safe: `data/` files are replaced whole (written aside, then
+renamed), and `state.db` is SQLite, which survives being stopped mid-write.
+
+**Restart after** changing `config.domain`, a `--host`, `config.tls`,
+`config.server`, or the server config; those are read only at startup. Everything else in `private/config/` is
 picked up while running.
 
 ---
@@ -664,6 +877,7 @@ server.ceilings = {}
 server.ceilings.budget = {"instructions": 50000000, "seconds": 20}
 server.ceilings.session = {"capKB": 64, "userMaxDays": 30}
 server.ceilings.jobs = {"instructions": 100000000, "seconds": 60, "workers": 2}
+server.ceilings.server = {"connections": 2000, "requests": 64}
 ```
 
 | Ceiling | The app's setting, and its default |
@@ -676,6 +890,9 @@ server.ceilings.jobs = {"instructions": 100000000, "seconds": 60, "workers": 2}
 | `session.anonPerAddress`, `anonTotal` | anonymous sessions per visitor address, and in all: 1,000; 100,000 |
 | `jobs.instructions`, `jobs.seconds` | each background job run's limits: 100,000,000; 60 |
 | `jobs.workers` | background jobs running at once: 2 |
+| `server.connections`, `connectionsPerAddress` | connections at once, in all and per address (see [Connection limits](#connection-limits)) |
+| `server.streams`, `streamsPerAddress` | live-update streams open at once, in all and per address: 1,000; 20 |
+| `server.requests` | requests handled at once: 64 |
 
 Any you leave out isn't limited. As with the app's config, a misspelled name
 is an error, and an error stops `fourfold serve` from starting. The file is
@@ -820,11 +1037,14 @@ The word after the time says what kind of event it is:
 | `outbound` | each request the app's code sent to another server: method, URL (without its query string or secrets), status, time and size; or why it was refused |
 | `migrate` | migrations applied, or why they failed |
 | `backup` | scheduled and requested backups |
+| `tls` | certificates asked for, received, or refused (with the CA's reason) |
+| `csp` | a browser's report of something the Content Security Policy blocked: the directive, what was blocked, the page |
+| `stop` | the server shutting down |
 | `jobs` | each background job run, with its time; failures, retries and dead jobs; enqueued jobs dropped because their request failed |
 
 Control characters in a message are escaped, so nothing logged can fake a
-line. The app can't write to this log. Old log files aren't removed yet;
-clear them out yourself (with a cron job, say) until rotation arrives.
+line. The app can't write to this log. Files older than 30 days are
+removed (checked hourly); `config.logging = {"keepDays": 90}` keeps more.
 
 **The app's output**, in `dropbox/`: what its code `print`s goes to
 `dropbox/print.log`, and the app may write reports there. The site's author
@@ -885,21 +1105,21 @@ as privately), and a Postgres database (use `pg_dump`).
 
 ## Known gaps
 
-`fourfold serve` prints these when it starts. Until they're filled, keep a
-Fourfold site behind a proxy, and expect to watch it.
+`fourfold serve` prints the first when it starts.
 
-- **No TLS of its own.** HTTPS has to come from a reverse proxy (M11).
 - **No per-request memory limit.** Time and instruction limits apply, but a
   script can use as much memory as the machine has. A memory limit for the
   process from the service manager (`MemoryMax=` in systemd) at least
   protects everything else on the machine.
 - **Visitor addresses behind a proxy** are known only if you list the
   proxy in `config.proxy.trust`; see
-  [Behind a reverse proxy](#behind-a-reverse-proxy). (`Forwarded`, the
-  standard header, isn't read yet; only `X-Forwarded-For`.)
-- **No limit on slow uploads** beyond the 30-second limit on a whole request
-  (M11).
-- **No graceful shutdown, and no log rotation** (M11).
+  [Behind a reverse proxy](#behind-a-reverse-proxy).
+- **One app per server on ports 80 and 443.** Several apps on one machine
+  each need their own ports behind a reverse proxy, until `fourfold front`
+  arrives (M11.1). Likewise, running each app as its own OS user is up to
+  you for now.
+- **Certificates by HTTP-01 only:** no wildcard certificates from Let's
+  Encrypt (give one as files instead).
 - **CGI and FastCGI hosting** has no live updates, and no protection from
   the OS (see [Shared hosting](#shared-hosting-cgi-and-fastcgi)).
 - **Dead background jobs** can be seen and retried only in dev mode's jobs
@@ -941,6 +1161,7 @@ Fourfold site behind a proxy, and expect to watch it.
 | `private/state/secret.key` | signs CSRF tokens, form timestamps and puzzles; made if missing |
 | `private/state/logs/` | the engine log |
 | `private/state/backups/` | backups |
+| `private/state/tls/` | certificates from Let's Encrypt, their keys, and the ACME account |
 | `private/state/cgi/` | CGI mode's compiled versions, each with a copy of its code (made again as needed) |
 | `data/.fourfold/app.sqlite` | the app's SQLite database |
 | `dropbox/print.log` | the app's `print` output |
@@ -972,3 +1193,8 @@ in the user guide's [Configuration](../user/user_guide.md#configuration-privatec
 | `deploy.migrationWaitSeconds`, `migrationBudgetSeconds` | 30, 600 | how long requests wait for migrations; how long one may run |
 | `deploy.clearAnonymousSessions` | `false` | sign out anonymous visitors after migrations |
 | `backups.folder`, `everyHours`, `keep` | `private/state/backups/`, none, 10 | where backups go, how often, how many automatic ones to keep |
+| `tls.email`, `acme` | none, Let's Encrypt | with `--tls`: the ACME account's contact; the CA (`"letsencrypt-staging"`, or a directory URL) |
+| `tls.certFile`, `keyFile` | none | with `--tls`: a certificate of your own, in `private/config/` |
+| `tls.http2` | `true` | HTTP/2 over TLS |
+| `server.*` | see [Connection limits](#connection-limits) | connection and request limits |
+| `logging.keepDays` | 30 | how long engine log files are kept |

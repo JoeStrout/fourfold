@@ -1510,7 +1510,9 @@ on a server is covered in the [admin guide](../admin/admin_guide.md#mail-for-sig
 | `limits.anonymous` | `"60/minute"` | requests other than GET per visitor address, for visitors not signed in (a rate or a list) |
 | `limits.signedIn` | `"300/minute"` | the same per user, for signed-in visitors |
 | `limits.challengeBits` | 16 (4 in dev) | how hard a proof-of-work puzzle is; each bit doubles the work |
-| `proxy.trust` | `[]` | addresses (or ranges, `"10.0.0.0/8"`) of a reverse proxy whose `X-Forwarded-For` is believed; see the [admin guide](../admin/admin_guide.md#behind-a-reverse-proxy) |
+| `proxy.trust` | `[]` | addresses (or ranges, `"10.0.0.0/8"`) of a reverse proxy whose `Forwarded` or `X-Forwarded-For` is believed; see the [admin guide](../admin/admin_guide.md#behind-a-reverse-proxy) |
+| `headers.csp`, `strictStyles`, `frameAncestors`, `hsts`, `permissions` | see [Adjusting the policy](#adjusting-the-policy-configheaders) | the security headers |
+| `tls.*`, `server.*`, `logging.keepDays` | | for whoever runs the server: HTTPS, connection limits, log retention; see the [admin guide](../admin/admin_guide.md#on-the-internet---tls) |
 | `db.url` | none: SQLite | a Postgres database, `"postgres://host/dbname"`; see the [admin guide](../admin/admin_guide.md#a-postgres-database) |
 | `db.passwordSecret`, `db.schema` | | Postgres: the secret holding the password, and a schema to work in |
 | `db.pool` | 4 | connections to the database |
@@ -1552,7 +1554,7 @@ your code uses, for API keys and webhook signatures, are in
 How changes are handled:
 
 - **A changed config is read again within a second or so**, without a deploy.
-  (A changed `domain` takes effect after a restart.)
+  (A changed `domain`, `tls`, `server` or `db` takes effect after a restart.)
 - **A misspelled or unknown setting is an error**, not ignored, so a typo
   can't leave something at its default.
 - **A config with an error isn't used.** The previous one stays, and the error
@@ -2440,8 +2442,8 @@ useless, even if something did slip into a page. In practice:
   ```
 - **`javascript:` URLs don't work**, and `eval` and `new Function` are
   blocked.
-- **Scripts from other sites don't load.** Serve your JavaScript files from
-  your own app.
+- **Scripts from other sites don't load,** unless you name the site (see
+  below). Serving your JavaScript files from your own app is simplest.
 - **Inline styles are fine:** `style="..."` and `<style>` work (though fields
   can't go in them).
 - **Images may come from any `https:` site**, from your own, or as `data:`
@@ -2458,6 +2460,54 @@ goes, or a JSON block:
   const stats = JSON.parse(document.getElementById("stats").textContent);
 </script>
 ```
+
+**When something is blocked**, the browser says so in its console, and in
+`fourfold dev` a warning appears in the corner of the page (and in the
+terminal), naming what was blocked and where. On a server, browsers' reports
+go to the engine log.
+
+### Adjusting the policy: `config.headers`
+
+Add the other sites your pages use, by kind, in `private/config/app.ms`:
+
+```
+config.headers = {}
+config.headers.csp = {
+    "script": ["https://cdn.jsdelivr.net"],
+    "style": ["https://fonts.googleapis.com"],
+    "font": ["https://fonts.gstatic.com"],
+    "connect": ["https://api.example.com"],
+    "frame": ["https://www.youtube-nocookie.com"],
+}
+```
+
+| Kind | Allows | Already allowed |
+|---|---|---|
+| `script` | `<script src>` from these sites | your own site; inline scripts Fourfold marked |
+| `style` | stylesheets | your own site; inline styles |
+| `img` | images | your own site, any `https:` site, `data:` |
+| `font` | web fonts | your own site |
+| `connect` | `fetch`, HTMX requests, WebSockets, `EventSource` | your own site |
+| `media` | audio and video | your own site |
+| `frame` | pages you show in an `<iframe>` | your own site |
+| `form` | where forms may post | your own site |
+
+Each entry is a site (`"https://cdn.example.com"`, `"*.example.com"`, with
+a port or path if you like) or, except for scripts, a scheme (`"https:"`,
+`"data:"`, `"blob:"`, `"wss:"`). There's no way to allow inline event
+handlers, `eval`, or scripts from anywhere: those are what the policy is
+for.
+
+The rest of `config.headers`:
+
+| Setting | Default | Is |
+|---|---|---|
+| `strictStyles` | `false` | `true` blocks inline styles too (`style="..."`, `<style>`), for the strictest policy |
+| `frameAncestors` | `[]` | sites allowed to show your pages in a frame: `["self"]` for your own, or `["https://partner.example"]` |
+| `hsts` | a year | how long browsers must use HTTPS for the site: `{"maxAgeDays": 365, "includeSubDomains": true, "preload": true}`, or `false` for none. Sent only by `fourfold serve` over HTTPS |
+| `permissions` | `[]` | browser features your pages may use, which are otherwise off: `"camera"`, `"microphone"`, `"geolocation"`, `"payment"`, `"usb"`, `"serial"`, `"bluetooth"`, `"display-capture"` (and others, like `"fullscreen"`, to allow them explicitly) |
+
+Changes take effect on the next request, as for the rest of the config.
 
 ---
 

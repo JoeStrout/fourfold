@@ -72,6 +72,13 @@ private:
     void proceed(std::shared_ptr<Flow> flow) const;
     // The 503 for a request that waited too long for migrations.
     HttpResponse unavailable(const CompiledApp* app, const std::string& nonce) const;
+    // A CSP violation report: to the observer, and (so many a minute) the log.
+    void cspReport(const HttpRequest& request, const AppConfig* config) const;
+    static constexpr size_t kCspReportsPerMinute = 30;
+    mutable std::mutex cspMutex_;
+    mutable std::chrono::steady_clock::time_point cspWindowStart_{};
+    mutable size_t cspLogged_ = 0;
+    mutable size_t cspDropped_ = 0;
     void identify(std::shared_ptr<Flow> flow, std::function<void(std::shared_ptr<Flow>)> next) const;
     void serveAuth(std::shared_ptr<Flow> flow) const;
     void serveRoute(std::shared_ptr<Flow> flow) const;

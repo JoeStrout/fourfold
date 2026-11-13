@@ -306,7 +306,8 @@ TEST_CASE("HttpServer: a late response to a closed connection is dropped") {
 
 TEST_CASE("HttpServer: timeouts") {
     HttpServerLimits limits;
-    limits.requestTimeout = milliseconds(30);
+    limits.headerTimeout = milliseconds(30);
+    limits.sendTimeout = milliseconds(30);
     limits.idleTimeout = milliseconds(30);
 
     SUBCASE("an incomplete request gets 408") {
@@ -344,7 +345,8 @@ RequestHandler streamingHandler(std::shared_ptr<StreamWriter>& writer) {
 TEST_CASE("HttpServer: streams a response body") {
     std::shared_ptr<StreamWriter> writer;
     HttpServerLimits limits;
-    limits.requestTimeout = milliseconds(30);
+    limits.headerTimeout = milliseconds(30);
+    limits.sendTimeout = milliseconds(30);
     limits.idleTimeout = milliseconds(30);
     Harness h(limits, streamingHandler(writer));
     h.send("GET /events HTTP/1.1\r\nHost: a\r\n\r\n");

@@ -9,6 +9,7 @@
 #include <string>
 #include <sys/types.h>
 #include <utility>
+#include <vector>
 
 #include "base/fd.h"
 #include "base/result.h"
@@ -40,5 +41,16 @@ Result<std::pair<Fd, Fd>> makeSocketPair();
 // written yet, they return an error with code WouldBlock.
 Result<size_t> readSome(int fd, char* buffer, size_t size);
 Result<size_t> writeSome(int fd, const char* data, size_t size);
+
+// Sockets passed by systemd's socket activation (sd_listen_fds(3)):
+// LISTEN_FDS sockets from fd 3, if LISTEN_PID is this process, each with its
+// name from LISTEN_FDNAMES (FileDescriptorName=; "" if none). The variables
+// are then removed, so child processes don't take them too. Each is made
+// close-on-exec.
+struct InheritedSocket {
+    std::string name;
+    Fd fd;
+};
+std::vector<InheritedSocket> takeSystemdSockets();
 
 }  // namespace fourfold

@@ -1290,7 +1290,7 @@ Two supported shapes:
 
 #### Trusting the client's address
 
-- Behind a proxy, every connection appears to come from the proxy, so the real client address is in `X-Forwarded-For` (or `Forwarded`). Those headers are **trusted only when the connection comes from an address listed in the config** (`config.proxy.trust`, addresses or CIDR ranges); otherwise they're ignored. (M7: `X-Forwarded-For` is read from the right, the first address that isn't a trusted proxy being the client; `Forwarded` isn't read yet.) Without this rule, anyone could fake their IP and slip past per-IP limits.
+- Behind a proxy, every connection appears to come from the proxy, so the real client address is in `X-Forwarded-For` (or `Forwarded`). Those headers are **trusted only when the connection comes from an address listed in the config** (`config.proxy.trust`, addresses or CIDR ranges); otherwise they're ignored. (M7: `X-Forwarded-For` is read from the right, the first address that isn't a trusted proxy being the client; M11: `Forwarded` likewise, and ahead of it.) Without this rule, anyone could fake their IP and slip past per-IP limits.
 - The result is available to code as `req.ip`, and is the address used for the engine's own per-IP limits (sign-in, anonymous sessions, connection caps).
 - **The `Host` header is checked** against the configured domain(s); a request for any other host is rejected. The engine never builds URLs from `Host` (magic links, redirects, and the CSRF `Origin` check all use `config.domain`), so a forged `Host` can't steer a sign-in link to an attacker's site.
 
@@ -1345,6 +1345,15 @@ base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 - **The developer can add sources** in config, e.g. a CDN for scripts or a font host. There's no option for `'unsafe-inline'` or `'unsafe-eval'` in `script-src`.
 - **Violations are reported:** in dev mode, a CSP violation shows in the error overlay with the offending element; in production, it's logged to the engine log (rate-limited).
 - **Fragments with scripts** (decided in M4): fragments returned to HTMX are rendered in a separate response, so a `<script>` inside one won't have the page's nonce. A fragment containing `<script>` is therefore an error when returned as a fragment response (or as `status(...)`'s body), though it's fine in a static include or a page field. HTMX is also configured not to run scripts in swapped content.
+
+#### As built in M11
+
+- **TLS:** OpenSSL 3 (TLS 1.2 and 1.3, forward-secret AEAD ciphers only, no resumption); HTTP/2 through nghttp2, chosen by ALPN. `fourfold serve --tls` listens on 443 and 80; certificates come from an ACME CA (Let's Encrypt by default, HTTP-01 on port 80, our own client), kept in `private/state/tls/`, renewed with 30 days or a third of their life left, or from PEM files in `private/config/` (`config.tls`). Port 80 redirects to one of the app's own names, never the `Host` a visitor sent. Ports below 1024 through systemd's socket activation (or `CAP_NET_BIND_SERVICE`).
+- **Proxies:** `Forwarded` (RFC 7239) is read ahead of `X-Forwarded-For`; a trusted proxy's connections aren't counted per address.
+- **Limits:** the table above, in `config.server` (header time 10 s, the TLS handshake included; 1 KB/s average after a 10 s grace; connections sized to the open-file limit, 100 per address; 64 requests at once, others waiting up to 5 s for a 503; 1,000 SSE streams, 20 per visitor address; 100 HTTP/2 streams per connection). The server config caps them. Form-field and JSON-depth limits were already in the parsers (M7).
+- **Headers and CSP:** `config.headers` adds sources per directive (validated: no keywords, no `*`, no bare schemes for scripts), `strictStyles`, `frameAncestors` (which drops `X-Frame-Options` when it lists other sites), HSTS options, and enabled features. Violations are reported (`report-uri` and `report-to`) to `/__fourfold/csp-report`, logged at most 30 a minute; dev mode's page script shows them as they happen (the `securitypolicyviolation` event), and the terminal prints the reports.
+- **Shutdown and logs:** SIGTERM drains (no new connections, streams ended, requests finished within 30 s); engine logs older than `config.logging.keepDays` (30) are removed.
+- **Not yet (M11.1):** the `front` router, an OS user per app, the append-only dropbox, several engine processes per app.
 
 #### Dev mode
 

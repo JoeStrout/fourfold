@@ -62,6 +62,9 @@ public:
     // App code sent (or tried to send) a request to another server
     // (overview §6, Visibility). Never holds a secret's value.
     virtual void outboundCall(const OutboundCall&) {}
+    // A browser reported a Content Security Policy violation (overview §8):
+    // what was blocked, and where.
+    virtual void cspViolation(const std::string& /*description*/) {}
     // A request or job (`source`: "POST /signup", "job digest") enqueued
     // jobs, which were committed (`committed`), or dropped because it
     // failed (overview §2, Enqueuing).
@@ -81,6 +84,7 @@ public:
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
     void limitsCounted(const std::string& request, const std::vector<std::pair<std::string, double>>& counts) override;
     void outboundCall(const OutboundCall& call) override;
+    void cspViolation(const std::string& description) override;
     void jobsEnqueued(const std::string& source, const std::vector<std::string>& names, bool committed) override;
 
 private:

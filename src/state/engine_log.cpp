@@ -83,6 +83,21 @@ void EngineLog::flush() {
 
 std::string EngineLog::currentFile() const { return fileFor(clock_.nowMillis()); }
 
+Result<size_t> EngineLog::removeOldFiles(int keepDays) const {
+    auto entries = state_.list(RelPath::parse("logs").value());
+    if (!entries) return entries.error().code == ErrorCode::NotFound ? Result<size_t>(size_t{0}) : entries.error();
+    // "logs/engine-2026-10-25.log" → "engine-2026-10-25.log": names sort by date.
+    std::string oldestKept = fileFor(clock_.nowMillis() - static_cast<int64_t>(keepDays) * 86'400'000).substr(5);
+    size_t removed = 0;
+    for (const DirEntry& e : entries.value()) {
+        bool dayFile = !e.isFolder && e.name.size() == oldestKept.size() && e.name.rfind("engine-", 0) == 0 &&
+                       e.name.compare(e.name.size() - 4, 4, ".log") == 0;
+        if (!dayFile || e.name >= oldestKept) continue;
+        if (state_.remove(RelPath::parse("logs/" + e.name).value())) removed++;
+    }
+    return removed;
+}
+
 void EngineLog::writerMain() {
     std::unique_lock<std::mutex> lock(mutex_);
     while (true) {

@@ -133,6 +133,53 @@ struct JobsConfig {
     std::shared_ptr<const TimeZone> timeZone = TimeZone::utc();
 };
 
+// TLS, when Fourfold ends it itself (overview §8, TLS; config.tls): a
+// certificate from an ACME CA (Let's Encrypt), or files of the app's own.
+// Read once, when the server starts.
+struct TlsConfig {
+    std::string acmeDirectory;   // the CA's directory URL; Let's Encrypt's by default
+    std::string email;           // the ACME account's contact, optional
+    std::string acmeCaBundle;    // a test CA's root (Pebble), as a host path; empty: the system's
+    // Instead of ACME: a certificate chain and key (PEM), in private/config/.
+    std::string certFile, keyFile;
+    bool http2 = true;
+};
+
+// The headers on every response (overview §8, Security headers by default;
+// Content Security Policy; config.headers), ready to send.
+struct HeadersConfig {
+    // The CSP, in two parts: the response's nonce goes between them.
+    std::string cspBeforeNonce;
+    std::string cspAfterNonce;
+    std::string frameOptions = "DENY";   // empty: none (frameAncestors allows embedding)
+    std::string hsts;                    // Strict-Transport-Security, over HTTPS in production
+    std::string permissionsPolicy;
+};
+// The defaults, as an app with no config.headers gets.
+HeadersConfig defaultHeaders();
+// Where browsers send CSP violation reports.
+extern const char* const kCspReportPath;
+
+// The standalone server's connection and request limits (overview §8,
+// Connection and request limits; config.server). Read when the server
+// starts.
+struct ServerConfig {
+    size_t connections = 0;                // 0: sized to the open-file limit
+    size_t connectionsPerAddress = 100;
+    size_t streams = 1000;                 // open server-sent event streams
+    size_t streamsPerAddress = 20;
+    size_t requests = 64;                  // handled at once; more wait
+    std::chrono::milliseconds requestWait{5000};
+    std::chrono::milliseconds headerTimeout{10000};
+    size_t minUploadBytesPerSecond = 1024;
+    std::chrono::milliseconds keepAlive{60000};
+};
+
+// The engine's logs in private/state/logs/ (config.logging).
+struct LoggingConfig {
+    int keepDays = 30;   // older day files are removed
+};
+
 struct AppConfig {
     ConfigMode mode = ConfigMode::Dev;
     SiteConfig site;
@@ -148,6 +195,10 @@ struct AppConfig {
     // Outbound HTTP (config.outbound): tightens code/outbound.ms.
     OutboundSettings outbound;
     JobsConfig jobs;
+    TlsConfig tls;
+    HeadersConfig headers = defaultHeaders();
+    ServerConfig server;
+    LoggingConfig logging;
     // Sends mail as configured; null if the transport is None. Thread-safe.
     std::shared_ptr<Mailer> mailer;
     // By name. Only `config` and the OutboundClient read the values.

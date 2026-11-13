@@ -2,6 +2,7 @@
 
 #include <arpa/inet.h>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <netdb.h>
@@ -61,6 +62,11 @@ Result<Fd> listenTcp(const std::string& host, uint16_t port, int backlog) {
     }
     int on = 1;
     setsockopt(fd.get(), SOL_SOCKET, SO_REUSEADDR, &on, sizeof on);
+    if (info->ai_family == AF_INET6 && host == "::") {
+        // "::" means every address, IPv4 too, whatever the system's default.
+        int off = 0;
+        setsockopt(fd.get(), IPPROTO_IPV6, IPV6_V6ONLY, &off, sizeof off);
+    }
     int bound = bind(fd.get(), info->ai_addr, info->ai_addrlen);
     freeaddrinfo(info);
     if (bound < 0) return errnoError("bind");
@@ -138,6 +144,39 @@ Result<size_t> writeSome(int fd, const char* data, size_t size) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return makeError(ErrorCode::WouldBlock, "");
         return errnoError("send");
     }
+}
+
+std::vector<InheritedSocket> takeSystemdSockets() {
+    std::vector<InheritedSocket> out;
+    // Copied: unsetenv frees them.
+    auto var = [](const char* name) {
+        const char* v = getenv(name);
+        return v ? std::optional<std::string>(v) : std::nullopt;
+    };
+    auto pid = var("LISTEN_PID"), count = var("LISTEN_FDS"), names = var("LISTEN_FDNAMES");
+    bool ours = pid && count && std::to_string(getpid()) == *pid;
+    std::vector<std::string> nameList;
+    if (names) {
+        std::string all = *names;
+        size_t start = 0;
+        while (start <= all.size()) {
+            size_t colon = all.find(':', start);
+            if (colon == std::string::npos) colon = all.size();
+            nameList.push_back(all.substr(start, colon - start));
+            start = colon + 1;
+        }
+    }
+    unsetenv("LISTEN_PID");
+    unsetenv("LISTEN_FDS");
+    unsetenv("LISTEN_FDNAMES");
+    if (!ours) return out;
+    int n = atoi(count->c_str());
+    for (int i = 0; i < n && i < 64; i++) {
+        int fd = 3 + i;
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+        out.push_back({i < static_cast<int>(nameList.size()) ? nameList[i] : std::string(), Fd(fd)});
+    }
+    return out;
 }
 
 }  // namespace fourfold

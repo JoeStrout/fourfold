@@ -31,4 +31,8 @@ void ObserverList::jobsEnqueued(const std::string& source, const std::vector<std
     for (Observer* o : observers_) o->jobsEnqueued(source, names, committed);
 }
 
+void ObserverList::cspViolation(const std::string& description) {
+    for (Observer* o : observers_) o->cspViolation(description);
+}
+
 }  // namespace fourfold

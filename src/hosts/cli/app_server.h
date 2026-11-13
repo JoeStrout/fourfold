@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "acme/certificate_manager.h"
 #include "appdata/backup.h"
 #include "appdata/data_files.h"
 #include "appdata/database.h"
@@ -36,6 +37,7 @@
 #include "state/lock_service.h"
 #include "state/rate_store.h"
 #include "state/session_store.h"
+#include "tls/server_tls.h"
 
 namespace fourfold::cli {
 
@@ -56,6 +58,18 @@ struct ServerOptions {
     // Reached over HTTPS (through a proxy that ends TLS): Secure cookies,
     // and https:// as the site's origin. Dev mode is plain HTTP.
     bool https = false;
+    // Fourfold ends TLS itself (overview §8, TLS): HTTPS on address:port,
+    // with a certificate from config.tls (from Let's Encrypt, or files); and
+    // on redirectAddress:redirectPort (if set), plain HTTP that only
+    // redirects to HTTPS and answers ACME's challenges.
+    bool tls = false;
+    std::string redirectAddress;
+    uint16_t redirectPort = 80;
+    // Sockets from systemd's socket activation, used instead of listening
+    // on address:port and on the redirect address. (Shared, so options
+    // stay copyable; start() takes them.)
+    std::shared_ptr<Fd> listenSocket;
+    std::shared_ptr<Fd> redirectSocket;
     LifecycleOptions lifecycle;
 
     // Listen for requests. Off for the CLI's `migrate` and `backup` when no
@@ -98,6 +112,15 @@ public:
 
     // Serves until loop().stop().
     EventLoop& loop() { return *loop_; }
+    // Graceful shutdown (SIGTERM): stops taking connections, lets requests
+    // in flight finish (up to `deadline`), then stops the loop. Call on the
+    // loop's thread.
+    void shutdown(std::chrono::milliseconds deadline);
+    // The port 80 server's port (TLS mode), or 0.
+    uint16_t redirectPort() const { return redirect_ ? redirect_->port() : 0; }
+    // TLS mode's certificates (for tests).
+    CertificateManager* certificates() { return certificates_.get(); }
+    ServerTls* tls() { return tls_.get(); }
     uint16_t port() const { return server_->port(); }
     const std::string& root() const { return root_; }
     // Whether the first compile succeeded.
@@ -140,6 +163,7 @@ private:
     void scriptError(const ScriptError& e) override;
     void renderWarnings(uint64_t generation, const std::vector<RenderWarning>& warnings) override;
     void jobsEnqueued(const std::string& source, const std::vector<std::string>& names, bool committed) override;
+    void cspViolation(const std::string& description) override;
 
     // Removes expired sessions and sign-in tokens now, and every hour.
     void scheduleSweep(std::chrono::milliseconds delay);
@@ -152,6 +176,8 @@ private:
     // private/state/control/): checked now, and every so often.
     void scheduleControl(std::chrono::milliseconds delay);
     void checkControl();
+    // TLS mode: the certificates (files, or ACME), and port 80's server.
+    Status startTls(const AppConfig& config, const std::vector<std::string>& hosts, const ServerOptions& options);
     // Scheduled backups (config.backups.everyHours).
     void scheduleBackup(std::chrono::milliseconds delay);
 
@@ -197,6 +223,9 @@ private:
     std::unique_ptr<Engine> engine_;
     std::unique_ptr<AppInstance> instance_;
     std::unique_ptr<JobRunner> jobRunner_;
+    std::shared_ptr<ServerTls> tls_;
+    std::unique_ptr<CertificateManager> certificates_;
+    std::unique_ptr<HttpServer> redirect_;   // port 80, in TLS mode
     std::unique_ptr<HttpServer> server_;
 };
 

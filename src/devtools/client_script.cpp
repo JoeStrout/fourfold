@@ -62,9 +62,26 @@ const char* const kDevClientScript = R"js((function () {
 
   // Template warnings: a small panel in the corner, until dismissed (or
   // more arrive).
-  var warningPanel = null, dismissed = 0;
+  var warningPanel = null, dismissed = 0, templateWarnings = [], cspWarnings = [];
+
+  // Content Security Policy violations on this page (overview §8): what
+  // was blocked, and where, beside the template warnings.
+  document.addEventListener("securitypolicyviolation", function (e) {
+    if (cspWarnings.length >= 20) return;
+    var what = e.blockedURI === "inline" || !e.blockedURI ? "an inline " + (e.effectiveDirective.indexOf("style") === 0 ? "style" : "script")
+             : e.blockedURI;
+    cspWarnings.push({
+      file: e.sourceFile ? new URL(e.sourceFile, location.href).pathname : location.pathname,
+      line: e.lineNumber || 0,
+      message: "Content Security Policy (" + e.effectiveDirective + ") blocked " + what +
+               (e.sample ? ": " + e.sample : "")
+    });
+    showWarnings(templateWarnings);
+  });
 
   function showWarnings(list) {
+    templateWarnings = list || [];
+    list = templateWarnings.concat(cspWarnings);
     if (warningPanel) warningPanel.remove();
     warningPanel = null;
     if (!list || !list.length || list.length <= dismissed) return;
@@ -87,7 +104,7 @@ const char* const kDevClientScript = R"js((function () {
     });
     warningPanel.appendChild(close);
     warningPanel.appendChild(el("div", { fontWeight: "600", marginBottom: "0.3rem" },
-      list.length === 1 ? "1 template warning" : list.length + " template warnings"));
+      list.length === 1 ? "1 warning" : list.length + " warnings"));
     list.forEach(function (w) {
       var row = el("div", { margin: "0.2rem 0" });
       row.appendChild(el("span", { fontFamily: "ui-monospace, Menlo, monospace", color: "#c9b56a" },

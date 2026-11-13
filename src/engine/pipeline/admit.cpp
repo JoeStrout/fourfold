@@ -1,5 +1,7 @@
 #include "pipeline/stages.h"
 
+#include <algorithm>
+
 namespace fourfold {
 
 namespace {
@@ -11,6 +13,45 @@ std::string hostName(const std::string& host) {
         return close == std::string::npos ? host : host.substr(0, close + 1);
     }
     return host.substr(0, host.find(':'));
+}
+
+std::string trimmed(const std::string& s) {
+    size_t a = s.find_first_not_of(" \t"), b = s.find_last_not_of(" \t");
+    return a == std::string::npos ? "" : s.substr(a, b - a + 1);
+}
+
+// "a, b,c" → {"a", "b", "c"}, trimmed. (Forwarded's quoted strings never
+// hold a comma that matters: an address has none.)
+std::vector<std::string> splitList(const std::string& value, char separator) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start <= value.size()) {
+        size_t at = value.find(separator, start);
+        if (at == std::string::npos) at = value.size();
+        out.push_back(trimmed(value.substr(start, at - start)));
+        start = at + 1;
+    }
+    return out;
+}
+
+// The address in one Forwarded element's for= ("for=192.0.2.60;proto=https",
+// "for=\"[2001:db8::1]:4711\""), or "" (none, "unknown", an obfuscated
+// name), which stops the walk.
+std::string forwardedFor(const std::string& element) {
+    for (const std::string& pair : splitList(element, ';')) {
+        size_t eq = pair.find('=');
+        if (eq == std::string::npos || !equalsIgnoreCase(trimmed(pair.substr(0, eq)), "for")) continue;
+        std::string v = trimmed(pair.substr(eq + 1));
+        if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+        if (!v.empty() && v[0] == '[') {
+            size_t close = v.find(']');
+            return close == std::string::npos ? "" : v.substr(1, close - 1);
+        }
+        // An IPv4 address may carry a port: "192.0.2.43:47011".
+        if (std::count(v.begin(), v.end(), ':') == 1) v = v.substr(0, v.find(':'));
+        return v;
+    }
+    return "";
 }
 
 HttpResponse badRequest(const std::string& why) {
@@ -66,18 +107,14 @@ std::string clientAddress(const HttpRequest& request, const std::vector<AddressR
     };
     std::string address = request.peerAddress;
     if (trustedProxies.empty() || !trusted(address)) return address;
-    // Every X-Forwarded-For field, in order, as one list.
+    // The hops, nearest last: from Forwarded (RFC 7239) if the proxy sent
+    // it, else X-Forwarded-For; every field of the header, in order.
+    bool standard = request.headers.has("Forwarded");
     std::vector<std::string> hops;
     for (const Headers::Field& f : request.headers) {
-        if (!equalsIgnoreCase(f.name, "X-Forwarded-For")) continue;
-        size_t start = 0;
-        while (start <= f.value.size()) {
-            size_t comma = f.value.find(',', start);
-            if (comma == std::string::npos) comma = f.value.size();
-            std::string hop = f.value.substr(start, comma - start);
-            size_t a = hop.find_first_not_of(" \t"), b = hop.find_last_not_of(" \t");
-            hops.push_back(a == std::string::npos ? "" : hop.substr(a, b - a + 1));
-            start = comma + 1;
+        if (!equalsIgnoreCase(f.name, standard ? "Forwarded" : "X-Forwarded-For")) continue;
+        for (const std::string& element : splitList(f.value, ',')) {
+            hops.push_back(standard ? forwardedFor(element) : element);
         }
     }
     for (auto it = hops.rbegin(); it != hops.rend(); ++it) {

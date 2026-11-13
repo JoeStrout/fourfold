@@ -5,10 +5,11 @@
 - CMake 3.21 or later, and Ninja
 - A C++17 compiler: Clang 10+ (including Apple Clang) or GCC 9+
 - libcurl, for sending email (M6): part of the macOS SDK; on Debian/Ubuntu, `apt install libcurl4-openssl-dev`
+- OpenSSL 3 and nghttp2, for the server's own HTTPS and HTTP/2 (M11). On macOS, `brew install openssl@3 libnghttp2` (CMake looks in Homebrew's and MacPorts' places; set `OPENSSL_ROOT_DIR` to use another); on Debian/Ubuntu, `apt install libssl-dev libnghttp2-dev`. CMake prints the versions it found ("TLS: OpenSSL 3.x; HTTP/2: …").
 - Optional: libpq, for Postgres databases (M8). Found through `pg_config` (or set `FOURFOLD_PG_CONFIG`); without it, Fourfold builds with SQLite only. On macOS, `brew install libpq` (or `postgresql`); on Debian/Ubuntu, `apt install libpq-dev`. CMake prints "Postgres support: yes" or "no".
 - [MiniScript 2](https://github.com/JoeStrout/miniscript2), checked out next to this repository as `../miniscript2` (or set `FOURFOLD_MS2_DIR`). Configuring fails without it.
 
-On macOS: `xcode-select --install`, then `brew install cmake ninja`. On Debian/Ubuntu: `apt install build-essential cmake ninja-build libcurl4-openssl-dev`.
+On macOS: `xcode-select --install`, then `brew install cmake ninja openssl@3 libnghttp2`. On Debian/Ubuntu: `apt install build-essential cmake ninja-build libcurl4-openssl-dev libssl-dev libnghttp2-dev`.
 
 ## Build and test
 

@@ -20,7 +20,7 @@ The risks most likely to change the design, and where each is retired:
 | R1 | A fresh VM per request is too slow (load the compiled app, build `req`, run the file's top level, call the handler) | Rethinking the §2 execution model, e.g. VM reuse with reset | M2 |
 | R2 | Interleaving many VMs on one script thread, with parked VMs for I/O, doesn't work cleanly with MS2's not-done intrinsics, or nests badly (an intrinsic calling back into script) | Redesigning `ScriptHost` and every async intrinsic | M2 |
 | R3 | MS2 can't enforce an instruction budget, or remove compiling intrinsics, without deep changes | Changes to MS2; the sandbox claims of §1 | M2 |
-| R4 | Per-VM memory budgets aren't feasible with a shared GC | The process model (several processes, restarted on overrun) | M2 (decision), M11 (final) |
+| R4 | Per-VM memory budgets aren't feasible with a shared GC | The process model (several processes, restarted on overrun) | M2 (decision); deferred in M11 |
 | R5 | Compiling (which needs MS2) can't share the script thread without stalling requests; bytecode can't be kept per generation and released safely | Where the compiler runs; bytecode serialization; ownership of compiled apps | M3 |
 | R6 | The contextual template parser (Go `html/template`-style) is harder in practice than on paper, or too strict for real templates | Template syntax and rules (§4) | M4 |
 | R7 | Session locks and file locks as scheduler waits are awkward, or SQLite-backed state is too slow for every request | Session design (§2), the "all cross-request state in files" rule | M5 |
@@ -319,19 +319,40 @@ The risks most likely to change the design, and where each is retired:
 
 ## M11 — Production server
 
-**Goal:** Fourfold can face the internet on its own (§8, Serving on the open internet; §1, OS-level enforcement).
+**Goal:** one app can face the internet on its own (§8, Serving on the open internet).
+
+**Decisions (2026-11-13, with the user):**
+- **TLS is OpenSSL 3; HTTP/2 is nghttp2.** Both are already in the static musl build (through libcurl) and on every Linux. The ACME client is our own: HTTP-01 challenges, ECDSA account keys and JWS, and certificates through OpenSSL.
+- **R4 is deferred again.** MS2 still has no per-VM memory accounting (ms-source-changes.md #1). The engine stays one process per app, with the service manager's memory limit (`MemoryMax=` in systemd) as the guard, and the docs and startup notice still say so.
+- **Split in two,** as M9 and M9.1 were. M11 is a single app on the open internet; M11.1 is several apps on one server, isolated by OS user.
+- **Testing:** the user provides a small Linux VPS (SSH) and a domain pointed at it for the exit criteria. Until then, ACME is tested against Pebble (Let's Encrypt's test server) in Docker, and everything else locally.
 
 **Scope:**
-- TLS, with ACME certificates stored and renewed in `private/state/`; port 80 redirects and challenges; HTTP/2.
-- Running behind a reverse proxy: trusted proxy addresses, `req.ip`, `Host` checks against `config.domain`.
-- All the connection and request limits in the §8 table, including slow-request protection and SSE connection caps.
-- The full security header set and CSP configuration (added sources, stricter style option, violation reporting).
-- Running without root (socket activation or `CAP_NET_BIND_SERVICE`); a separate OS user per app; file permissions per partition; an append-only dropbox where the OS supports it.
-- `front`: the multi-app TLS router over Unix sockets.
-- Multiple engine processes per app (`SO_REUSEPORT`), with SSE fan-out between them, if M2's memory-budget decision or load testing calls for it.
-- Engine log rotation and retention.
+- TLS, with ACME certificates stored and renewed in `private/state/`; port 80 only redirects and answers challenges; HTTP/2 over TLS (ALPN).
+- Running behind a reverse proxy: `Forwarded` as well as `X-Forwarded-For`, `req.ip`, `Host` checks against `config.domain`.
+- All the connection and request limits in the §8 table, including slow-request protection (header time, minimum body rate), per-IP connection caps, concurrent-request admission with 503, and SSE connection caps.
+- The full security header set and CSP configuration (added sources, the stricter style option, allowed embedding sites, HSTS options, enabled browser features), and violation reporting (the dev overlay; the engine log in production, rate-limited).
+- Running without root: systemd socket activation, or `CAP_NET_BIND_SERVICE`; a sample systemd unit.
+- Graceful shutdown (stop accepting, finish requests in flight); engine log rotation and retention.
 
-**Exit criteria:** an internet-facing deployment passes an external TLS and header scan; a slowloris and connection-flood test is contained; a load test on a small VPS meets an agreed target; a multi-app server isolates apps by OS user.
+**Exit criteria:** an internet-facing deployment passes an external TLS and header scan; a slowloris and connection-flood test is contained; a load test on a small VPS meets an agreed target.
+
+**Outcome (2026-11-13):** on a test VPS (`test.miniscript.org`), SSL Labs and Mozilla Observatory both gave A+, and slowloris and a one-address connection flood from outside were contained. **Deferred, with the user:** the load test (no target agreed; it belongs with M11.1's multi-process question) and watching a real certificate renew over days (tested with Pebble's 6-day certificates; seeing it with Let's Encrypt needs ACME profile support or two months).
+
+**Decisions made here** (details in [m11-results.md](m11-results.md)): TLS over memory BIOs, so connections do their own socket I/O and HTTP/2 sits on the same plaintext; no session resumption. The header timeout starts with the connection (covering the handshake); bodies are held to an average rate after a grace period. Admission (requests at once, then a short queue, then 503) wraps the handler at the transport. Stream caps are per visitor address; loopback is exempt from per-address caps. Certificates renew with 30 days or a third of their life left, whichever is sooner. Port 80 redirects only to the app's own names. `Forwarded` is read ahead of `X-Forwarded-For`. CSP sources added in `config.headers` are validated (no keywords, no `*`).
+
+---
+
+## M11.1 — Several apps on one server
+
+**Goal:** a server can host several apps, each isolated from the others by OS user (§1, OS-level enforcement; §8, several apps on one server).
+
+**Scope:**
+- `front`: the multi-app TLS router over Unix sockets, configured by the server config.
+- A separate OS user per app; file permissions per partition; an append-only dropbox where the OS supports it.
+- Multiple engine processes per app (`SO_REUSEPORT`), with SSE fan-out between them, if load testing calls for it (R4 stays deferred; see M11).
+
+**Exit criteria:** a multi-app server isolates apps by OS user.
 
 ---
 

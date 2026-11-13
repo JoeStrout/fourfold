@@ -337,3 +337,27 @@ TEST_CASE("clientAddress: X-Forwarded-For only from a trusted proxy") {
     CHECK_EQ(clientAddress(from("10.0.0.2", {}), trust), "10.0.0.2");
     CHECK_EQ(clientAddress(from("10.0.0.2", {"2001:db8::5"}), trust), "2001:db8::5");
 }
+
+TEST_CASE("clientAddress: Forwarded (RFC 7239) from a trusted proxy, ahead of X-Forwarded-For") {
+    std::vector<AddressRange> trust = {*AddressRange::parse("10.0.0.0/8")};
+    auto from = [](std::string peer, std::vector<std::string> forwarded, std::string xff = "") {
+        HttpRequest r;
+        r.peerAddress = std::move(peer);
+        for (std::string& f : forwarded) r.headers.add("Forwarded", std::move(f));
+        if (!xff.empty()) r.headers.add("X-Forwarded-For", xff);
+        return r;
+    };
+    CHECK_EQ(clientAddress(from("203.0.113.9", {"for=1.2.3.4"}), trust), "203.0.113.9");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=198.51.100.7;proto=https;by=10.0.0.2"}), trust), "198.51.100.7");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"For=\"[2001:db8:cafe::17]:4711\""}), trust), "2001:db8:cafe::17");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=\"198.51.100.7:8080\""}), trust), "198.51.100.7");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=6.6.6.6, for=198.51.100.7"}), trust), "198.51.100.7");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=198.51.100.7, for=10.3.3.3"}), trust), "198.51.100.7");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=198.51.100.7", "for=10.3.3.3"}), trust), "198.51.100.7");
+    // Hidden or unknown: as far as the proxies vouch.
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=unknown"}), trust), "10.0.0.2");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=_hidden, for=10.3.3.3"}), trust), "10.3.3.3");
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"proto=https"}), trust), "10.0.0.2");
+    // Forwarded wins over X-Forwarded-For.
+    CHECK_EQ(clientAddress(from("10.0.0.2", {"for=198.51.100.7"}, "6.6.6.6"), trust), "198.51.100.7");
+}

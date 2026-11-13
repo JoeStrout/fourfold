@@ -29,6 +29,8 @@ docker run --rm --platform linux/amd64 \
             -DFOURFOLD_BUILD_TESTS=$TESTS \
             -DFOURFOLD_PG_CONFIG=FOURFOLD_PG_CONFIG-NOTFOUND \
             -DCURL_LIBRARY=/usr/lib/libcurl.a \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DFOURFOLD_NGHTTP2_LIBRARY=/usr/lib/libnghttp2.a \
             -DZLIB_LIBRARY="$zlib" \
             -DCMAKE_EXE_LINKER_FLAGS="-static" \
             -DCMAKE_CXX_STANDARD_LIBRARIES="$libs" > /out/configure.log
