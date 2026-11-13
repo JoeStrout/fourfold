@@ -25,6 +25,27 @@ Result<Fd> listenTcp(const std::string& host, uint16_t port, int backlog = 128);
 // The port a socket is bound to.
 Result<uint16_t> localPort(int fd);
 
+// What acceptConnection gives as the peer address of a Unix-domain socket's
+// connection. Who may connect is up to the socket file's permissions, so the
+// engine trusts such a peer as a proxy (overview §8, several apps on one
+// server).
+extern const char* const kUnixPeer;
+
+// A listening Unix-domain stream socket at `path`, with the socket file's
+// permission bits set to `mode` (e.g. 0660: the owner's and group's to
+// connect to). A stale socket file left at `path` is replaced; anything else
+// there is an error.
+Result<Fd> listenUnix(const std::string& path, unsigned mode = 0660, int backlog = 128);
+
+// Connects to the Unix-domain socket at `path`, returning a non-blocking
+// socket. A local connect completes at once: it fails if nothing is
+// listening there (or the socket file's permissions say no), and with
+// WouldBlock if the listener's queue is full.
+Result<Fd> connectUnix(const std::string& path);
+
+// The path of a Unix-domain socket's address ("" if it isn't one).
+std::string unixSocketPath(int fd);
+
 struct AcceptedSocket {
     Fd fd;
     std::string peerAddress;   // numeric, e.g. "127.0.0.1" or "::1"
@@ -41,6 +62,10 @@ Result<std::pair<Fd, Fd>> makeSocketPair();
 // written yet, they return an error with code WouldBlock.
 Result<size_t> readSome(int fd, char* buffer, size_t size);
 Result<size_t> writeSome(int fd, const char* data, size_t size);
+
+// Connections a server may hold: what the open-file limit allows (raised to
+// its hard limit, up to 65536), less room for the process's other files.
+size_t connectionsForOpenFiles();
 
 // Sockets passed by systemd's socket activation (sd_listen_fds(3)):
 // LISTEN_FDS sockets from fd 3, if LISTEN_PID is this process, each with its

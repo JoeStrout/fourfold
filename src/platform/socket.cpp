@@ -1,13 +1,18 @@
 #include "platform/socket.h"
 
+#include <algorithm>
 #include <arpa/inet.h>
 #include <cerrno>
 #include <cstdlib>
+#include <cstddef>
 #include <cstring>
 #include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 namespace fourfold {
@@ -32,12 +37,26 @@ void disableSigPipe(int fd) {
 }
 
 std::string addressToString(const sockaddr* addr, socklen_t len) {
+    if (addr->sa_family == AF_UNIX) return kUnixPeer;
     char host[NI_MAXHOST];
     if (getnameinfo(addr, len, host, sizeof host, nullptr, 0, NI_NUMERICHOST) != 0) return "";
     return host;
 }
 
+// A Unix-domain address for `path`, or an error if it's too long.
+Result<sockaddr_un> unixAddress(const std::string& path) {
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    if (path.empty() || path.size() >= sizeof addr.sun_path) {
+        return makeError(ErrorCode::Invalid, "not a usable socket path (empty, or too long): " + path);
+    }
+    std::memcpy(addr.sun_path, path.data(), path.size());
+    return addr;
+}
+
 }  // namespace
+
+const char* const kUnixPeer = "unix";
 
 Status setNonBlocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
@@ -73,6 +92,58 @@ Result<Fd> listenTcp(const std::string& host, uint16_t port, int backlog) {
     if (listen(fd.get(), backlog) < 0) return errnoError("listen");
     if (Status s = setNonBlocking(fd.get()); !s) return s.error();
     return fd;
+}
+
+Result<Fd> listenUnix(const std::string& path, unsigned mode, int backlog) {
+    auto addr = unixAddress(path);
+    if (!addr) return addr.error();
+    // Only a socket file is replaced: a stale one, from a server that died.
+    struct stat info;
+    if (lstat(path.c_str(), &info) == 0) {
+        if (!S_ISSOCK(info.st_mode)) return makeError(ErrorCode::Conflict, path + ": exists, and isn't a socket");
+        if (::unlink(path.c_str()) < 0) return errnoError("unlink");
+    }
+    Fd fd(socket(AF_UNIX, SOCK_STREAM, 0));
+    if (!fd.valid()) return errnoError("socket");
+    fcntl(fd.get(), F_SETFD, FD_CLOEXEC);
+    // Created with no access, then opened up to `mode`, so there's no moment
+    // when others could connect.
+    mode_t old = umask(0777);
+    int bound = bind(fd.get(), reinterpret_cast<const sockaddr*>(&addr.value()), sizeof(sockaddr_un));
+    int e = errno;
+    umask(old);
+    errno = e;
+    if (bound < 0) return errnoError("bind");
+    if (chmod(path.c_str(), static_cast<mode_t>(mode & 0777)) < 0) return errnoError("chmod");
+    if (::listen(fd.get(), backlog) < 0) return errnoError("listen");
+    if (Status s = setNonBlocking(fd.get()); !s) return s.error();
+    return fd;
+}
+
+Result<Fd> connectUnix(const std::string& path) {
+    auto addr = unixAddress(path);
+    if (!addr) return addr.error();
+    Fd fd(socket(AF_UNIX, SOCK_STREAM, 0));
+    if (!fd.valid()) return errnoError("socket");
+    fcntl(fd.get(), F_SETFD, FD_CLOEXEC);
+    if (Status s = setNonBlocking(fd.get()); !s) return s.error();
+    disableSigPipe(fd.get());
+    for (;;) {
+        if (connect(fd.get(), reinterpret_cast<const sockaddr*>(&addr.value()), sizeof(sockaddr_un)) == 0) return fd;
+        if (errno == EINTR) continue;
+        // A local connect either completes at once or fails; EAGAIN (Linux)
+        // means the listener's queue is full.
+        if (errno == EAGAIN) return makeError(ErrorCode::WouldBlock, "connect: " + path + " is too busy");
+        return errnoError("connect");
+    }
+}
+
+std::string unixSocketPath(int fd) {
+    sockaddr_un addr{};
+    socklen_t len = sizeof addr;
+    if (getsockname(fd, reinterpret_cast<sockaddr*>(&addr), &len) < 0 || addr.sun_family != AF_UNIX) return "";
+    size_t n = len > offsetof(sockaddr_un, sun_path) ? len - offsetof(sockaddr_un, sun_path) : 0;
+    return std::string(addr.sun_path, strnlen(addr.sun_path, n));
 }
 
 Result<uint16_t> localPort(int fd) {
@@ -144,6 +215,19 @@ Result<size_t> writeSome(int fd, const char* data, size_t size) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) return makeError(ErrorCode::WouldBlock, "");
         return errnoError("send");
     }
+}
+
+size_t connectionsForOpenFiles() {
+    struct rlimit r;
+    if (getrlimit(RLIMIT_NOFILE, &r) != 0) return 1024;
+    rlim_t want = r.rlim_max == RLIM_INFINITY ? 65536 : std::min<rlim_t>(r.rlim_max, 65536);
+    if (r.rlim_cur < want) {
+        struct rlimit raised = r;
+        raised.rlim_cur = want;
+        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) r = raised;
+    }
+    rlim_t files = r.rlim_cur == RLIM_INFINITY ? 65536 : r.rlim_cur;
+    return files > 512 ? static_cast<size_t>(files - 256) : 256;
 }
 
 std::vector<InheritedSocket> takeSystemdSockets() {

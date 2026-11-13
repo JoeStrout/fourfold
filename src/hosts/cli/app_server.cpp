@@ -1,9 +1,9 @@
 #include "app_server.h"
 
 #include <ostream>
-#include <sys/resource.h>
 #include <sys/stat.h>
 
+#include "dropboxwriter/dropbox_writer.h"
 #include "partition/app_folder.h"
 
 namespace fourfold::cli {
@@ -17,21 +17,6 @@ constexpr auto kControlInterval = std::chrono::milliseconds(250);
 bool insidePartition(const std::string& folder, const std::string& root, const char* name) {
     std::string p = root + "/" + name;
     return folder == p || folder.rfind(p + "/", 0) == 0;
-}
-
-// Connections the server may hold: what the open-file limit allows (raised
-// to its hard limit, up to 65536), less room for the engine's own files.
-size_t connectionsForMachine() {
-    struct rlimit r;
-    if (getrlimit(RLIMIT_NOFILE, &r) != 0) return 1024;
-    rlim_t want = r.rlim_max == RLIM_INFINITY ? 65536 : std::min<rlim_t>(r.rlim_max, 65536);
-    if (r.rlim_cur < want) {
-        struct rlimit raised = r;
-        raised.rlim_cur = want;
-        if (setrlimit(RLIMIT_NOFILE, &raised) == 0) r = raised;
-    }
-    rlim_t files = r.rlim_cur == RLIM_INFINITY ? 65536 : r.rlim_cur;
-    return files > 512 ? static_cast<size_t>(files - 256) : 256;
 }
 
 // "example.com:443" → "example.com".
@@ -96,7 +81,9 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     // and its config, private/config/.
     auto state = app.value().stateDir();
     auto data = app.value().dataDir();
-    auto dropbox = app.value().dropbox();
+    auto dropbox = options.dropboxSocket.empty()
+                       ? app.value().dropbox()
+                       : Result<Dropbox>(Dropbox(std::make_shared<DropboxClient>(options.dropboxSocket)));
     auto configDir = app.value().configDir();
     if (!state || !data || !dropbox || !configDir) {
         err << command
@@ -455,7 +442,7 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
     // in dev mode, generous ones (every tab is localhost).
     const ServerConfig& sc = config->server;
     HttpServerLimits limits;
-    limits.maxConnections = sc.connections ? sc.connections : connectionsForMachine();
+    limits.maxConnections = sc.connections ? sc.connections : connectionsForOpenFiles();
     limits.maxConnectionsPerAddress = options.dev ? limits.maxConnections : sc.connectionsPerAddress;
     // A trusted proxy carries many visitors; so does a local one that isn't
     // listed (and no one outside can connect from loopback).
@@ -516,14 +503,24 @@ std::unique_ptr<AppServer> AppServer::start(const std::string& folder, ServerOpt
         err << "\n";
         return false;
     };
-    if (!listenOn(*server->server_, options.listenSocket, options.address, options.port)) return nullptr;
+    if (!options.unixSocket.empty() && !(options.listenSocket && options.listenSocket->valid())) {
+        if (Status s = server->server_->listenUnix(options.unixSocket); !s) {
+            err << command << "can't listen on " << options.unixSocket << ": " << s.error().message << "\n";
+            return nullptr;
+        }
+    } else if (!listenOn(*server->server_, options.listenSocket, options.address, options.port)) {
+        return nullptr;
+    }
     if (server->redirect_ &&
         !listenOn(*server->redirect_, options.redirectSocket, options.redirectAddress, options.redirectPort)) {
         return nullptr;
     }
     if (server->certificates_) server->certificates_->start();
     server->log_->write("start", std::string(options.dev ? "dev" : "serve") + " mode, listening on " +
-                                     options.address + " port " + std::to_string(server->port()) +
+                                     (options.unixSocket.empty()
+                                          ? options.address + " port " + std::to_string(server->port())
+                                          : options.unixSocket) +
+                                     (options.dropboxSocket.empty() ? "" : ", dropbox writer at " + options.dropboxSocket) +
                                      (options.tls ? ", TLS" : options.https ? ", behind HTTPS" : ", plain HTTP") +
                                      (server->redirect_ ? "; redirecting port " + std::to_string(server->redirectPort())
                                                         : std::string()));

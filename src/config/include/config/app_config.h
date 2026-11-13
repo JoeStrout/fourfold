@@ -224,6 +224,38 @@ struct ConfigSources {
 // from it.
 ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator);
 
+// fourfold front's settings (overview §8, several apps on one server), from
+// the server config: server.apps lists the apps, server.front holds front's
+// own TLS and connection limits. The apps' ceilings (server.ceilings) are
+// loadConfig's.
+//
+//     server = {}
+//     server.apps = {}
+//     server.apps.club = {"domains": ["club.example.com", "www.club.example.com"]}
+//     server.front = {"tls": {"email": "admin@example.com"}}
+struct FrontApp {
+    std::string name;                   // names its OS users and its socket
+    std::vector<std::string> domains;   // lowercase; the first names its certificate
+    std::string socket;                 // the engine's; default /run/fourfold/<name>.sock
+    // The app's certificate chain and key (PEM), as host paths, instead of
+    // ACME's.
+    std::string certFile, keyFile;
+};
+
+struct FrontConfig {
+    std::vector<FrontApp> apps;         // sorted by name
+    TlsConfig tls;                      // ACME and HTTP/2 (no files)
+    ServerConfig server;                // front's connection and request limits
+};
+
+struct FrontConfigLoad {
+    std::optional<FrontConfig> config;   // nullopt if there were errors
+    std::vector<Diagnostic> diagnostics;
+};
+
+// Reads the server config for fourfold front. Waits on the evaluator.
+FrontConfigLoad loadFrontConfig(const ConfigFile& file, DataEvaluator& evaluator);
+
 // The config files' identity, for noticing changes: app.ms and secrets.ms.
 std::string configStamp(const ConfigDir& dir);
 

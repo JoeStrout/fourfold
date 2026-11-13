@@ -50,6 +50,14 @@ struct ServerOptions {
     bool dev = true;
     std::string address = "127.0.0.1";
     uint16_t port = 0;   // 0 picks a free port
+    // Listen on this Unix-domain socket instead of address:port: behind
+    // fourfold front (or another local proxy), whose connections it trusts
+    // as a proxy's. Made 0660, so the socket's folder and group decide who
+    // can connect.
+    std::string unixSocket;
+    // The dropbox writer's socket: dropbox/ belongs to another OS user, and
+    // appends go to the writer. Empty: written directly.
+    std::string dropboxSocket;
     // Host names the app answers to (the Host header, without the port),
     // besides config.domain. Empty, with no domain: localhost's names.
     std::vector<std::string> hosts;

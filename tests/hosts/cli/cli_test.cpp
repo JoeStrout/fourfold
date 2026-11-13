@@ -57,3 +57,30 @@ TEST_CASE("cli: serve argument errors are usage errors") {
         CHECK(err.str().find("Usage: fourfold serve") != std::string::npos);
     }
 }
+
+TEST_CASE("cli: front, dropbox-writer and serve's Unix socket: argument errors") {
+    struct Case {
+        std::vector<std::string> args;
+        const char* says;
+    };
+    for (const Case& c : {
+             Case{{"serve", "app", "--listen", "unix:relative.sock"}, "needs an absolute path"},
+             Case{{"serve", "app", "--tls", "--listen", "unix:/run/x.sock"}, "don't go together"},
+             Case{{"serve", "app", "--dropbox-socket"}, "needs a socket path"},
+             Case{{"front"}, "--server-config"},
+             Case{{"front", "--server-config"}, "--server-config needs a value"},
+             Case{{"front", "--server-config", "s.ms", "--listen", "443"}, "ADDRESS:PORT"},
+             Case{{"front", "--server-config", "s.ms", "--bogus"}, "unknown argument"},
+             Case{{"dropbox-writer"}, "give the app's dropbox/ folder"},
+             Case{{"dropbox-writer", "dropbox"}, "--listen"},
+             Case{{"dropbox-writer", "dropbox", "--bogus"}, "unknown argument"},
+         }) {
+        std::ostringstream out, err;
+        CHECK_MESSAGE(run(c.args, out, err) == 2, c.args[0], " ", c.says);
+        CHECK_MESSAGE(err.str().find(c.says) != std::string::npos, err.str());
+    }
+    // A server config that can't be read is an error, not a usage error.
+    std::ostringstream out, err;
+    CHECK_EQ(run({"front", "--server-config", "/nonexistent/server.ms"}, out, err), 1);
+    CHECK(err.str().find("fourfold front:") != std::string::npos);
+}

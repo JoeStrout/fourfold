@@ -121,8 +121,9 @@ std::optional<HttpResponse> admit(const HttpRequest& request, const EngineOption
 
 // The visitor's address (overview §8, Trusting the client's address): the
 // connection's, unless that's a trusted proxy, in which case the nearest
-// address in X-Forwarded-For that isn't one (read from the right, since a
-// visitor can put anything at the left).
+// address in Forwarded (or X-Forwarded-For) that isn't one (read from the
+// right, since a visitor can put anything at the left). A Unix-domain
+// socket's peer (kUnixPeer, fourfold front) is always a trusted proxy.
 std::string clientAddress(const HttpRequest& request, const std::vector<AddressRange>& trustedProxies);
 
 // --- Route: look the path up in the compiled app's route table. ---

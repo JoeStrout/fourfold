@@ -4,6 +4,7 @@
 #include "pipeline/forms.h"
 #include "pipeline/stages.h"
 #include "platform/address.h"
+#include "platform/socket.h"
 
 #include "doctest.h"
 
@@ -360,4 +361,20 @@ TEST_CASE("clientAddress: Forwarded (RFC 7239) from a trusted proxy, ahead of X-
     CHECK_EQ(clientAddress(from("10.0.0.2", {"proto=https"}), trust), "10.0.0.2");
     // Forwarded wins over X-Forwarded-For.
     CHECK_EQ(clientAddress(from("10.0.0.2", {"for=198.51.100.7"}, "6.6.6.6"), trust), "198.51.100.7");
+}
+
+TEST_CASE("clientAddress: a Unix socket's peer (fourfold front) is always a trusted proxy") {
+    auto from = [](std::string forwarded) {
+        HttpRequest r;
+        r.peerAddress = kUnixPeer;
+        if (!forwarded.empty()) r.headers.add("Forwarded", std::move(forwarded));
+        return r;
+    };
+    // With no config.proxy.trust at all.
+    CHECK_EQ(clientAddress(from("for=198.51.100.7;proto=https;host=club.example.com"), {}), "198.51.100.7");
+    CHECK_EQ(clientAddress(from("for=\"[2001:db8::7]\";proto=https"), {}), "2001:db8::7");
+    // A visitor's forged entry, left of front's, is skipped.
+    CHECK_EQ(clientAddress(from("for=6.6.6.6, for=198.51.100.7"), {}), "198.51.100.7");
+    // Nothing forwarded: the socket itself.
+    CHECK_EQ(clientAddress(from(""), {}), std::string(kUnixPeer));
 }

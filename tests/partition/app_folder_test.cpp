@@ -1,6 +1,7 @@
 #include "partition/app_folder.h"
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "doctest.h"
 #include "temp_dir.h"
@@ -165,4 +166,20 @@ TEST_CASE("ConfigDir: reads plain files only, and stamps them") {
     REQUIRE(server.ok());
     CHECK_EQ(server.value().name(), dir.at("elsewhere.ms"));
     CHECK_FALSE(ConfigDir::readServerConfig(dir.at("nope.ms")).ok());
+}
+
+TEST_CASE("AppFolder: a dropbox/ this process can't open is left to the dropbox writer") {
+    if (geteuid() == 0) return;   // root opens anything
+    TempDir dir;
+    std::string root = dir.at("myapp");
+    REQUIRE(AppFolder::open(root, AppFolder::Missing::Create).ok());
+    REQUIRE(chmod(dir.at("myapp/dropbox").c_str(), 0) == 0);
+    auto app = AppFolder::open(root);
+    chmod(dir.at("myapp/dropbox").c_str(), 0700);   // so the folder can be removed
+    REQUIRE_MESSAGE(app.ok(), app.error().message);
+    CHECK(app.value().stateDir().ok());
+    auto dropbox = app.value().dropbox();
+    REQUIRE_FALSE(dropbox.ok());
+    CHECK(dropbox.error().code == ErrorCode::Denied);
+    CHECK(dropbox.error().message.find("--dropbox-socket") != std::string::npos);
 }

@@ -93,6 +93,7 @@ Status DataDir::copyIn(const std::string& hostFolder, const TreeSkip& skip) cons
 Status DataDir::clear(const TreeSkip& skip) const { return writable::clearTree(fd_.get(), skip, kData); }
 
 Status Dropbox::append(const RelPath& path, std::string_view bytes) const {
+    if (sink_) return sink_->append(path, bytes);
     return writable::append(fd_.get(), path, bytes, 0644, kDropbox);
 }
 

@@ -2,17 +2,16 @@
 
 #include <ostream>
 
-#include <atomic>
-#include <csignal>
 #include <cstdlib>
 #include <iostream>
-#include <pthread.h>
-#include <thread>
 
 #include "app_server.h"
 #include "base/version.h"
 #include "cgi.h"
 #include "data_commands.h"
+#include "front_commands.h"
+#include "listen_args.h"
+#include "stop_signals.h"
 
 namespace fourfold::cli {
 
@@ -28,14 +27,22 @@ void printUsage(std::ostream& out) {
            "\n"
            "Commands:\n"
            "  dev <app-folder> [--port N]   Serve an app on localhost for development\n"
-           "  serve <app-folder> [--tls] [--listen ADDRESS:PORT] [--host NAME]...\n"
+           "  serve <app-folder> [--tls] [--listen ADDRESS:PORT|unix:PATH] [--host NAME]...\n"
            "        [--redirect-listen ADDRESS:PORT | --no-redirect] [--plain-http]\n"
-           "        [--server-config FILE] [--migrate]\n"
+           "        [--server-config FILE] [--dropbox-socket PATH] [--migrate]\n"
            "                                Serve an app for real use: with --tls, on its\n"
            "                                own HTTPS (certificates from Let's Encrypt, port\n"
            "                                80 redirecting); otherwise behind a proxy that\n"
-           "                                provides HTTPS (--migrate: apply pending\n"
-           "                                migrations first)\n"
+           "                                provides HTTPS, such as fourfold front (--migrate:\n"
+           "                                apply pending migrations first)\n"
+           "  front --server-config FILE [--listen ADDRESS:PORT]\n"
+           "        [--redirect-listen ADDRESS:PORT | --no-redirect] [--state FOLDER]\n"
+           "                                Serve several apps on one server: HTTPS for every\n"
+           "                                app the server config lists, each passed on to\n"
+           "                                its own engine's socket\n"
+           "  dropbox-writer <dropbox-folder> [--listen PATH]\n"
+           "                                Own an app's dropbox/ as another OS user, and\n"
+           "                                append what its engine sends (--dropbox-socket)\n"
            "  migrate <app-folder>          Apply the app's pending migrations (asking its\n"
            "                                server, if it's running), after a backup\n"
            "  backup <app-folder>           Back up the app's data and state\n"
@@ -57,26 +64,6 @@ struct DevArgs {
     std::string folder;
     uint16_t port = kDefaultPort;
 };
-
-// A port number, 1 to 65535.
-bool parsePort(const std::string& p, uint16_t& out) {
-    bool digits = !p.empty() && p.size() <= 5 && p.find_first_not_of("0123456789") == std::string::npos;
-    unsigned long n = digits ? std::stoul(p) : 0;
-    if (n == 0 || n > 65535) return false;
-    out = static_cast<uint16_t>(n);
-    return true;
-}
-
-// ADDRESS:PORT, with an IPv6 address in brackets: [::]:8090.
-bool parseListen(const std::string& v, std::string& address, uint16_t& port) {
-    size_t colon = v.rfind(':');
-    if (colon == std::string::npos || !parsePort(v.substr(colon + 1), port)) return false;
-    address = v.substr(0, colon);
-    if (address.size() >= 2 && address.front() == '[' && address.back() == ']') {
-        address = address.substr(1, address.size() - 2);
-    }
-    return !address.empty();
-}
 
 // Fills `out`, or explains the problem in `error`.
 bool parseDevArgs(const std::vector<std::string>& args, DevArgs& out, std::string& error) {
@@ -109,46 +96,6 @@ bool parseDevArgs(const std::vector<std::string>& args, DevArgs& out, std::strin
     return true;
 }
 
-// SIGTERM and SIGINT, for a server: the first shuts it down gracefully, a
-// second stops it at once. Construct before starting the server, so every
-// thread it starts has the signals blocked, and only run()'s waiter takes
-// them.
-class StopSignals {
-public:
-    StopSignals() {
-        // A client gone mid-write is an error to handle, not a reason to die.
-        std::signal(SIGPIPE, SIG_IGN);
-        sigemptyset(&set_);
-        sigaddset(&set_, SIGTERM);
-        sigaddset(&set_, SIGINT);
-        pthread_sigmask(SIG_BLOCK, &set_, &previous_);
-    }
-    ~StopSignals() { pthread_sigmask(SIG_SETMASK, &previous_, nullptr); }
-
-    void run(AppServer& server, std::chrono::milliseconds deadline) {
-        std::atomic<bool> finished{false};
-        std::thread waiter([&] {
-            int count = 0;
-            for (;;) {
-                int signal = 0;
-                if (sigwait(&set_, &signal) != 0 || finished) return;
-                if (count++ == 0) {
-                    server.loop().post([&server, deadline] { server.shutdown(deadline); });
-                } else {
-                    server.loop().stop();
-                }
-            }
-        });
-        server.loop().run();
-        finished = true;
-        pthread_kill(waiter.native_handle(), SIGTERM);   // wakes it, to see `finished`
-        waiter.join();
-    }
-
-private:
-    sigset_t set_, previous_;
-};
-
 int runDev(const std::vector<std::string>& args, std::ostream& out, std::ostream& err) {
     DevArgs dev;
     std::string problem;
@@ -167,7 +114,7 @@ int runDev(const std::vector<std::string>& args, std::ostream& out, std::ostream
         << "Watching code/: saved changes are recompiled, and open pages reload.\n"
         << "Press Ctrl-C to stop.\n"
         << std::flush;
-    signals.run(*server, std::chrono::seconds(2));
+    signals.run(server->loop(), [&server] { server->shutdown(std::chrono::seconds(2)); });
     return kExitOk;
 }
 
@@ -183,6 +130,8 @@ struct ServeArgs {
     std::vector<std::string> hosts;
     bool plainHttp = false;
     std::string serverConfig;
+    std::string unixSocket;
+    std::string dropboxSocket;
     bool migrate = false;
     bool allowOlderCode = false;
 };
@@ -190,12 +139,19 @@ struct ServeArgs {
 bool parseServeArgs(const std::vector<std::string>& args, ServeArgs& out, std::string& error) {
     for (size_t i = 0; i < args.size(); i++) {
         const std::string& a = args[i];
-        if (a == "--server-config") {
-            if (i + 1 >= args.size()) {
-                error = a + " needs a file";
+        if (a == "--server-config" || a == "--dropbox-socket") {
+            if (i + 1 >= args.size() || args[i + 1].empty()) {
+                error = a + (a == "--server-config" ? " needs a file" : " needs a socket path");
                 return false;
             }
-            out.serverConfig = args[++i];
+            (a == "--server-config" ? out.serverConfig : out.dropboxSocket) = args[++i];
+        } else if (a == "--listen" && i + 1 < args.size() && args[i + 1].compare(0, 5, "unix:") == 0) {
+            out.unixSocket = args[++i].substr(5);
+            if (out.unixSocket.empty() || out.unixSocket[0] != '/') {
+                error = "--listen unix: needs an absolute path, like unix:/run/fourfold/club.sock";
+                return false;
+            }
+            out.listenGiven = true;
         } else if (a == "--listen" || a == "--host") {
             if (i + 1 >= args.size()) {
                 error = a + " needs a value";
@@ -261,6 +217,10 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
         err << "fourfold serve: --tls and --plain-http don't go together\n";
         return kExitUsage;
     }
+    if (serve.tls && !serve.unixSocket.empty()) {
+        err << "fourfold serve: --tls and a Unix socket don't go together (fourfold front provides the HTTPS)\n";
+        return kExitUsage;
+    }
     ServerOptions options;
     options.dev = false;
     options.address = serve.address;
@@ -277,6 +237,11 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
         options.redirectPort = serve.redirectPort;
     }
     options.serverConfig = serve.serverConfig;
+    options.dropboxSocket = serve.dropboxSocket;
+    if (!serve.unixSocket.empty()) {
+        options.unixSocket = serve.unixSocket;
+        options.address = "unix:" + serve.unixSocket;   // not localhost: a host name is required
+    }
     options.migrateOnStart = serve.migrate;
     options.allowOlderCode = serve.allowOlderCode;
 
@@ -290,6 +255,10 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
         auto fd = std::make_shared<Fd>(std::move(inherited[i].fd));
         if (main && !options.listenSocket) {
             options.listenSocket = fd;
+            // A Unix socket (fourfold front's way in): not localhost, so a
+            // host name is required.
+            std::string path = unixSocketPath(fd->get());
+            if (!path.empty()) options.address = "unix:" + path;
         } else if (serve.tls && !options.redirectSocket) {
             options.redirectSocket = fd;
             if (options.redirectAddress.empty()) options.redirectAddress = "(systemd)";
@@ -300,8 +269,9 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
     auto server = AppServer::start(serve.folder, options, out, err);
     if (!server) return kExitError;
 
-    std::string where = options.listenSocket ? "a socket from systemd" : options.address + " port " +
-                                                                           std::to_string(server->port());
+    std::string where = options.listenSocket          ? "a socket from systemd"
+                        : !options.unixSocket.empty() ? options.unixSocket
+                                                      : options.address + " port " + std::to_string(server->port());
     out << "Fourfold " << versionString() << ", serving " << server->root() << "\n"
         << "  listening on " << where << (serve.tls ? " (HTTPS" + std::string(server->config()->tls.http2 ? ", HTTP/2)" : ")") : "")
         << "\n";
@@ -315,8 +285,11 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
                                                                                         : server->config()->tls.acmeDirectory)
             << "; using it means agreeing to its subscriber agreement.\n";
     }
+    // On a Unix socket (its own, or systemd's, which has no port): behind
+    // fourfold front, which provides HTTPS and is trusted as a proxy.
+    bool onUnixSocket = !options.unixSocket.empty() || (options.listenSocket && server->port() == 0);
     out << "\nKnown limits:\n";
-    if (!serve.tls) {
+    if (!serve.tls && !onUnixSocket) {
         out << "  - No TLS here. Put it behind a proxy that provides HTTPS, or use --tls"
             << (serve.plainHttp ? " (--plain-http: cookies aren't marked Secure, so\n    use plain HTTP only on a network you trust)" : "")
             << ".\n";
@@ -324,13 +297,13 @@ int runServe(const std::vector<std::string>& args, std::ostream& out, std::ostre
     out << "  - No per-request memory limit yet: a script can use as much memory as the\n"
         << "    machine has (time and instruction limits do apply). Set one for the\n"
         << "    process (MemoryMax= in systemd).\n"
-        << (!serve.tls && server->config()->proxy.trust.empty()
+        << (!serve.tls && server->config()->proxy.trust.empty() && !onUnixSocket
                 ? "  - No trusted proxy (config.proxy.trust): behind a proxy, every visitor seems\n"
                   "    to come from its address, and rate limits count them all together.\n"
                 : "")
         << "Ctrl-C or SIGTERM stops it, after the requests in flight.\n"
         << std::flush;
-    signals.run(*server, std::chrono::seconds(30));
+    signals.run(server->loop(), [&server] { server->shutdown(std::chrono::seconds(30)); });
     return kExitOk;
 }
 
@@ -362,6 +335,8 @@ int run(const std::vector<std::string>& args, std::ostream& out, std::ostream& e
     if (command == "backup") return runBackup(rest, out, err);
     if (command == "restore") return runRestore(rest, out, err);
     if (command == "run-jobs") return runJobs(rest, out, err);
+    if (command == "front") return runFront(rest, out, err);
+    if (command == "dropbox-writer") return runDropboxWriter(rest, out, err);
     if (command == "cgi-setup") return runCgiSetup(rest, out, err);
     if (command == "fastcgi") return runFastCgi(rest, out, err);
     if (command == "cgi") {

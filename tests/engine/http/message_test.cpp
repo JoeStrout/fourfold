@@ -42,5 +42,6 @@ TEST_CASE("HttpResponse::text and statusReason") {
     CHECK_EQ(*r.headers.get("Content-Type"), "text/plain; charset=utf-8");
     CHECK_EQ(std::string(statusReason(404)), "Not Found");
     CHECK_EQ(std::string(statusReason(431)), "Request Header Fields Too Large");
+    CHECK_EQ(std::string(statusReason(421)), "Misdirected Request");
     CHECK_EQ(std::string(statusReason(299)), "Unknown");
 }

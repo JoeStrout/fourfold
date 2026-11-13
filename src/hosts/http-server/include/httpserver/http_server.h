@@ -50,7 +50,8 @@ struct HttpServerLimits {
 
     // Connections: more are closed at once. Per address, not counting the
     // addresses in perAddressExempt (a proxy, whose connections carry many
-    // visitors; these are exempt from the per-address stream cap too).
+    // visitors; these are exempt from the per-address stream cap too), nor
+    // a Unix-domain socket's (kUnixPeer).
     size_t maxConnections = 1024;
     size_t maxConnectionsPerAddress = 100;
     std::vector<AddressRange> perAddressExempt;
@@ -117,6 +118,11 @@ public:
     // picks a free one, reported by port()). May be called more than once,
     // for more addresses.
     Status listen(const std::string& host, uint16_t port);
+    // Starts accepting connections on a Unix-domain socket at `path`, made
+    // with permission bits `mode` (see listenUnix). Its connections' peer
+    // address is kUnixPeer, which is exempt from the per-address caps: such
+    // a socket's clients are a local proxy (fourfold front).
+    Status listenUnix(const std::string& path, unsigned mode = 0660);
     // Accepts connections on a socket that's already listening (from
     // systemd's socket activation). Takes it non-blocking.
     Status adopt(Fd listening);

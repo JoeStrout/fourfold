@@ -34,6 +34,7 @@ struct DataArgs {
     std::string folder;
     std::string backup;           // restore: the backup's name
     std::string serverConfig;
+    std::string dropboxSocket;    // the dropbox writer's, if it owns dropbox/
     bool allowOlderCode = false;
     bool dataOnly = false;        // restore: not private/state/
     bool list = false;            // restore: list the backups
@@ -42,12 +43,12 @@ struct DataArgs {
 bool parseArgs(const std::string& command, const std::vector<std::string>& args, DataArgs& out, std::string& error) {
     for (size_t i = 0; i < args.size(); i++) {
         const std::string& a = args[i];
-        if (a == "--server-config") {
-            if (i + 1 >= args.size()) {
-                error = a + " needs a file";
+        if (a == "--server-config" || a == "--dropbox-socket") {
+            if (i + 1 >= args.size() || args[i + 1].empty()) {
+                error = a + (a == "--server-config" ? " needs a file" : " needs a socket path");
                 return false;
             }
-            out.serverConfig = args[++i];
+            (a == "--server-config" ? out.serverConfig : out.dropboxSocket) = args[++i];
         } else if (a == "--allow-older-code" && command == "migrate") {
             out.allowOlderCode = true;
         } else if (a == "--data-only" && command == "restore") {
@@ -162,6 +163,7 @@ ServerOptions offlineOptions(const DataArgs& args) {
     options.dev = false;
     options.listen = false;
     options.serverConfig = args.serverConfig;
+    options.dropboxSocket = args.dropboxSocket;
     options.allowOlderCode = args.allowOlderCode;
     return options;
 }
@@ -173,7 +175,7 @@ int runMigrate(const std::vector<std::string>& args, std::ostream& out, std::ost
     std::string problem;
     if (!parseArgs("migrate", args, a, problem)) {
         err << "fourfold migrate: " << problem
-            << "\nUsage: fourfold migrate <app-folder> [--server-config FILE] [--allow-older-code]\n";
+            << "\nUsage: fourfold migrate <app-folder> [--server-config FILE] [--dropbox-socket PATH] [--allow-older-code]\n";
         return kExitUsage;
     }
     if (serverRunning(a.folder)) return askServer(a.folder, "migrate", out, err);
@@ -194,7 +196,7 @@ int runBackup(const std::vector<std::string>& args, std::ostream& out, std::ostr
     DataArgs a;
     std::string problem;
     if (!parseArgs("backup", args, a, problem)) {
-        err << "fourfold backup: " << problem << "\nUsage: fourfold backup <app-folder> [--server-config FILE]\n";
+        err << "fourfold backup: " << problem << "\nUsage: fourfold backup <app-folder> [--server-config FILE] [--dropbox-socket PATH]\n";
         return kExitUsage;
     }
     if (serverRunning(a.folder)) return askServer(a.folder, "backup", out, err);

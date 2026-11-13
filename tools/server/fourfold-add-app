@@ -1,0 +1,134 @@
+#!/bin/sh
+# Sets up an app on a server with several apps (M11.1; admin guide, "Several
+# apps on one server"), or puts an existing one's ownership and permissions
+# right again. Run as root, on Linux with systemd (Debian, Ubuntu).
+#
+#   fourfold-add-app NAME --domain DOMAIN [--domain DOMAIN]... --developer USER
+#                    [--memory SIZE] [--no-start]
+#
+# For an app called NAME, in /srv/NAME:
+#   - users ff-NAME (its engine) and ff-NAME-log (its dropbox writer), each
+#     with a group of its own; the developer joins both groups (to read the
+#     app's files, and its dropbox);
+#   - ownership and permissions on each partition (see the admin guide);
+#   - an entry in /etc/fourfold/server.ms (made if missing), unless it's
+#     there already;
+#   - the systemd units (installed from systemd/ next to this script, if
+#     missing), enabled and started, and fourfold front restarted, so it
+#     serves the new names.
+#
+# Run it again any time, e.g. after uploading code, to put permissions right.
+# The fourfold binary must be at /usr/local/bin/fourfold.
+set -eu
+
+here=$(cd "$(dirname "$0")" && pwd)
+name=""; developer=""; memory=""; domains=""; start=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --domain) domains="$domains $2"; shift 2 ;;
+        --developer) developer=$2; shift 2 ;;
+        --memory) memory=$2; shift 2 ;;
+        --no-start) start=0; shift ;;
+        -*) echo "unknown option: $1" >&2; exit 2 ;;
+        *) [ -z "$name" ] || { echo "more than one app name" >&2; exit 2; }; name=$1; shift ;;
+    esac
+done
+usage() { sed -n '6,7p' "$0" >&2; exit 2; }
+[ -n "$name" ] && [ -n "$developer" ] && [ -n "$domains" ] || usage
+case "$name" in
+    [a-z]*) ;;
+    *) echo "the name must start with a lowercase letter: $name" >&2; exit 2 ;;
+esac
+case "$name" in *[!a-z0-9_-]*) echo "the name may have only lowercase letters, digits, - and _: $name" >&2; exit 2 ;; esac
+[ ${#name} -le 24 ] || { echo "the name is too long (24 at most): $name" >&2; exit 2; }
+[ "$(id -u)" -eq 0 ] || { echo "run as root" >&2; exit 1; }
+id "$developer" >/dev/null 2>&1 || { echo "no such user: $developer" >&2; exit 1; }
+[ -x /usr/local/bin/fourfold ] || { echo "no /usr/local/bin/fourfold" >&2; exit 1; }
+
+engine=ff-$name
+writer=ff-$name-log
+srv=/srv/$name
+nologin=$(command -v nologin || echo /usr/sbin/nologin)
+
+# --- Users and groups ---
+id fourfold-front >/dev/null 2>&1 ||
+    useradd --system --user-group --home-dir /var/lib/fourfold-front --no-create-home --shell "$nologin" fourfold-front
+for u in "$engine" "$writer"; do
+    id "$u" >/dev/null 2>&1 || useradd --system --user-group --home-dir "$srv" --no-create-home --shell "$nologin" "$u"
+done
+usermod -a -G "$engine,$writer" "$developer"
+
+# --- The app folder ---
+mkdir -p "$srv/code" "$srv/data" "$srv/dropbox" "$srv/private/config" "$srv/private/state"
+# The top: the developer's; the engine's group may enter; the writer only
+# passes through to dropbox/ (others: x, and nothing below lets them in).
+chown "$developer:$engine" "$srv" "$srv/private"
+chmod 0751 "$srv"
+chmod 0750 "$srv/private"
+# code/ and private/config/: the developer's; the engine reads, never writes.
+for d in "$srv/code" "$srv/private/config"; do
+    chown -R "$developer:$engine" "$d"
+    find "$d" -type d -exec chmod 2750 {} +
+    find "$d" -type f -exec chmod u+rw,g+r,g-wx,o-rwx {} +
+    find "$d" -type l -exec chown -h "$developer:$engine" {} +
+done
+# data/: the engine's and the developer's (through the group).
+chown -R "$engine:$engine" "$srv/data"
+find "$srv/data" -type d -exec chmod 2770 {} +
+find "$srv/data" -type f -exec chmod u+rw,g+rw,o-rwx {} +
+# private/state/: the engine's alone.
+chown -R "$engine:$engine" "$srv/private/state"
+chmod -R u+rwX,go-rwx "$srv/private/state"
+# dropbox/: the writer's; the developer reads (through the group); the
+# engine can't even look.
+chown -R "$writer:$writer" "$srv/dropbox"
+find "$srv/dropbox" -type d -exec chmod 2750 {} +
+find "$srv/dropbox" -type f -exec chmod 0640 {} +
+
+# --- The server config ---
+mkdir -p /etc/fourfold
+if [ ! -f /etc/fourfold/server.ms ]; then
+    cat > /etc/fourfold/server.ms <<'EOF'
+// The server config: the apps fourfold front serves, front's own settings,
+// and ceilings on every app's settings (admin guide).
+server = {}
+server.apps = {}
+server.front = {}
+// server.front.tls = {"email": "admin@example.com"}   // Let's Encrypt's contact
+EOF
+fi
+if ! grep -q "^server.apps\[\"$name\"\]" /etc/fourfold/server.ms; then
+    list=""
+    for d in $domains; do list="$list${list:+, }\"$d\""; done
+    printf 'server.apps["%s"] = {"domains": [%s]}\n' "$name" "$list" >> /etc/fourfold/server.ms
+    echo "added $name to /etc/fourfold/server.ms"
+fi
+chown root:root /etc/fourfold/server.ms
+chmod 0644 /etc/fourfold/server.ms
+
+# --- systemd ---
+if [ ! -d /run/systemd/system ]; then
+    echo "$name: /srv/$name, engine ff-$name, dropbox writer ff-$name-log, developer $developer (no systemd: units not installed)"
+    exit 0
+fi
+for unit in fourfold-front.socket fourfold-front.service fourfold-app@.socket fourfold-app@.service \
+            fourfold-dropbox@.socket fourfold-dropbox@.service; do
+    [ -f "/etc/systemd/system/$unit" ] || install -m 0644 "$here/systemd/$unit" "/etc/systemd/system/$unit"
+done
+if [ -n "$memory" ]; then
+    mkdir -p "/etc/systemd/system/fourfold-app@$name.service.d"
+    printf '[Service]\nMemoryMax=%s\n' "$memory" > "/etc/systemd/system/fourfold-app@$name.service.d/memory.conf"
+fi
+systemctl daemon-reload
+if [ $start -eq 1 ]; then
+    systemctl enable --quiet "fourfold-dropbox@$name.socket" "fourfold-app@$name.socket" \
+        "fourfold-dropbox@$name.service" "fourfold-app@$name.service" fourfold-front.socket fourfold-front.service
+    systemctl start "fourfold-dropbox@$name.socket" "fourfold-app@$name.socket"
+    systemctl restart "fourfold-dropbox@$name.service" "fourfold-app@$name.service"
+    systemctl start fourfold-front.socket
+    systemctl restart fourfold-front.service
+    sleep 2
+    systemctl --no-pager --lines=0 status "fourfold-app@$name.service" "fourfold-dropbox@$name.service" \
+        fourfold-front.service | grep -E '●|Active:' || true
+fi
+echo "$name: /srv/$name, engine ff-$name, dropbox writer ff-$name-log, developer $developer"

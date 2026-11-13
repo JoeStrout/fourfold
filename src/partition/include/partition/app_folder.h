@@ -33,6 +33,9 @@ public:
                   // templates.
     };
 
+    // dropbox/ may be closed to this process (Denied): on a server with an
+    // OS user per app, the dropbox writer (another user) owns it, and the
+    // engine sends it lines instead. Then dropbox() is the error.
     static Result<AppFolder> open(const std::string& root, Missing missing = Missing::Fail);
 
     AppFolder(AppFolder&&) = default;

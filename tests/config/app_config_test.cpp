@@ -367,3 +367,82 @@ TEST_CASE("config: server limits and logging, within the server's ceilings (M11)
     REQUIRE(load.ok());
     CHECK_EQ(load.config->server.connections, 300u);
 }
+
+namespace {
+
+FrontConfigLoad loadFront(Fixture& f, const std::string& text) {
+    f.dir.write("server.ms", text);
+    return loadFrontConfig(ConfigDir::readServerConfig(f.dir.at("server.ms")).value(), *f.host);
+}
+
+std::string all(const FrontConfigLoad& load) {
+    std::string s;
+    for (const Diagnostic& d : load.diagnostics) s += d.toString() + "\n";
+    return s;
+}
+
+}  // namespace
+
+TEST_CASE("front config: server.apps and server.front") {
+    Fixture f;
+    FrontConfigLoad ok = loadFront(f, R"(server = {}
+server.apps = {}
+server.apps.club = {"domains": ["Club.Example.com", "www.club.example.com"]}
+server.apps["shop-2"] = {"domains": ["shop.example.com"], "socket": "/run/x/shop.sock",
+    "certFile": "/etc/fourfold/shop.crt", "keyFile": "/etc/fourfold/shop.key"}
+server.front = {"tls": {"email": "admin@example.com", "acme": "letsencrypt-staging", "http2": false},
+    "server": {"connectionsPerAddress": 50, "headerSeconds": 5}}
+server.ceilings = {"budget": {"seconds": 20}}
+)");
+    REQUIRE_MESSAGE(ok.config, all(ok));
+    const FrontConfig& c = *ok.config;
+    REQUIRE_EQ(c.apps.size(), 2u);
+    CHECK_EQ(c.apps[0].name, "club");
+    CHECK_EQ(c.apps[0].domains, std::vector<std::string>{"club.example.com", "www.club.example.com"});
+    CHECK_EQ(c.apps[0].socket, "/run/fourfold/club.sock");
+    CHECK(c.apps[0].certFile.empty());
+    CHECK_EQ(c.apps[1].name, "shop-2");
+    CHECK_EQ(c.apps[1].socket, "/run/x/shop.sock");
+    CHECK_EQ(c.apps[1].keyFile, "/etc/fourfold/shop.key");
+    CHECK_EQ(c.tls.email, "admin@example.com");
+    CHECK(c.tls.acmeDirectory.find("staging") != std::string::npos);
+    CHECK_FALSE(c.tls.http2);
+    CHECK_EQ(c.server.connectionsPerAddress, 50u);
+    CHECK_EQ(c.server.headerTimeout.count(), 5000);
+
+    // The same file still serves the apps' engines as their ceilings.
+    f.write("app.ms", "config = {}\nconfig.budget = {\"seconds\": 30}\n");
+    ConfigLoad app = f.load(ConfigMode::Serve, R"(server = {}
+server.apps = {}
+server.apps.club = {"domains": ["club.example.com"]}
+server.front = {}
+server.ceilings = {"budget": {"seconds": 20}}
+)");
+    REQUIRE_MESSAGE(app.ok(), all(app));
+    CHECK_EQ(app.config->budget.wallClock.count(), 20000);
+}
+
+TEST_CASE("front config: mistakes are reported") {
+    Fixture f;
+    auto errors = [&](const std::string& text) {
+        FrontConfigLoad load = loadFront(f, text);
+        CHECK_FALSE(load.config);
+        return all(load);
+    };
+    CHECK(contains(errors("server = {}\n"), "server.apps must list the apps"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"Bad Name\": {\"domains\": [\"a.com\"]}}\n"),
+                   "an app's name must be lowercase"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {\"domains\": [\"x.com\"]}, \"b\": {\"domains\": [\"X.com\"]}}\n"),
+                   "which server.apps.a has too"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {\"domains\": [\"https://x.com\"]}}\n"),
+                   "isn't a host name"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {}}\n"), "server.apps.a.domains is missing"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {\"domains\": [\"x.com\"], \"socket\": \"rel.sock\"}}\n"),
+                   "must be a full path"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {\"domains\": [\"x.com\"], \"certFile\": \"/c\"}}\n"),
+                   "needs its partner"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {\"domains\": [\"x.com\"], \"sockett\": \"/x\"}}\n"),
+                   "unknown setting server.apps.a.sockett"));
+    CHECK(contains(errors("server = {}\nserver.apps = {\"a\": {\"domains\": [\"x.com\"]}}\nserver.front = {\"tls\": {\"certFile\": \"c.pem\", \"keyFile\": \"k.pem\"}}\n"),
+                   "go in each app's entry"));
+}

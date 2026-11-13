@@ -189,6 +189,9 @@ std::optional<Datum> evaluateFile(const ConfigFile& file, const std::string& glo
 Ceilings readServer(const Datum& server, const std::string& file, Problems& problems) {
     Ceilings out;
     Section top(server, "server", file, problems);
+    // fourfold front's own settings (loadFrontConfig): not the app's.
+    (void)top.raw("apps");
+    (void)top.raw("front");
     Section ceilings = top.section("ceilings");
     for (const char* group : {"budget", "session", "jobs", "server"}) {
         Section g = ceilings.section(group);
@@ -917,6 +920,96 @@ ConfigLoad loadConfig(const ConfigSources& sources, DataEvaluator& evaluator) {
     ConfigLoad out;
     out.diagnostics = std::move(problems.all);
     if (problems.errors == 0) out.config = std::move(c);
+    return out;
+}
+
+FrontConfigLoad loadFrontConfig(const ConfigFile& file, DataEvaluator& evaluator) {
+    Problems problems;
+    FrontConfig f;
+    auto server = evaluateFile(file, "server", evaluator, problems);
+    if (server) {
+        Section top(*server, "server", file.name(), problems);
+        (void)top.raw("ceilings");   // the apps' (loadConfig)
+
+        // server.front: TLS (ACME) as config.tls has it, and the connection
+        // limits as config.server has them.
+        Section front = top.section("front");
+        AppConfig scratch;
+        readTls(front.section("tls"), scratch);
+        if (!scratch.tls.certFile.empty()) {
+            problems.error(file.name(), "server.front.tls: certFile and keyFile go in each app's entry "
+                                        "(server.apps.<name>), as full paths");
+        }
+        f.tls = scratch.tls;
+        readServerLimits(front.section("server"), scratch, Ceilings(), problems);
+        f.server = scratch.server;
+        front.finish();
+
+        // server.apps: each app's names, and its engine's socket.
+        auto apps = top.raw("apps");
+        if (!apps || apps->kind() != Datum::Kind::Map || apps->asMap().empty()) {
+            problems.error(file.name(), "server.apps must list the apps, like server.apps.club = "
+                                        "{\"domains\": [\"club.example.com\"]}");
+        } else {
+            std::map<std::string, std::string> owner;   // domain → app
+            for (const auto& [name, entry] : apps->asMap()) {
+                Section a(entry, "server.apps." + name, file.name(), problems);
+                bool nameOk = !name.empty() && name.size() <= 24 && std::islower(static_cast<unsigned char>(name[0]));
+                for (char ch : name) {
+                    nameOk = nameOk && (std::islower(static_cast<unsigned char>(ch)) ||
+                                        std::isdigit(static_cast<unsigned char>(ch)) || ch == '-' || ch == '_');
+                }
+                if (!nameOk) {
+                    problems.error(file.name(), "server.apps." + name + ": an app's name must be lowercase letters, "
+                                                "digits, - and _, starting with a letter (at most 24; it names "
+                                                "the app's OS users)");
+                }
+                if (entry.kind() != Datum::Kind::Map) {
+                    problems.error(file.name(), "server.apps." + name + " must be a map, like {\"domains\": [...]}");
+                    continue;
+                }
+                FrontApp app;
+                app.name = name;
+                if (auto domains = a.strings("domains")) {
+                    for (const std::string& d : *domains) {
+                        std::string host = lowered(d);
+                        if (!isHostName(host)) {
+                            a.error("domains", "has \"" + d + "\", which isn't a host name (no https://, port or path)");
+                        } else if (owner.count(host)) {
+                            a.error("domains", "has " + host + ", which server.apps." + owner[host] + " has too");
+                        } else {
+                            owner[host] = name;
+                            app.domains.push_back(host);
+                        }
+                    }
+                }
+                if (app.domains.empty() && !a.has("domains")) a.error("domains", "is missing");
+                app.socket = "/run/fourfold/" + name + ".sock";
+                auto path = [&](const char* key, std::string& out) {
+                    auto v = a.string(key);
+                    if (!v) return;
+                    if (v->empty() || (*v)[0] != '/') {
+                        a.error(key, "must be a full path");
+                    } else {
+                        out = *v;
+                    }
+                };
+                path("socket", app.socket);
+                path("certFile", app.certFile);
+                path("keyFile", app.keyFile);
+                if (app.certFile.empty() != app.keyFile.empty()) {
+                    a.error(app.certFile.empty() ? "certFile" : "keyFile",
+                            "needs its partner (certFile and keyFile go together)");
+                }
+                a.finish();
+                f.apps.push_back(std::move(app));
+            }
+        }
+        top.finish();
+    }
+    FrontConfigLoad out;
+    out.diagnostics = std::move(problems.all);
+    if (problems.errors == 0) out.config = std::move(f);
     return out;
 }
 

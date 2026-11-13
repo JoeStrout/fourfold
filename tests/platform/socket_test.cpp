@@ -2,10 +2,13 @@
 #include "platform/address.h"
 
 #include <cstdlib>
+#include <optional>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include "doctest.h"
+#include "temp_dir.h"
 
 using namespace fourfold;
 
@@ -130,4 +133,42 @@ TEST_CASE("takeSystemdSockets: only this process's, with their names, and the va
     waitpid(child, &status, 0);
     CHECK(WIFEXITED(status));
     CHECK_EQ(WEXITSTATUS(status), 0);
+}
+
+TEST_CASE("listenUnix and connectUnix: a local socket, its mode, and the peer's name") {
+    fourfold::test::TempDir dir;
+    std::string path = dir.at("s.sock");
+    auto listening = listenUnix(path, 0660);
+    REQUIRE_MESSAGE(listening.ok(), listening.error().message);
+    struct stat info;
+    REQUIRE(::lstat(path.c_str(), &info) == 0);
+    CHECK(S_ISSOCK(info.st_mode));
+    CHECK_EQ(info.st_mode & 0777, 0660u);
+    CHECK_EQ(unixSocketPath(listening.value().get()), path);
+
+    auto client = connectUnix(path);
+    REQUIRE_MESSAGE(client.ok(), client.error().message);
+    std::optional<AcceptedSocket> accepted;
+    for (int i = 0; i < 100 && !accepted; i++) {
+        auto a = acceptConnection(listening.value().get());
+        REQUIRE(a.ok());
+        accepted = std::move(a).value();
+    }
+    REQUIRE(accepted);
+    CHECK_EQ(accepted->peerAddress, std::string(kUnixPeer));
+    REQUIRE(writeSome(client.value().get(), "hi", 2).ok());
+
+    // A stale socket file is replaced; anything else at the path isn't.
+    listening.value().reset();
+    CHECK(listenUnix(path).ok());
+    dir.write("plain", "x");
+    auto refused = listenUnix(dir.at("plain"));
+    REQUIRE_FALSE(refused.ok());
+    CHECK(refused.error().code == ErrorCode::Conflict);
+}
+
+TEST_CASE("connectUnix fails at once with nothing listening") {
+    fourfold::test::TempDir dir;
+    CHECK_FALSE(connectUnix(dir.at("none.sock")).ok());
+    CHECK_FALSE(connectUnix(std::string(200, 'x')).ok());   // too long for a socket path
 }

@@ -195,6 +195,21 @@ TEST_CASE("Dropbox: append only") {
     CHECK_EQ(slurp(app.at("dropbox/app.log")), "one\ntwo\n");
 }
 
+TEST_CASE("Dropbox: over a sink, every append goes to it") {
+    struct Recorder : DropboxSink {
+        std::vector<std::string> lines;
+        Status append(const RelPath& path, std::string_view bytes) override {
+            lines.push_back(path.str() + ":" + std::string(bytes));
+            return {};
+        }
+    };
+    auto sink = std::make_shared<Recorder>();
+    Dropbox box(sink);
+    REQUIRE(box.append(rel("a/b.log"), "one\n"));
+    REQUIRE_EQ(sink->lines.size(), 1u);
+    CHECK_EQ(sink->lines[0], "a/b.log:one\n");
+}
+
 TEST_CASE("StateDir: private files and SQLite paths") {
     App app;
     StateDir state = app.folder.stateDir().value();

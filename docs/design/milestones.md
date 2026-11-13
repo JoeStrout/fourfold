@@ -337,7 +337,7 @@ The risks most likely to change the design, and where each is retired:
 
 **Exit criteria:** an internet-facing deployment passes an external TLS and header scan; a slowloris and connection-flood test is contained; a load test on a small VPS meets an agreed target.
 
-**Outcome (2026-11-13):** on a test VPS (`test.miniscript.org`), SSL Labs and Mozilla Observatory both gave A+, and slowloris and a one-address connection flood from outside were contained. **Deferred, with the user:** the load test (no target agreed; it belongs with M11.1's multi-process question) and watching a real certificate renew over days (tested with Pebble's 6-day certificates; seeing it with Let's Encrypt needs ACME profile support or two months).
+**Outcome (2026-11-13):** on a test VPS (`test.miniscript.org`), SSL Labs and Mozilla Observatory both gave A+, and slowloris and a one-address connection flood from outside were contained. **Deferred, with the user:** the load test (no target agreed; it belonged with M11.1's multi-process question, and was dropped there with it) and watching a real certificate renew over days (tested with Pebble's 6-day certificates; seeing it with Let's Encrypt needs ACME profile support or two months).
 
 **Decisions made here** (details in [m11-results.md](m11-results.md)): TLS over memory BIOs, so connections do their own socket I/O and HTTP/2 sits on the same plaintext; no session resumption. The header timeout starts with the connection (covering the handshake); bodies are held to an average rate after a grace period. Admission (requests at once, then a short queue, then 503) wraps the handler at the transport. Stream caps are per visitor address; loopback is exempt from per-address caps. Certificates renew with 30 days or a third of their life left, whichever is sooner. Port 80 redirects only to the app's own names. `Forwarded` is read ahead of `X-Forwarded-For`. CSP sources added in `config.headers` are validated (no keywords, no `*`).
 
@@ -347,12 +347,21 @@ The risks most likely to change the design, and where each is retired:
 
 **Goal:** a server can host several apps, each isolated from the others by OS user (§1, OS-level enforcement; §8, several apps on one server).
 
+**Decisions (2026-11-13, with the user):**
+- **systemd units are the supported path** (Debian and Ubuntu are the targets): one templated unit per app runs its engine as the app's OS user, listening on a Unix socket, with `MemoryMax=` as the R4 guard; `front` has its own unit and never runs as root. The engine and `front` themselves know nothing about systemd: the contract (run this as user X, listening on socket Y, restart on exit) is documented, so other init systems can follow it.
+- **`front` is a mode of the one binary** (`fourfold front`) and a **pure router**: it terminates TLS, gets certificates for every domain in the server config (kept in its own state directory), applies the M11 connection limits, and forwards HTTP/1.1 with `Forwarded` over each app's Unix socket, which the engine trusts as a proxy. It serves no static files and caches nothing, so it never reads an app's code or data (settles the overview §8 open question).
+- **The dropbox is made append-only by a logger process:** a small per-app writer running as a second OS user owns `dropbox/`; the engine has no access to it and sends it lines over a socket. No rotation yet ([future.md](future.md)).
+- **No multiple engine processes per app,** and **no load test** (M11's deferred one): with multi-process out, it would inform no decision, and it's costly to set up. Both recorded in [future.md](future.md).
+- **Testing:** automated tests for `front`'s routing and the dropbox writer; real OS users and permissions in a Debian container; the exit criterion on the M11 test VPS, with two apps (`test.miniscript.org`, `test2.miniscript.org`) behind `front` under systemd, and cross-app access attempted from inside one app.
+
 **Scope:**
 - `front`: the multi-app TLS router over Unix sockets, configured by the server config.
-- A separate OS user per app; file permissions per partition; an append-only dropbox where the OS supports it.
-- Multiple engine processes per app (`SO_REUSEPORT`), with SSE fan-out between them, if load testing calls for it (R4 stays deferred; see M11).
+- A separate OS user per app; file permissions per partition; the dropbox writer.
+- Unit files and users generated for the admin, and the admin guide's multi-app section.
 
 **Exit criteria:** a multi-app server isolates apps by OS user.
+
+**Outcome (2026-11-13):** on the test VPS, `guestbook` (`test.miniscript.org`) and `newsfeed` (`test2.miniscript.org`) behind `fourfold front` under systemd, each with its own Let's Encrypt certificate and its own OS users; SSL Labs A+ through front; server-sent events stream through; 27 cross-app and cross-partition access attempts, made as the engines' and front's own users, all refused (and 42 in a Debian container). Details in [m11.1-results.md](m11.1-results.md).
 
 ---
 

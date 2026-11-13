@@ -13,6 +13,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -95,15 +96,29 @@ private:
     std::string hostPath_;
 };
 
+// Where a Dropbox's appends go when the engine can't write dropbox/
+// itself: on a server with an OS user per app, the dropbox writer (a
+// separate process, as another user) owns the folder (overview §1,
+// OS-level enforcement). Thread-safe.
+class DropboxSink {
+public:
+    virtual ~DropboxSink() = default;
+    virtual Status append(const RelPath& path, std::string_view bytes) = 0;
+};
+
 class Dropbox {
 public:
+    // Appends to files in the open dropbox/ folder `fd`.
     explicit Dropbox(Fd fd) : fd_(std::move(fd)) {}
+    // Hands each append to `sink`.
+    explicit Dropbox(std::shared_ptr<DropboxSink> sink) : sink_(std::move(sink)) {}
 
     // The only operation: the app can't read back, list, or remove.
     Status append(const RelPath& path, std::string_view bytes) const;
 
 private:
     Fd fd_;
+    std::shared_ptr<DropboxSink> sink_;
 };
 
 class StateDir {

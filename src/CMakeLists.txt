@@ -70,6 +70,7 @@ if(TARGET test_outbound)
     target_link_libraries(test_outbound PRIVATE ZLIB::ZLIB)
 endif()
 fourfold_component(acme DEPS base partition platform tls LIBS CURL::libcurl)   # certificates from Let's Encrypt (overview §8)
+fourfold_component(dropboxwriter DEPS base partition platform)   # dropbox/ owned by another OS user (overview §1)
 fourfold_component(script DEPS base partition platform template markdown compiledapp appdata outbound
     LIBS fourfold::ms2)                                 # the script thread; the only user of MS2
 fourfold_component(config DEPS base partition compiledapp appdata script state mail outbound)   # private/config/ → AppConfig
@@ -96,8 +97,10 @@ fourfold_component(jobs DIR engine/jobs   # the schedule and the job worker loop
 # --- Hosts ---
 fourfold_component(devtools DEPS base partition template compiledapp script http observer pipeline platform push)
 fourfold_component(httpserver DIR hosts/http-server DEPS base platform http tls LIBS llhttp fourfold_nghttp2)   # HTTP/1.1, HTTP/2, TLS
+fourfold_component(front DIR hosts/front   # fourfold front: several apps behind one HTTPS (overview §8)
+    DEPS base partition platform http httpserver tls acme config LIBS llhttp)
 fourfold_component(cgi DIR hosts/cgi   # CGI and FastCGI (overview §8)
     DEPS base partition platform compiledapp script compiler config state appdata http pipeline authflow)   # CGI and FastCGI (overview §8)
 fourfold_executable(fourfold DIR hosts/cli
     DEPS base partition script compiler config mail observer pipeline authflow lifecycle devtools platform httpserver state
-         appdata jobs push cgi tls acme)
+         appdata jobs push cgi tls acme dropboxwriter front)

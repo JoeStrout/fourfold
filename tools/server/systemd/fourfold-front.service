@@ -1,0 +1,24 @@
+# fourfold front: HTTPS for every app in /etc/fourfold/server.ms, each passed
+# on to its engine's socket. It reads no app's files.
+[Unit]
+Description=Fourfold front
+After=network.target
+Requires=fourfold-front.socket
+
+[Service]
+User=fourfold-front
+Group=fourfold-front
+ExecStart=/usr/local/bin/fourfold front --server-config /etc/fourfold/server.ms --state /var/lib/fourfold-front
+Restart=on-failure
+MemoryMax=300M
+LimitNOFILE=65536
+StateDirectory=fourfold-front
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

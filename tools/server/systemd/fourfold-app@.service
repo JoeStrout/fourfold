@@ -1,0 +1,25 @@
+# An app's engine, as its own OS user (ff-%i), serving /srv/%i on its socket.
+# Its dropbox/ belongs to the dropbox writer (ff-%i-log).
+# Memory: override per app with `systemctl edit fourfold-app@<name>`.
+[Unit]
+Description=Fourfold app %i
+Requires=fourfold-app@%i.socket fourfold-dropbox@%i.socket
+After=fourfold-dropbox@%i.socket
+
+[Service]
+User=ff-%i
+Group=ff-%i
+UMask=0007
+ExecStart=/usr/local/bin/fourfold serve /srv/%i --server-config /etc/fourfold/server.ms --dropbox-socket /run/fourfold/%i-dropbox.sock
+Restart=on-failure
+MemoryMax=500M
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/srv/%i/data /srv/%i/private/state
+PrivateTmp=yes
+PrivateDevices=yes
+
+[Install]
+WantedBy=multi-user.target

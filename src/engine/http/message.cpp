@@ -67,6 +67,7 @@ const char* statusReason(int status) {
         case 413: return "Content Too Large";
         case 414: return "URI Too Long";
         case 415: return "Unsupported Media Type";
+        case 421: return "Misdirected Request";
         case 422: return "Unprocessable Content";
         case 429: return "Too Many Requests";
         case 431: return "Request Header Fields Too Large";

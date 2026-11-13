@@ -66,7 +66,7 @@ On top of the engine's own checks, the partitions are protected with OS file per
   - Engine-only enforcement (acceptable for local dev, and probably "good enough" for version 1).
 - `private/config/` is owned by the developer (or admin); the engine user has read-only access.
 - `private/state/` is readable and writable by the engine user only.
-- On a server hosting several apps, each app's engine runs as a separate OS user.
+- On a server hosting several apps, each app's engine runs as a separate OS user. (M11.1: `ff-<name>`, with the dropbox owned by a writer process as `ff-<name>-log`; see §8, As built in M11.1.)
 - The engine binary and the optional server config (see §10) live outside every app's partitions, owned by the admin.
 - In CGI mode on shared hosting, none of this is available; see [Hosting modes](#hosting-modes).
 
@@ -1355,13 +1355,20 @@ base-uri 'none'; form-action 'self'; frame-ancestors 'none'
 - **Shutdown and logs:** SIGTERM drains (no new connections, streams ended, requests finished within 30 s); engine logs older than `config.logging.keepDays` (30) are removed.
 - **Not yet (M11.1):** the `front` router, an OS user per app, the append-only dropbox, several engine processes per app.
 
+#### As built in M11.1
+
+- **`fourfold front`** (a mode of the one binary) ends TLS for every app the server config lists (`server.apps.<name>.domains`), with a certificate per app (ACME, one account per app in its own state folder, or the app's files), applies §8's connection limits per visitor, and passes each request by its `Host` to the app's engine over HTTP/1.1 on a Unix socket. It drops the visitor's own forwarding headers and adds `Forwarded`; the engine trusts a Unix-socket peer as a proxy (only `front` can connect: the socket's group is front's). Responses with a length are collected; others (server-sent events) stream. An unknown host gets a 421. It's a pure router: no static files, no caching, no access to any app's files.
+- **An OS user per app:** the engine as `ff-<name>`, under systemd template units (`fourfold-app@`, socket-activated), `ProtectSystem=strict` with writes only to `data/` and `private/state/`. `code/` and `private/config/` belong to the developer, readable by the engine's group. `tools/server/fourfold-add-app` makes the users, permissions, server config entry and units.
+- **The append-only dropbox:** `fourfold dropbox-writer` runs as `ff-<name>-log` and owns `dropbox/`; the engine can't open it, and sends each append over a Unix socket (`--dropbox-socket`), which only its group can reach. The writer checks names as the engine does. Not rotated yet ([future.md](future.md)).
+- **Not built:** several engine processes per app (with the load test, [future.md](future.md)).
+
 #### Dev mode
 
 Dev mode serves plain HTTP on localhost: no HSTS, no ACME, no `Host` checks beyond localhost. Where a browser won't accept `Secure` or `__Host-` cookies over plain HTTP, dev mode uses an unprefixed, non-`Secure` session cookie; the difference is confined to dev. CSP is enforced in dev exactly as in production, so violations surface early.
 
 #### Still open
 
-- Whether the front process should also handle static files and caching for all apps, or stay a pure TLS router.
+- ~~Whether the front process should also handle static files and caching for all apps, or stay a pure TLS router.~~ *Decided for M11.1:* a pure router, so it never reads an app's code or data.
 - Wildcard and many-domain certificates (DNS-01 challenges) for hosts with many subdomains.
 - (Per-route rate limits for app endpoints use the same per-IP machinery; see §5, [Rate limits and spam](#rate-limits-and-spam).)
 

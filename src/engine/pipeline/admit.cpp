@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "platform/socket.h"
+
 namespace fourfold {
 
 namespace {
@@ -100,13 +102,16 @@ std::optional<HttpResponse> admit(const HttpRequest& request, const EngineOption
 
 std::string clientAddress(const HttpRequest& request, const std::vector<AddressRange>& trustedProxies) {
     auto trusted = [&](const std::string& address) {
+        // A Unix-domain socket's peer: whoever its file's permissions let
+        // connect, which is fourfold front (or the admin's own proxy).
+        if (address == kUnixPeer) return true;
         for (const AddressRange& r : trustedProxies) {
             if (r.contains(address)) return true;
         }
         return false;
     };
     std::string address = request.peerAddress;
-    if (trustedProxies.empty() || !trusted(address)) return address;
+    if (!trusted(address)) return address;
     // The hops, nearest last: from Forwarded (RFC 7239) if the proxy sent
     // it, else X-Forwarded-For; every field of the header, in order.
     bool standard = request.headers.has("Forwarded");

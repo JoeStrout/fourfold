@@ -7,12 +7,12 @@ the server. The person writing the site needs the
 config file, deploying), this guide covers what the server needs and links to
 the user guide for the rest.
 
-*Status: covers what works as of Milestone 11: Fourfold can face the
+*Status: covers what works as of Milestone 11.1: Fourfold can face the
 internet on its own (HTTPS with certificates from Let's Encrypt, HTTP/2, and
-limits on slow and abusive clients), or sit behind a reverse proxy, or run
-on shared hosting through CGI and FastCGI. What's still missing is in
-[Known gaps](#known-gaps). Hosting several apps on one server, each as its
-own OS user, comes next (M11.1).*
+limits on slow and abusive clients), host several apps on one server, each
+as its own OS user, behind `fourfold front`, sit behind a reverse proxy, or
+run on shared hosting through CGI and FastCGI. What's still missing is in
+[Known gaps](#known-gaps).*
 
 ---
 
@@ -30,26 +30,28 @@ own OS user, comes next (M11.1).*
 10. [Outbound requests and app mail](#outbound-requests-and-app-mail)
 11. [Background jobs and live updates](#background-jobs-and-live-updates)
 12. [Keeping it running](#keeping-it-running)
-13. [Shared hosting: CGI and FastCGI](#shared-hosting-cgi-and-fastcgi)
-14. [Mail for sign-in](#mail-for-sign-in)
-15. [The first admin](#the-first-admin)
-16. [Server limits: `--server-config`](#server-limits---server-config)
-17. [Deploying an app's changes](#deploying-an-apps-changes)
-18. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
-19. [A Postgres database](#a-postgres-database)
-20. [Logs](#logs)
-21. [Backups](#backups)
-22. [Known gaps](#known-gaps)
-23. [Quick reference](#quick-reference)
+13. [Several apps on one server](#several-apps-on-one-server)
+14. [Shared hosting: CGI and FastCGI](#shared-hosting-cgi-and-fastcgi)
+15. [Mail for sign-in](#mail-for-sign-in)
+16. [The first admin](#the-first-admin)
+17. [Server limits: `--server-config`](#server-limits---server-config)
+18. [Deploying an app's changes](#deploying-an-apps-changes)
+19. [Migrations: `fourfold migrate`](#migrations-fourfold-migrate)
+20. [A Postgres database](#a-postgres-database)
+21. [Logs](#logs)
+22. [Backups](#backups)
+23. [Known gaps](#known-gaps)
+24. [Quick reference](#quick-reference)
 
 ---
 
 ## How Fourfold runs
 
 One `fourfold serve` process serves one app: a folder holding the site's
-code, its data and its settings. To host several apps, run one process for
-each, on its own port, and have a reverse proxy send each domain to its
-process.
+code, its data and its settings. To host several apps on one server, run one
+process for each, as its own OS user, behind `fourfold front` (see
+[Several apps on one server](#several-apps-on-one-server)), or behind a
+reverse proxy of your own.
 
 The process:
 
@@ -632,6 +634,178 @@ picked up while running.
 
 ---
 
+## Several apps on one server
+
+Only one process can listen on port 443. On a server with several apps,
+that's **`fourfold front`**: it ends HTTPS for every app's names (with a
+certificate for each, from Let's Encrypt or from files), and passes each
+request, by its host name, to that app's engine over a Unix socket. Each
+engine is an ordinary `fourfold serve`, running **as its own OS user**, so
+one app can't read or change another's files even if something gets past
+the engine's own checks. `front` holds no app code or data, and can't read
+any app's files.
+
+Each app has three processes, each as its own user:
+
+| Process | User | Can |
+|---|---|---|
+| `fourfold front` (one for the server) | `fourfold-front` | listen on 443 and 80; connect to the apps' engines; keep its certificates in `/var/lib/fourfold-front/` |
+| the engine, `fourfold serve` | `ff-<name>` | read the app's `code/` and `private/config/`; read and write its `data/` and `private/state/` |
+| the dropbox writer, `fourfold dropbox-writer` | `ff-<name>-log` | add to the app's `dropbox/`, and nothing else |
+
+The dropbox writer is what makes `dropbox/` truly append-only: the engine
+can't open that folder at all, so it sends each line to the writer, which
+appends it. Even an engine that got completely out of control couldn't read,
+truncate or remove what the app has logged there.
+
+### Setting it up (Linux with systemd)
+
+On Debian or Ubuntu, `fourfold-add-app` does all of it. It's in the source,
+in `tools/server/`, with the systemd units it installs (in
+`tools/server/systemd/`); copy that folder to the server (e.g. to
+`/opt/fourfold-server/`), and put the binary in `/usr/local/bin/fourfold`.
+Then, as root, for each app:
+
+```sh
+/opt/fourfold-server/fourfold-add-app club --domain club.example.com \
+    --domain www.club.example.com --developer alice
+```
+
+This:
+
+- makes the users `ff-club` and `ff-club-log` (each with a group of its
+  own), and `fourfold-front` if it isn't there yet; the developer (`alice`,
+  who uploads the code) joins both groups;
+- makes `/srv/club/` with its partitions, owned as below;
+- adds the app to the server config, `/etc/fourfold/server.ms`, making it if
+  needed;
+- installs the systemd units, enables them, and starts the app and
+  (restarting it) `fourfold front`, which then gets the app's certificate.
+
+`--memory 1G` sets the engine's `MemoryMax=` (500M otherwise).
+`tools/server/deploy.sh` does the same from your own machine, over SSH:
+it uploads the binary, the scripts and the app's code, and runs
+`fourfold-add-app` there.
+
+Run `fourfold-add-app` again any time; it puts ownership and permissions
+right again (after uploading code, say) and changes nothing else.
+
+**Who owns what**, for an app called `club`:
+
+| Path | Owner : group | Mode | So |
+|---|---|---|---|
+| `/srv/club/` | developer : `ff-club` | `0751` | the engine enters; the writer passes through to `dropbox/` |
+| `code/`, `private/config/` | developer : `ff-club` | `2750` (files `0640`) | the engine reads, but can't change a thing |
+| `data/` | `ff-club` : `ff-club` | `2770` | the engine, and the developer through the group |
+| `private/state/` | `ff-club` | `0700` | the engine only |
+| `dropbox/` | `ff-club-log` : `ff-club-log` | `2750` (files `0640`) | the writer adds; the developer reads; the engine can't even list it |
+| `/run/fourfold/club.sock` | `ff-club` : `fourfold-front` | `0660` | only `front` can reach the engine |
+| `/run/fourfold/club-dropbox.sock` | `ff-club-log` : `ff-club` | `0660` | only the engine can reach the writer |
+
+The units:
+
+| Unit | Runs |
+|---|---|
+| `fourfold-front.socket`, `.service` | `front`, on ports 443 and 80 from systemd |
+| `fourfold-app@club.socket`, `.service` | the engine, on its socket from systemd, with `ProtectSystem=strict` and writes only to `data/` and `private/state/` |
+| `fourfold-dropbox@club.socket`, `.service` | the writer, writing only to `dropbox/`, with no network |
+
+`journalctl -u fourfold-app@club` shows an engine's output,
+`journalctl -u fourfold-front` front's (certificates, failures). The engine
+log is in `private/state/logs/` as always.
+
+### The server config
+
+`/etc/fourfold/server.ms` lists the apps; `fourfold-add-app` writes this for
+you:
+
+```
+server = {}
+server.apps = {}
+server.apps["club"] = {"domains": ["club.example.com", "www.club.example.com"]}
+server.apps["shop"] = {"domains": ["shop.example.com"]}
+server.front = {}
+server.front.tls = {"email": "admin@example.com"}   // Let's Encrypt's contact
+```
+
+| Setting | Is |
+|---|---|
+| `apps.<name>.domains` | the app's host names; the first names its certificate |
+| `apps.<name>.socket` | its engine's socket (default `/run/fourfold/<name>.sock`) |
+| `apps.<name>.certFile`, `keyFile` | full paths to a certificate of your own, instead of Let's Encrypt's (readable by `fourfold-front`) |
+| `front.tls.email`, `acme`, `http2` | as an app's `config.tls` (see [On the internet](#on-the-internet---tls)) |
+| `front.server.*` | `front`'s connection limits, as an app's `config.server` (see [Connection limits](#connection-limits)) |
+
+The same file gives the engines their ceilings (`server.ceilings`, see
+[Server limits](#server-limits---server-config)). Restart `front`
+(`systemctl restart fourfold-front`) after changing it.
+
+**Names.** An app's name is lowercase letters, digits, `-` and `_`, at most
+24, starting with a letter (it names its users). A host name may belong to
+one app only. A request for any other name gets a `421`; port 80 redirects
+only the apps' own names.
+
+### How a request gets through
+
+`front` applies the [connection limits](#connection-limits) to each visitor,
+then passes the request to the app's engine over its socket with a
+`Forwarded` header naming the visitor (and with any forwarding headers the
+visitor sent removed). The engine trusts that header because it came over
+its Unix socket, which only `front` can connect to: `req.ip`, rate limits and
+the engine's own per-visitor limits all see the visitor's address, with no
+`config.proxy.trust` needed. Live updates (server-sent events) stream
+through.
+
+If an engine isn't running, its visitors get a `502`; if it's slower than
+two minutes to start answering, a `504`.
+
+### Each app's config
+
+As for any app: `config.domain` (the first of its names) is needed, since
+the engine answers only to its own names. Don't set `config.tls`: `front`
+has the certificates.
+
+### Commands on an app
+
+Run them as the app's user, with the writer's socket, so they can do what
+the engine does:
+
+```sh
+sudo -u ff-club fourfold migrate /srv/club --server-config /etc/fourfold/server.ms \
+    --dropbox-socket /run/fourfold/club-dropbox.sock
+sudo -u ff-club fourfold backup /srv/club --server-config /etc/fourfold/server.ms \
+    --dropbox-socket /run/fourfold/club-dropbox.sock
+```
+
+(With the engine running, they ask it to do the work.)
+
+### Without systemd
+
+The engine and `front` don't need systemd; it's only what starts them.
+Another service manager needs to:
+
+- run `fourfold dropbox-writer /srv/<name>/dropbox --listen
+  /run/fourfold/<name>-dropbox.sock` as `ff-<name>-log`, then give that
+  socket to the group `ff-<name>`;
+- run `fourfold serve /srv/<name> --listen unix:/run/fourfold/<name>.sock
+  --server-config /etc/fourfold/server.ms --dropbox-socket
+  /run/fourfold/<name>-dropbox.sock` as `ff-<name>`, then give its socket to
+  the group `fourfold-front`;
+- run `fourfold front --server-config /etc/fourfold/server.ms --state
+  /var/lib/fourfold-front` as `fourfold-front`, able to bind ports 443 and
+  80 (`CAP_NET_BIND_SERVICE`);
+- restart each if it exits, and limit the engines' memory.
+
+Both sockets are made with mode `0660`, so the group decides who connects.
+Each process makes its own socket, so the users need to be able to create
+files in `/run/fourfold/`: make it `root:root`, mode `1733` (anyone may add
+to it, nobody may list it, and the sticky bit keeps each user from removing
+another's socket).
+`fourfold-add-app` still sets up the users and permissions (it skips the
+units when systemd isn't running).
+
+---
+
 ## Shared hosting: CGI and FastCGI
 
 On shared web hosting, Apache is already running, and you can't run a server
@@ -1114,10 +1288,13 @@ as privately), and a Postgres database (use `pg_dump`).
 - **Visitor addresses behind a proxy** are known only if you list the
   proxy in `config.proxy.trust`; see
   [Behind a reverse proxy](#behind-a-reverse-proxy).
-- **One app per server on ports 80 and 443.** Several apps on one machine
-  each need their own ports behind a reverse proxy, until `fourfold front`
-  arrives (M11.1). Likewise, running each app as its own OS user is up to
-  you for now.
+- **One engine process per app.** An app uses one core for its scripts;
+  several engine processes per app are planned, if apps need them.
+- **Several apps on one server** are set up for Linux with systemd
+  (`fourfold-add-app`); elsewhere, the processes and permissions are yours
+  to arrange (see [Without systemd](#without-systemd)).
+- **Dropbox files aren't rotated:** they grow until you trim them (as root,
+  or the app's `ff-<name>-log` user).
 - **Certificates by HTTP-01 only:** no wildcard certificates from Let's
   Encrypt (give one as files instead).
 - **CGI and FastCGI hosting** has no live updates, and no protection from
@@ -1144,6 +1321,8 @@ as privately), and a Postgres database (use `pg_dump`).
 | `fourfold migrate <folder>` | apply the app's pending migrations (see [Migrations](#migrations-fourfold-migrate)) |
 | `fourfold backup <folder>` | back up the app (see [Backups](#backups)) |
 | `fourfold restore <folder> [NAME] [--data-only]` | list the backups, or restore one, with the server stopped |
+| `fourfold front --server-config FILE [options]` | serve several apps on ports 443 and 80 (see [Several apps on one server](#several-apps-on-one-server)) |
+| `fourfold dropbox-writer <dropbox-folder> [--listen PATH]` | own an app's `dropbox/`, as another user, for its engine |
 | `fourfold cgi-setup <folder> <web-root> [--fastcgi]` | serve an app through the host's Apache (see [Shared hosting](#shared-hosting-cgi-and-fastcgi)) |
 | `fourfold run-jobs <folder> [--max-seconds N]` | run due jobs, from cron, for an app served through CGI |
 | `fourfold cgi <folder>`, `fastcgi <folder> [--listen HOST:PORT]` | what the web root's entry point runs |
@@ -1165,7 +1344,7 @@ as privately), and a Postgres database (use `pg_dump`).
 | `private/state/cgi/` | CGI mode's compiled versions, each with a copy of its code (made again as needed) |
 | `data/.fourfold/app.sqlite` | the app's SQLite database |
 | `dropbox/print.log` | the app's `print` output |
-| the `--server-config` file | ceilings on the app's settings (the `server` map) |
+| the `--server-config` file | ceilings on the app's settings, and the apps `fourfold front` serves (the `server` map) |
 
 ### Config settings for admins
 

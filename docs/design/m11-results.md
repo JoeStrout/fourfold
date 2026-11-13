@@ -79,5 +79,5 @@ A Vultr VPS (1 vCPU, 1 GB, Ubuntu 26.10), `test.miniscript.org`, deployed by `to
 
 ## Deferred, with the user
 
-- A load test against an agreed target (it goes with M11.1's question of several engine processes per app). The default anonymous rate limit (60 a minute per address) must be raised for a generator from one address.
+- A load test against an agreed target (it went with M11.1's question of several engine processes per app; both were dropped there, see [future.md](future.md)). The default anonymous rate limit (60 a minute per address) must be raised for a generator from one address.
 - Renewal over days: Let's Encrypt's default certificates last 90 days, so renewal won't happen on its own for about two months; it's tested with Pebble's 6-day certificates. Asking for Let's Encrypt's short-lived profile (6 days) needs ACME profile support, which the client doesn't have yet.

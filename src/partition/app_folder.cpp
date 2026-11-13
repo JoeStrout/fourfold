@@ -137,8 +137,9 @@ Result<AppFolder> AppFolder::open(const std::string& rootArg, Missing missing) {
     Folders folders;
     Fd* fds[] = {&folders.code, &folders.data, &folders.dropbox, &folders.config, &folders.state};
     for (size_t i = 0; i < reals.size(); i++) {
-        if (!fds[i]) continue;
         *fds[i] = Fd(::open(reals[i].second.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        // The dropbox writer's, not ours (see dropbox()).
+        if (!fds[i]->valid() && fds[i] == &folders.dropbox && errno == EACCES) continue;
         if (!fds[i]->valid()) return osError(reals[i].second);
     }
     folders.stateReal = reals[4].second;
@@ -179,6 +180,10 @@ Result<DataDir> AppFolder::dataDir() const {
 }
 
 Result<Dropbox> AppFolder::dropbox() const {
+    if (!folders_.dropbox.valid()) {
+        return makeError(ErrorCode::Denied, root_ + "/dropbox: permission denied (if a dropbox writer owns it, "
+                                                    "give its socket with --dropbox-socket)");
+    }
     auto fd = duplicate(folders_.dropbox, "dropbox");
     if (!fd) return fd.error();
     return Dropbox(std::move(fd).value());

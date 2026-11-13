@@ -23,6 +23,12 @@ Status HttpServer::listen(const std::string& host, uint16_t port) {
     return adopt(std::move(fd).value());
 }
 
+Status HttpServer::listenUnix(const std::string& path, unsigned mode) {
+    auto fd = fourfold::listenUnix(path, mode);
+    if (!fd) return fd.error();
+    return adopt(std::move(fd).value());
+}
+
 Status HttpServer::adopt(Fd listening) {
     if (Status s = setNonBlocking(listening.get()); !s) return s;
     auto actualPort = localPort(listening.get());
@@ -46,6 +52,7 @@ void HttpServer::onAcceptable(int fd) {
 }
 
 bool HttpServer::exempt(const std::string& address) const {
+    if (address == kUnixPeer) return true;
     for (const AddressRange& r : limits_.perAddressExempt) {
         if (r.contains(address)) return true;
     }
