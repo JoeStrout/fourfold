@@ -1,33 +1,35 @@
 # Suggested changes to MiniScript 2
 
-*Started 2026-10-24, after M2. A running list of changes to MiniScript 2 (`../miniscript2`) that would help Fourfold. Each entry gives the problem, a suggested shape for the change, Fourfold's current workaround, and what the change would buy us. The shapes are suggestions; the MS2 side knows best how to fit them in. Background and measurements are in [design/m2-results.md](design/m2-results.md) and [design/m3-results.md](design/m3-results.md).*
+*Started 2026-10-24, after M2. A running list of changes to MiniScript 2 (`../miniscript2`) that would help Fourfold. Each entry gives the problem, a suggested shape for the change, Fourfold's current workaround, and what the change would buy us. Each is filed as an issue on the [miniscript2 repo](https://github.com/JoeStrout/miniscript2/issues) (2026-11-13). The shapes are suggestions; the MS2 side knows best how to fit them in. Background and measurements are in [design/m2-results.md](design/m2-results.md) and [design/m3-results.md](design/m3-results.md).*
 
 File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` is transpiled from.
 
 ## Summary
 
-| # | Change | Priority | Workaround today |
-|---|---|---|---|
-| 1 | Per-VM memory accounting and limit | **High** (M5 shipped `fourfold serve` without it) | None adequate |
-| 2 | An async-safe "call this function with these arguments" for intrinsics | High (`data.update` uses the workaround) | A stub that reads two globals |
-| 3 | `Run` reports the instructions it executed | High | Count whole slices |
-| 4 | Intrinsics can charge extra instructions | Medium | None |
-| 5 | Built-in type maps per VM (or copy-on-write) | Medium | Frozen for everyone |
-| 6 | Intrinsic sets per VM | Medium (M6) | Process-wide replacement, plus checks inside each intrinsic |
-| 7 | Cheaper, configurable VM construction | Medium | None needed yet |
-| 8 | Binary-safe strings (NUL bytes) | Medium (M7, M9) | NUL becomes U+FFFD |
-| 9 | A public compile API returning a rooted program | Low | Our own copy of the compile pipeline, plus manual rooting |
-| 10 | `Interpreter` releases its globals when destroyed | Low (easy) | Always call `Reset()` |
-| 11 | `Globals` id counter that can't overflow | Low (easy) | None |
-| 12 | `RunFunction` fails cleanly if the callee yields or waits | Low | Never use it |
-| 13 | Not-done intrinsics yield by default | Low | Fourfold's intrinsics set `yielding` themselves |
-| 14 | Bytecode serialization | Low (M5: not needed for v1) | Compile only the requested page |
-| 15 | A GC per thread | Later (M11) | Several processes |
-| 16 | Resumable compiling (one file in slices) | Low | Compile a file at a time |
+| # | Change | Issue | Priority | Workaround today |
+|---|---|---|---|---|
+| 1 | Per-VM memory accounting and limit | [#33](https://github.com/JoeStrout/miniscript2/issues/33) | **High** (M5 shipped `fourfold serve` without it) | None adequate |
+| 2 | An async-safe "call this function with these arguments" for intrinsics | [#34](https://github.com/JoeStrout/miniscript2/issues/34) | High (`data.update` uses the workaround) | A stub that reads two globals |
+| 3 | `Run` reports the instructions it executed | [#35](https://github.com/JoeStrout/miniscript2/issues/35) | High | Count whole slices |
+| 4 | Intrinsics can charge extra instructions | [#36](https://github.com/JoeStrout/miniscript2/issues/36) | Medium | None |
+| 5 | Built-in type maps per VM (or copy-on-write) | [#37](https://github.com/JoeStrout/miniscript2/issues/37) | Medium | Frozen for everyone |
+| 6 | Intrinsic sets per VM | [#38](https://github.com/JoeStrout/miniscript2/issues/38) | Medium (M6) | Process-wide replacement, plus checks inside each intrinsic |
+| 7 | Cheaper, configurable VM construction | [#39](https://github.com/JoeStrout/miniscript2/issues/39) | Medium | None needed yet |
+| 8 | Binary-safe strings (NUL bytes) | [#40](https://github.com/JoeStrout/miniscript2/issues/40) | Medium (M7, M9) | NUL becomes U+FFFD |
+| 9 | A public compile API returning a rooted program | [#41](https://github.com/JoeStrout/miniscript2/issues/41) | Low | Our own copy of the compile pipeline, plus manual rooting |
+| 10 | `Interpreter` releases its globals when destroyed | [#42](https://github.com/JoeStrout/miniscript2/issues/42) | Low (easy) | Always call `Reset()` |
+| 11 | `Globals` id counter that can't overflow | [#43](https://github.com/JoeStrout/miniscript2/issues/43) | Low (easy) | None |
+| 12 | `RunFunction` fails cleanly if the callee yields or waits | [#44](https://github.com/JoeStrout/miniscript2/issues/44) | Low | Never use it |
+| 13 | Not-done intrinsics yield by default | [#45](https://github.com/JoeStrout/miniscript2/issues/45) | Low | Fourfold's intrinsics set `yielding` themselves |
+| 14 | Bytecode serialization | [#46](https://github.com/JoeStrout/miniscript2/issues/46) | Low (M5: not needed for v1) | Compile only the requested page |
+| 15 | A GC per thread | [#47](https://github.com/JoeStrout/miniscript2/issues/47) | Later (M11) | Several processes |
+| 16 | Resumable compiling (one file in slices) | [#48](https://github.com/JoeStrout/miniscript2/issues/48) | Low | Compile a file at a time |
 
 ---
 
 ## 1. Per-VM memory accounting and limit
+
+*MS2 issue: [#33](https://github.com/JoeStrout/miniscript2/issues/33)*
 
 **Problem.** The GC counts objects, not bytes, and doesn't know which VM allocated what. Within its instruction budget, one request can allocate far more memory than the machine has. In M2's measurement, a loop keeping 1 MB strings reached about 7.6 GB before the 10-second wall-clock budget stopped it. `Value.MAX_COLLECTION_SIZE` limits the size of one string or list, not how many a script keeps.
 
@@ -51,6 +53,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 
 ## 2. An async-safe way for an intrinsic to call a script function with arguments
 
+*MS2 issue: [#34](https://github.com/JoeStrout/miniscript2/issues/34)*
+
 **Problem.** There are two ways for an intrinsic to run script code today, and neither does this job:
 - `VM.RunFunction(funcRef, args)` runs the callee to completion re-entrantly. It ignores time slices and budgets, loops forever if the callee yields, and goes wrong if the callee calls an intrinsic that waits (see #12).
 - `VM.ManuallyPushCall(baseIndex, funcDef)` works with parking and slicing, but runs a `FuncDef` with no arguments and no closure. It also assumes the calling intrinsic has exactly one parameter, since the pushed frame starts at `baseIndex + 2` (it was built for `import`).
@@ -71,6 +75,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 
 ## 3. `Run` reports the instructions it executed
 
+*MS2 issue: [#35](https://github.com/JoeStrout/miniscript2/issues/35)*
+
 **Problem.** `VM.Run(maxCycles)` stops after at most `maxCycles` instructions, but also earlier, on a yield, a pending intrinsic, or the end of the program. It doesn't say how many it actually ran.
 
 **Suggested shape.** Return the count, or keep a running total on the VM (`vm.CyclesExecuted`).
@@ -84,6 +90,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 
 ## 4. Intrinsics can charge extra instructions
 
+*MS2 issue: [#36](https://github.com/JoeStrout/miniscript2/issues/36)*
+
 **Problem.** Every intrinsic call costs one instruction, however much work it does: `sort` on a large list, `split`, `replace`, string repetition.
 
 **Suggested shape.** `ctx.vm.ChargeCycles(n)` for an intrinsic to add to the current run's count (and so to its slice), in proportion to its work. Built-ins with work that grows with their input would call it. Fourfold's own intrinsics could too.
@@ -93,6 +101,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 **Benefit.** Instruction budgets that reflect real work, so an endless loop of `sort` calls is stopped as promptly as an endless loop of arithmetic, and the scheduler's slices stay roughly equal in time.
 
 ## 5. Built-in type maps per VM
+
+*MS2 issue: [#37](https://github.com/JoeStrout/miniscript2/issues/37)*
 
 **Problem.** The `string`, `list`, `map`, `number`, `funcRef` and `error` type maps are process-wide and writable by design (`notes/FROZEN_VALUES.md`). In a server, a script that adds `string.shout` changes the behavior of every other request running at the same time, and of every later one.
 
@@ -108,6 +118,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 
 ## 6. Intrinsic sets per VM
 
+*MS2 issue: [#38](https://github.com/JoeStrout/miniscript2/issues/38)*
+
 **Problem.** The intrinsic registry is process-wide (`Intrinsic._all`). Each VM copies all of it at `Reset`. There's no way to remove an intrinsic, and replacing one works only before it's first built (`EnsureBuilt` copies the code once).
 
 **Suggested shape.** Let the host give `VM.Reset` (or the `Interpreter`) the set of intrinsics this VM should have. That could be a filter, an explicit table, or "the core set plus these, minus those". The `intrinsics` map would then list only what the VM has.
@@ -122,6 +134,8 @@ File references are to MS2's C# sources (`cs/`), which the C++ in `generated/` i
 - An intrinsic that isn't there can't be reached at all, which is easier to trust than one that refuses.
 
 ## 7. Cheaper, configurable VM construction
+
+*MS2 issue: [#39](https://github.com/JoeStrout/miniscript2/issues/39)*
 
 **Problem.**
 - `Interpreter.Reset(functions)` always creates `VM.New()` with the default sizes. That preallocates 10,240 stack slots, 10,240 name slots (about 160 KB), and 256 call frames.
@@ -143,6 +157,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 ## 8. Binary-safe strings
 
+*MS2 issue: [#40](https://github.com/JoeStrout/miniscript2/issues/40)*
+
 **Problem.** MiniScript strings end at a NUL byte, so text with NULs can't pass through intact.
 
 **Suggested shape.** Strings that carry an explicit length throughout, so any byte sequence that's valid UTF-8 (including U+0000) round-trips. The alternative is a documented binary type for byte data (perhaps the same RawData used by command-line MiniScript and raylib-miniscript).
@@ -155,6 +171,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 - Uploads (M7) are handled by the engine as handles, but any API that exposes their bytes would hit the same limit.
 
 ## 9. A public compile API returning a rooted program
+
+*MS2 issue: [#41](https://github.com/JoeStrout/miniscript2/issues/41)*
 
 **Problem.** `InterpreterStorage.Compile` keeps its result in the protected `compiledFunctions`. A host that compiles once and runs many VMs must copy the parse → simplify → code-generate pipeline itself. The compiled functions' constants (nested function templates, long strings) are GC values, but nothing roots them while no VM is running them. They're swept between runs unless the host roots them.
 
@@ -170,6 +188,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 ## 10. `Interpreter` releases its globals when destroyed
 
+*MS2 issue: [#42](https://github.com/JoeStrout/miniscript2/issues/42)*
+
 **Problem.** `~InterpreterStorage` is the default destructor. An `Interpreter` dropped without calling `Reset()` leaves its globals map registered as a GC root forever, along with everything reachable from it.
 
 **Suggested shape.** Release the globals (as `Reset` does) in the destructor.
@@ -180,6 +200,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 ## 11. A `Globals` id counter that can't overflow
 
+*MS2 issue: [#43](https://github.com/JoeStrout/miniscript2/issues/43)*
+
 **Problem.** `Globals._lastId` is a signed 32-bit counter, incremented for every new namespace, with no wraparound handling. Signed overflow is undefined behavior in the C++ build. Fourfold creates at least one namespace per request, so at 1,000 requests a second it overflows in about 25 days.
 
 **Suggested shape.** A 64-bit counter, or an unsigned one whose wraparound is harmless. The id is used to validate `FuncDef` global-slot caches, so a 32-bit wrap could in principle reuse an id still cached somewhere; 64 bits avoids that.
@@ -189,6 +211,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 **Benefit.** A long-running server stays correct indefinitely, which matters from M11 (production).
 
 ## 12. `RunFunction` fails cleanly if the callee yields or waits
+
+*MS2 issue: [#44](https://github.com/JoeStrout/miniscript2/issues/44)*
 
 **Problem.** `VM.RunFunction`:
 - loops forever if the callee calls `yield`;
@@ -202,6 +226,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 ## 13. Not-done intrinsics yield by default
 
+*MS2 issue: [#45](https://github.com/JoeStrout/miniscript2/issues/45)*
+
 **Problem.** When an intrinsic returns a not-done result without setting `vm.yielding`, `RunUntilDone` keeps re-invoking it until the time slice is used up. The built-in `wait` does this, so a waiting script burns its whole slice.
 
 **Suggested shape.** Have `Run` return to the host after an intrinsic goes pending, as if it had yielded. The alternative is a flag on the intrinsic saying it should.
@@ -211,6 +237,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 **Benefit.** One less rule for every async intrinsic to remember. Forgetting it is a silent performance bug, not a visible failure.
 
 ## 14. Bytecode serialization
+
+*MS2 issue: [#46](https://github.com/JoeStrout/miniscript2/issues/46)*
 
 **Problem.** Compiled programs exist only in memory.
 
@@ -224,6 +252,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 
 ## 15. A GC per thread
 
+*MS2 issue: [#47](https://github.com/JoeStrout/miniscript2/issues/47)*
+
 **Problem.** The GC's state is process-global and unsynchronized, so every `Value` in a process must live on one thread.
 
 **Suggested shape.** Make the GC's sets, roots and intern table per thread (`thread_local`), with values never shared between threads.
@@ -235,6 +265,8 @@ M2 measured about 0.1 ms per fresh VM, most of it here.
 - A separate GC heap for compiling, so a large compile needn't share the request thread (another of M3's options, not needed so far).
 
 ## 16. Resumable compiling
+
+*MS2 issue: [#48](https://github.com/JoeStrout/miniscript2/issues/48)*
 
 **Problem.** Parsing and generating code for one file is a single call. Fourfold compiles on the script thread a file at a time, so a request arriving during a compile waits for the current file: about 20 µs per line, measured in M3. Files of normal size cost a few milliseconds, but a 5,000-line file would stall requests for about 0.1 s.
 
