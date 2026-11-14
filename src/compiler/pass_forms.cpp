@@ -225,8 +225,13 @@ std::string attributesFor(const CompiledTemplate::Form::Control& c, const FormFi
         if (!value.empty()) out += "=\"" + value + "\"";
     };
     bool checkbox = c.type == "checkbox";
+    // Not on a hidden field: the browser checks `required` before the submit
+    // event (so before a script filling the field in on submit runs), and,
+    // having nowhere to show its message, blocks the form silently. The
+    // server checks it anyway.
+    bool hidden = c.type == "hidden" || has("hidden");
     if (f.required && f.type != FormFieldType::Choices && !(checkbox && f.type != FormFieldType::Bool) &&
-        c.element != "button" && c.type != "hidden" && c.type != "submit") {
+        c.element != "button" && !hidden && c.type != "submit") {
         add("required", "");
     }
     if (isTextType(f.type) && (c.element == "textarea" || c.element == "input")) {

@@ -108,6 +108,33 @@ TEST_CASE("forms: a declaration becomes the post handler's FormSpec") {
     CHECK_EQ(out.app->templates.fragment("signForm")->rootId(), "signForm");
 }
 
+TEST_CASE("forms: hidden fields aren't marked required") {
+    // A script fills them in; a browser that found one empty and required
+    // would block the form without a word (M11.2's Try-It share dialog).
+    TempDir dir;
+    dir.write("code/pages/book.html",
+              "<!DOCTYPE html><html><body><form method=\"post\" action=\"/book/sign\">"
+              "<textarea name=\"msg\" hidden></textarea><input type=\"hidden\" name=\"who\">"
+              "<input type=\"checkbox\" name=\"agree\" hidden=\"{{tucked}}\"><input name=\"nick\">"
+              "</form></body></html>");
+    dir.write("code/pages/book.ms",
+              "form.sign = {\n"
+              "    \"who\": {\"type\": \"text\", \"required\": true, \"max\": 20},\n"
+              "    \"msg\": {\"type\": \"multiline\", \"required\": true, \"max\": 2000},\n"
+              "    \"agree\": {\"type\": \"bool\", \"required\": true},\n"
+              "    \"nick\": {\"type\": \"text\", \"required\": true},\n"
+              "}\n"
+              "post.sign = function(req)\n"
+              "end function\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    std::string html = rendered(*out.app->templates.find(RelPath::parse("pages/book.html").value()));
+    CHECK(contains(html, "<textarea name=\"msg\" hidden maxlength=\"2000\">"));   // maxlength only limits typing
+    CHECK(contains(html, "<input type=\"hidden\" name=\"who\" maxlength=\"20\">"));
+    CHECK(contains(html, "<input type=\"checkbox\" name=\"agree\">"));   // hidden="{{tucked}}", empty
+    CHECK(contains(html, "<input name=\"nick\" required>"));               // a visible one still is
+}
+
 TEST_CASE("forms: a declared field with no input is a warning") {
     TempDir dir;
     dir.write("code/pages/book.html",

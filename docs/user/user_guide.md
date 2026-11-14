@@ -1890,6 +1890,13 @@ Since both are read when the app compiles, Fourfold matches each
   checks**, where you haven't written them: `required`, `maxlength`,
   `minlength`, `min`, `max`, `step` and `accept`. Visitors get instant
   feedback; the server still checks everything.
+- Hidden fields (`type="hidden"`, or with the `hidden` attribute) don't get
+  `required`: the browser checks it before your script's submit handler
+  could fill the field in, and, with nowhere to show its message, would
+  block the form without a word. A field hidden only by CSS
+  (`display: none`) can't be told apart when the app compiles, so it still
+  gets `required`: fill such a field in before the visitor can submit, or
+  use the `hidden` attribute.
 
 ---
 

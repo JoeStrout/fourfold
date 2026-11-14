@@ -64,6 +64,20 @@ if [ -z "$(ls -A "$srv/data")" ] && [ -d "$remote/app/data" ]; then cp -a "$remo
 first=$(echo "$domains" | cut -d, -f1)
 [ -f "$srv/private/config/app.ms" ] || printf 'config = {}\nconfig.domain = "%s"\n' "$first" > "$srv/private/config/app.ms"
 rm -rf "$remote"
-# Ownership and permissions over everything, and (re)start.
+# Ownership and permissions over everything.
+sh /opt/fourfold-server/fourfold-add-app "$name" $args --developer "$developer" --no-start >/dev/null
+# New migrations, applied before the engine restarts on the new code (it
+# won't start with any pending). With the engine running, migrate asks it to
+# apply them and switch over; otherwise it applies them itself. A failure
+# stops the deploy, and the data is as it was.
+if [ -d "$srv/code/migrations" ] && [ -d /run/systemd/system ]; then
+    systemctl start "fourfold-dropbox@$name.socket"
+    ok=1
+    out=$(sudo -u "ff-$name" /usr/local/bin/fourfold migrate "$srv" --server-config /etc/fourfold/server.ms \
+          --dropbox-socket "/run/fourfold/$name-dropbox.sock" 2>&1) || ok=0
+    printf '%s\n' "$out" | grep -v ': warning: ' || true
+    [ $ok -eq 1 ] || { echo "the migrations failed (above); a running engine keeps serving the old version" >&2; exit 1; }
+fi
+# (Re)start.
 sh /opt/fourfold-server/fourfold-add-app "$name" $args --developer "$developer"
 REMOTE
