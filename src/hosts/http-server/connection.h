@@ -67,6 +67,12 @@ private:
     enum class WireState { Done, Blocked, Failed };
     WireState writeOut();
     void updateInterest();
+    // A response body read from a BodySource (M11.2): the next piece, once
+    // what's queued has gone. False if there's nothing more to send now
+    // (all sent, or waiting for the source); closes the connection if the
+    // source fails.
+    bool pullBody();
+    void resumeBody();
     // Streamed responses.
     bool streamWrite(std::string bytes);
     void endStream();
@@ -126,6 +132,11 @@ private:
     bool http10_ = false;   // an HTTP/1.0 request: keep-alive must be said explicitly
     bool closeAfterWrite_ = false;
     std::string clientAddress_;   // the visitor's, for the stream caps
+
+    // The response body being read from a source, if any; `bodyWaiting_`
+    // while the source has nothing yet (no write interest meanwhile).
+    std::shared_ptr<BodySource> bodySource_;
+    bool bodyWaiting_ = false;
 
     // A streamed response: started once its headers are sent.
     std::function<void(std::shared_ptr<StreamWriter>)> pendingStream_;

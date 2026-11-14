@@ -413,7 +413,7 @@ TEST_CASE("Engine: POST handlers get url-encoded form fields") {
     HttpResponse r = app.post("/hello/form", "who=Ada+L&msg=a%26b&who=second", "application/x-www-form-urlencoded");
     CHECK_EQ(r.status, 200);
     CHECK_EQ(header(r, "Content-Type"), "application/json");
-    CHECK_EQ(r.body, "{\"msg\":\"a\\u0026b\",\"who\":\"Ada L\"}");
+    CHECK_EQ(r.body, "{\"who\":\"Ada L\",\"msg\":\"a\\u0026b\"}");
     CHECK_EQ(app.post("/hello/form", "who=x", "application/x-www-form-urlencoded; charset=UTF-8").body,
              "{\"who\":\"x\"}");
     CHECK_EQ(app.post("/hello/form", "who=x", "text/plain").body, "{}");

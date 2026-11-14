@@ -306,9 +306,19 @@ Result<CodeLoad> CodeCache::compileNew(const CodeListing& listing, const std::st
     for (const auto& [path, h] : out.handlers) handlers[path.str()] = handlersToDatum(h);
     Datum::MapItems routes;
     for (const auto& [path, file] : codeFiles(*out.app)) routes[path] = Datum::string(file);
+    // Rewrites (M11.2), in order, with the .ms file of the route each serves.
+    Datum::ListItems rewrites;
+    std::map<std::string, std::string> files = codeFiles(*out.app);
+    for (const UrlRule& rule : out.app->urlRules) {
+        if (rule.kind != UrlRule::Kind::Rewrite) continue;
+        auto file = files.find(rule.routePath);
+        rewrites.push_back(Datum::list({Datum::string(rule.pattern.text()),
+                                        Datum::string(file == files.end() ? "" : file->second)}));
+    }
     Datum version = Datum::map({{"generation", Datum::number(static_cast<double>(generation))},
                                 {"handlers", Datum::map(std::move(handlers))},
-                                {"routes", Datum::map(std::move(routes))}});
+                                {"routes", Datum::map(std::move(routes))},
+                                {"rewrites", Datum::list(std::move(rewrites))}});
     if (Status s = state_.write(versionFile(generation), toJson(version)); !s) {
         (void)state_.removeTree(versionFolder(generation));
         return s.error();
@@ -378,7 +388,26 @@ Result<CodeLoad> CodeCache::serve(uint64_t generation, const std::string* target
         auto path = canonicalUrlPath(*target);
         const Datum* routes = field(version.value(), "routes");
         if (path && routes) {
-            if (auto file = stringField(*routes, path.value().path)) {
+            std::optional<std::string> file = stringField(*routes, path.value().path);
+            // A URL no route serves may be a rewrite's (M11.2): the first
+            // that matches. (A route always wins; a redirect runs no code,
+            // so compiling the rewrite's file anyway costs only time.)
+            const Datum* rewrites = field(version.value(), "rewrites");
+            if (!file && rewrites && rewrites->kind() == Datum::Kind::List) {
+                for (const Datum& r : rewrites->asList()) {
+                    if (r.kind() != Datum::Kind::List || r.asList().size() != 2 ||
+                        r.asList()[0].kind() != Datum::Kind::String || r.asList()[1].kind() != Datum::Kind::String) {
+                        continue;
+                    }
+                    std::string why;
+                    auto pattern = UrlPattern::parse(r.asList()[0].asString(), why);
+                    UrlValues values;
+                    if (!pattern || !pattern->match(path.value(), values)) continue;
+                    if (!r.asList()[1].asString().empty()) file = r.asList()[1].asString();
+                    break;
+                }
+            }
+            if (file) {
                 if (auto rel = RelPath::parse(*file)) only.insert(std::move(rel).value());
             }
         }

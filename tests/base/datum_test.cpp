@@ -15,7 +15,7 @@ TEST_CASE("Datum: kinds and values") {
     CHECK_EQ(list.asList().size(), 2u);
     Datum map = Datum::map({{"b", Datum::number(2)}, {"a", Datum::string("x")}});
     REQUIRE(map.kind() == Datum::Kind::Map);
-    CHECK_EQ(map.asMap().begin()->first, "a");   // keys sorted
+    CHECK_EQ(map.asMap().begin()->first, "b");   // keys in insertion order
 }
 
 TEST_CASE("Datum: equality compares contents") {
@@ -24,6 +24,12 @@ TEST_CASE("Datum: equality compares contents") {
     CHECK(Datum::number(1) != Datum::string("1"));
     CHECK(Datum::list({Datum::number(1)}) == Datum::list({Datum::number(1)}));
     CHECK(Datum::map({{"a", Datum()}}) != Datum::map({{"b", Datum()}}));
+    // Order-blind, as in MiniScript.
+    CHECK(Datum::map({{"a", Datum::number(1)}, {"b", Datum::number(2)}}) ==
+          Datum::map({{"b", Datum::number(2)}, {"a", Datum::number(1)}}));
+    CHECK(Datum::map({{"a", Datum::number(1)}, {"b", Datum::number(2)}}) !=
+          Datum::map({{"b", Datum::number(1)}, {"a", Datum::number(2)}}));
+    CHECK(Datum::map({{"a", Datum()}}) != Datum::map({{"a", Datum()}, {"b", Datum()}}));
     CHECK(Datum() != Datum::number(0));
 }
 
@@ -51,7 +57,7 @@ TEST_CASE("toJson: lists and maps") {
     CHECK_EQ(toJson(Datum::map({})), "{}");
     Datum d = Datum::map({{"z", Datum::list({Datum::number(1), Datum::string("two"), Datum()})},
                           {"a", Datum::map({{"k", Datum::number(0.5)}})}});
-    CHECK_EQ(toJson(d), "{\"a\":{\"k\":0.5},\"z\":[1,\"two\",null]}");
+    CHECK_EQ(toJson(d), "{\"z\":[1,\"two\",null],\"a\":{\"k\":0.5}}");   // in insertion order
 }
 
 TEST_CASE("parseJson: reads back what toJson writes") {
@@ -83,6 +89,41 @@ TEST_CASE("parseJson: accepts ordinary JSON") {
     CHECK_EQ(toJson(l[2]), "0");
     CHECK_EQ(l[3].asNumber(), 1);   // MiniScript's true
     CHECK_EQ(l[4].asNumber(), 0);
+}
+
+TEST_CASE("parseJson: keeps the document's key order") {
+    using fourfold::parseJson;
+    std::string text = "{\"zeta\":1,\"alpha\":{\"y\":2,\"x\":3},\"mid\":[{\"b\":4,\"a\":5}]}";
+    auto r = parseJson(text);
+    REQUIRE(r.ok());
+    CHECK_EQ(r.value().asMap().begin()->first, "zeta");
+    CHECK_EQ(toJson(r.value()), text);
+}
+
+TEST_CASE("OrderedMap: insertion order, lookup, replace and erase") {
+    fourfold::OrderedMap<int> m;
+    for (int i = 20; i > 0; i--) m[std::to_string(i)] = i;   // past the index threshold
+    CHECK_EQ(m.size(), 20u);
+    CHECK_EQ(m.begin()->first, "20");
+    CHECK_EQ(m.at("7"), 7);
+    CHECK_EQ(m.count("21"), 0u);
+    CHECK(m.find("21") == m.end());
+    CHECK_FALSE(m.emplace("7", 70).second);   // emplace keeps the first value
+    CHECK_EQ(m.at("7"), 7);
+    m.insert_or_assign("7", 77);              // replace keeps the place
+    CHECK_EQ(std::next(m.begin(), 13)->second, 77);
+    CHECK_EQ(m.erase("20"), 1u);
+    CHECK_EQ(m.begin()->first, "19");
+    CHECK_EQ(m.at("1"), 1);                    // the index follows the shift
+    m["20"] = 20;                              // added again: last
+    CHECK_EQ(std::prev(m.end())->first, "20");
+    while (m.size() > 3) m.erase(m.begin());  // back under the threshold
+    CHECK_EQ(m.at("20"), 20);
+    CHECK_EQ(m.at("1"), 1);
+    CHECK_THROWS_AS(m.at("19"), std::out_of_range);
+    fourfold::OrderedMap<int> dup{{"a", 1}, {"a", 2}};
+    CHECK_EQ(dup.size(), 1u);
+    CHECK_EQ(dup.at("a"), 1);
 }
 
 TEST_CASE("parseJson: refuses what isn't valid") {

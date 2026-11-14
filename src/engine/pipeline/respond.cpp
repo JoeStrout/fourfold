@@ -145,7 +145,9 @@ void addStandardHeaders(HttpResponse& response, const std::string& nonce, const 
     static const HeadersConfig defaults = defaultHeaders();
     const HeadersConfig& c = config ? *config : defaults;
     Headers& h = response.headers;
-    std::string csp = c.cspBeforeNonce;
+    const std::string* asked = h.get("Content-Security-Policy");
+    std::string csp = asked && *asked == "sandbox" ? "sandbox; " : "";
+    csp += c.cspBeforeNonce;
     if (!nonce.empty()) csp += " 'nonce-" + nonce + "'";
     h.set("Content-Security-Policy", csp + c.cspAfterNonce);
     h.set("Reporting-Endpoints", std::string("csp=\"") + kCspReportPath + "\"");
@@ -155,8 +157,8 @@ void addStandardHeaders(HttpResponse& response, const std::string& nonce, const 
     h.set("Cross-Origin-Opener-Policy", "same-origin");
     if (!c.permissionsPolicy.empty()) h.set("Permissions-Policy", c.permissionsPolicy);
     if (hsts && !c.hsts.empty()) h.set("Strict-Transport-Security", c.hsts);
-    // Always revalidate, so edits show on reload. (Caching rules with
-    // ETags come later.)
+    // Always revalidate, so edits show on reload; static files' ETags make
+    // that cheap (M11.2). code/static.ms's maxAge sets its own.
     if (!h.has("Cache-Control")) h.set("Cache-Control", "no-cache");
 }
 

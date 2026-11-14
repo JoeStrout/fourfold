@@ -17,6 +17,7 @@
 #include "compiledapp/outbound_policy.h"
 #include "compiledapp/schedule.h"
 #include "compiledapp/sql.h"
+#include "compiledapp/url_rules.h"
 #include "partition/paths.h"
 #include "template/template.h"
 
@@ -248,6 +249,27 @@ struct StaticFile {
     std::string contentType;   // "image/png", "text/css; charset=utf-8"
     uint64_t size = 0;
     int64_t modifiedNs = 0;
+    // An XML type added in code/static.ms: served with a CSP sandbox, so
+    // markup in it can't run script as the site (M11.2).
+    bool sandbox = false;
+    // From code/static.ms's maxAge: how long browsers may keep it without
+    // asking again (Cache-Control: public, max-age=N). Unset: no-cache
+    // (always revalidate, which an ETag makes cheap).
+    std::optional<int64_t> maxAgeSeconds;
+};
+
+// A file type an app adds in code/static.ms (M11.2).
+struct AddedType {
+    std::string contentType;
+    bool sandbox = false;   // an XML type
+};
+
+// One rule from code/static.ms's maxAge: static files at or below `path`
+// may be cached for `seconds`. The most specific rule for a file wins.
+struct CacheRule {
+    std::string path;   // "/MiniMicro/Build"
+    int64_t seconds = 0;
+    bool used = false;   // for the compiler's warning
 };
 
 // The static files in code/pages/, by source path.
@@ -339,6 +361,21 @@ struct AccessRule {
     bool isPublic = false;            // "public": covers the path, requires nothing
 };
 
+// One rule from code/limits.ms, kept for URLs that aren't routes: a
+// rewrite's visitor URL (M11.2), whose rules apply as well as its target's.
+struct PathLimitRule {
+    std::string path;                 // "/guestbook/sign"
+    std::vector<RateRule> rates;      // each keyed by the rule, as on routes
+    double minSeconds = 0;
+    double maxAgeSeconds = 0;
+    bool challenge = false;
+    std::string source;               // "code/limits.ms: /guestbook/sign"
+};
+
+// Whether a rule for `rule` ("/admin") covers `url` ("/admin/users"): the
+// path and everything below it, on whole segments.
+bool rulePathCovers(const std::string& rule, const std::string& url);
+
 // A push channel's name: one or more segments of letters, digits, '-' and
 // '_', joined by '/' ("orders", "rooms/lobby"); at most 100 bytes.
 bool isValidChannelName(const std::string& name);
@@ -350,6 +387,10 @@ struct CompiledApp {
     uint64_t generation = 0;
     RouteTable routes;
     StaticIndex statics;
+    // code/static.ms (M11.2): file types the app adds, by extension
+    // (".unityweb"), and how long static files may be cached.
+    std::map<std::string, AddedType> addedTypes;
+    std::vector<CacheRule> cacheRules;
     TemplateSet templates;
     // frags/layout/markdown.html, which wraps every Markdown page, if the
     // app has one (with {{content}} and {{title}}); else a built-in page.
@@ -384,8 +425,22 @@ struct CompiledApp {
     std::map<std::string, HandlerRef> jobs;
     // code/schedule.ms, by job name.
     std::vector<ScheduledJob> schedule;
-    // code/access.ms's rules, for push channels (/live/<name>).
+    // code/access.ms's rules, for push channels (/live/<name>) and
+    // rewrites' visitor URLs.
     std::vector<AccessRule> accessRules;
+    // code/limits.ms's rules, for rewrites' visitor URLs.
+    std::vector<PathLimitRule> limitRules;
+    // code/routes.ms (M11.2): redirects, then rewrites, each in the order
+    // written. They apply to URLs no route serves.
+    std::vector<UrlRule> urlRules;
+    // The first rule that matches `path`, or null; `values` gets its
+    // placeholders' values.
+    const UrlRule* matchUrlRule(const UrlPath& path, UrlValues& values) const;
+    // A rewrite's route entry: the target's `entry` (at `routeUrl`), with the
+    // access rules and limits that cover the visitor's URL `visitorPath` as
+    // well (those that cover `routeUrl` are already in it). Rules only
+    // tighten, so both URLs' rules must pass.
+    RouteEntry rewriteEntry(const RouteEntry& entry, const std::string& routeUrl, const std::string& visitorPath) const;
     // Who may subscribe to channel `name` (/live/<name>): every access.ms
     // rule covering its path, combined; nullopt if no rule covers it (the
     // channel isn't served). `sources` gets the rules that applied.

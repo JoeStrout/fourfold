@@ -52,6 +52,8 @@ std::string encodeRecord(uint8_t type, uint16_t requestId, std::string_view cont
 // A stream (stdout) as records: as many as it takes, then the empty one
 // that ends it.
 std::string encodeStream(uint8_t type, uint16_t requestId, std::string_view data);
+// The same records, without the empty one that ends the stream.
+std::string encodeStreamPart(uint8_t type, uint16_t requestId, std::string_view data);
 // FCGI_END_REQUEST's body.
 std::string encodeEndRequest(uint16_t requestId, uint32_t appStatus, uint8_t protocolStatus);
 

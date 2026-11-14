@@ -127,4 +127,18 @@ Result<CodeFile> CodeTree::read(const RelPath& path) const {
     return CodeFile(path, std::move(contents), modifiedTimeNs(info));
 }
 
+Result<OpenCodeFile> CodeTree::open(const RelPath& path) const {
+    struct stat info;
+    auto fd = openFileForRead(root_.get(), path, kPartition, &info);
+    if (!fd) return fd.error();
+    if (static_cast<uint64_t>(info.st_size) > limits_.maxStaticFileBytes) {
+        return makeError(ErrorCode::TooLarge, describe(kPartition, path) + ": file too large");
+    }
+    OpenCodeFile f;
+    f.fd = std::move(fd).value();
+    f.size = static_cast<uint64_t>(info.st_size);
+    f.modifiedNs = modifiedTimeNs(info);
+    return f;
+}
+
 }  // namespace fourfold

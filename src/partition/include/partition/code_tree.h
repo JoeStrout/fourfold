@@ -26,7 +26,18 @@ namespace fourfold {
 struct CodeTreeLimits {
     size_t maxFiles = 20000;
     size_t maxDepth = 32;
+    // Files read whole (read()): code, templates, small static files.
     uint64_t maxFileBytes = 64 * 1024 * 1024;
+    // Static files, which are sent from disk a piece at a time (open()):
+    // downloads, web builds (M11.2).
+    uint64_t maxStaticFileBytes = 1024ull * 1024 * 1024;
+};
+
+// An open file in the tree, for sending a piece at a time.
+struct OpenCodeFile {
+    Fd fd;
+    uint64_t size = 0;
+    int64_t modifiedNs = 0;
 };
 
 struct CodeEntry {
@@ -75,6 +86,12 @@ public:
     // The whole file. Fails with NotFound if it's missing, a symbolic link,
     // or not a regular file, and TooLarge past maxFileBytes.
     Result<CodeFile> read(const RelPath& path) const;
+
+    // The file, open for reading (a static file, to send). The same checks as
+    // read(), but TooLarge past maxStaticFileBytes.
+    Result<OpenCodeFile> open(const RelPath& path) const;
+
+    const CodeTreeLimits& limits() const { return limits_; }
 
 private:
     friend class AppFolder;

@@ -114,7 +114,7 @@ TEST_CASE("DevTools: the reload stream") {
     CHECK_EQ(*r->headers.get("Content-Type"), "text/event-stream");
 
     auto writer = f.connect();
-    CHECK_EQ(writer->written, "event: hello\ndata: {\"diagnostics\":[],\"generation\":0,\"warnings\":[]}\n\n");
+    CHECK_EQ(writer->written, "event: hello\ndata: {\"generation\":0,\"diagnostics\":[],\"warnings\":[]}\n\n");
     CHECK_EQ(f.dev->streamCount(), 1u);
     writer->written.clear();
 
@@ -127,7 +127,7 @@ TEST_CASE("DevTools: the reload stream") {
         f.pump();
         CHECK_EQ(writer->written, "event: reload\ndata: {\"generation\":2}\n\n");
         auto later = f.connect();
-        CHECK_EQ(later->written, "event: hello\ndata: {\"diagnostics\":[],\"generation\":2,\"warnings\":[]}\n\n");
+        CHECK_EQ(later->written, "event: hello\ndata: {\"generation\":2,\"diagnostics\":[],\"warnings\":[]}\n\n");
     }
     SUBCASE("only stylesheets: css, with their URLs") {
         CompileReport report;
@@ -151,13 +151,13 @@ TEST_CASE("DevTools: the reload stream") {
         f.pump();
         // '<' and '>' are escaped by the JSON encoder.
         CHECK_EQ(writer->written,
-                 "event: errors\ndata: {\"diagnostics\":["
-                 "{\"code\":[\"line 1\",\"line 2\",\"line 3 \\u003cscript\\u003e\",\"line 4\",\"line 5\",\"line 6\"],"
-                 "\"file\":\"code/pages/index.ms\",\"first\":1,\"line\":3,\"message\":\"bad \\u003cthing\\u003e\"},"
-                 "{\"file\":\"code\",\"line\":0,\"message\":\"no line\"}],\"generation\":1}\n\n");
+                 "event: errors\ndata: {\"generation\":1,\"diagnostics\":["
+                 "{\"file\":\"code/pages/index.ms\",\"line\":3,\"message\":\"bad \\u003cthing\\u003e\",\"first\":1,"
+                 "\"code\":[\"line 1\",\"line 2\",\"line 3 \\u003cscript\\u003e\",\"line 4\",\"line 5\",\"line 6\"]},"
+                 "{\"file\":\"code\",\"line\":0,\"message\":\"no line\"}]}\n\n");
         auto later = f.connect();
-        CHECK(contains(later->written, "event: hello\ndata: {\"diagnostics\":[{\"code\""));
-        CHECK(contains(later->written, "\"generation\":1,\"warnings\":[]}"));
+        CHECK(contains(later->written, "event: hello\ndata: {\"generation\":1,\"diagnostics\":[{\"file\""));
+        CHECK(contains(later->written, "\"warnings\":[]}"));
     }
     SUBCASE("render warnings: sent once each, and kept for new streams of that generation") {
         CompileReport report;

@@ -8,6 +8,7 @@
 #include <map>
 #include <optional>
 #include <ostream>
+#include <functional>
 #include <string>
 
 #include "http/message.h"
@@ -37,7 +38,19 @@ HttpRequest cgiRequest(const CgiVariables& vars, std::string body);
 bool cgiHttps(const CgiVariables& vars);
 
 // The response in CGI's form. A streamed body can't be sent: such a
-// response must be replaced first.
+// response must be replaced first. A body from a source (M11.2) is read
+// whole; servers send it a piece at a time instead, with these:
 std::string cgiResponse(const HttpResponse& response);
+
+// The status and header lines, then the blank line.
+std::string cgiResponseHead(const HttpResponse& response);
+
+// The body, in pieces of at most 64 KB, to `write` (which returns false to
+// stop). False if the body's source failed (the response is then short,
+// and the connection should end).
+bool writeCgiBody(const HttpResponse& response, const std::function<bool(std::string_view)>& write);
+
+// Whether the request is a HEAD (its response has no body).
+bool cgiHead(const CgiVariables& vars);
 
 }  // namespace fourfold

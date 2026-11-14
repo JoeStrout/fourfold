@@ -53,7 +53,9 @@ CompileOutput compile(const CodeTree& code, const CompileOptions& options) {
     templatesPass(listing.value(), code, *app, diagnostics);
     DatabaseSources database = databasePass(listing.value(), code, options.dialect, *app, diagnostics);
     auto handlers = scriptsPass(listing.value(), code, options, std::move(database), *app, diagnostics);
+    staticPass(listing.value(), code, options.evaluator, *app, diagnostics);
     routesPass(listing.value(), handlers, *app, diagnostics);
+    urlRulesPass(listing.value(), code, options.evaluator, *app, diagnostics);
     accessPass(listing.value(), code, handlers, options.evaluator, *app, diagnostics);
     limitsPass(listing.value(), code, options.evaluator, *app, diagnostics);
     outboundPass(listing.value(), code, options.evaluator, *app, diagnostics);

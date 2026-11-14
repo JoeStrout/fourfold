@@ -98,7 +98,15 @@ int runCgi(const std::string& folder, const CgiVariables& vars, std::istream& in
     auto app = CgiApp::open(root);
     if (!app) return fail(out, err, app.error().message);
     HttpResponse response = app.value()->handle(cgiRequest(vars, std::move(body)), cgiHttps(vars));
-    out << cgiResponse(response);
+    out << cgiResponseHead(response);
+    // The body a piece at a time, so a large static file isn't held in
+    // memory (M11.2); none for HEAD.
+    if (!cgiHead(vars)) {
+        (void)writeCgiBody(response, [&](std::string_view piece) {
+            out.write(piece.data(), static_cast<std::streamsize>(piece.size()));
+            return static_cast<bool>(out);
+        });
+    }
     out.flush();
     if (timing) {
         err << "fourfold cgi: " << response.status << " in "

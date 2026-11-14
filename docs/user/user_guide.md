@@ -78,6 +78,8 @@ Inside `code/`:
 | `code/frags/` | Pieces of HTML (and Markdown) that pages and code put together |
 | `code/lib/` | MiniScript modules shared by pages |
 | `code/access.ms` | who may see what: [access rules](#who-may-see-what-access-rules) |
+| `code/routes.ms` | old URLs kept working: [redirects and rewrites](#old-urls-coderoutesms) |
+| `code/static.ms` | more [static file types](#more-file-types-codestaticms), and how long files may be cached |
 | `code/queries/` | the SQL your code can run: [named queries](#a-database-dbquery) |
 | `code/migrations/` | changes to the data's shape: [migrations](#changing-the-datas-shape-migrations) |
 
@@ -131,10 +133,137 @@ Only these types are served:
 - **Media:** `.mp3`, `.ogg`, `.wav`, `.mp4`, `.webm`
 - **Downloads:** `.pdf`, `.zip`
 
-Anything else gets a compile warning and isn't served. To offer such a file
-for download, zip it.
+Anything else gets a compile warning and isn't served, unless you add its
+type (below).
 
 `.ms` files are a page's code, and are never served.
+
+#### More file types: `code/static.ms`
+
+To serve another kind of file, give its extension a content type in
+`code/static.ms`:
+
+```
+// code/static.ms
+types = {}
+types["unityweb"] = "application/octet-stream"
+types["minidisk"] = "application/octet-stream"
+types["xml"] = "application/rss+xml"
+types["gz"] = "application/gzip"
+```
+
+- **Built-in types can't be changed.** Adding `.png` (or any type on the list
+  above) is a compile error.
+- **Nothing that could run script as your site:** `.html`, `.md` and `.ms`
+  are pages and code, so they can't be added; nor can HTML, XHTML, SVG,
+  JavaScript or XSLT content types. Pages go through the template checks, and
+  these would get around them.
+- **XML types** (`application/rss+xml`, `text/xml`, `application/atom+xml`,
+  ...) are served with `Content-Security-Policy: sandbox`, so a browser that
+  shows the file can't run anything in it as your site. A feed reader doesn't
+  care.
+
+#### Caching, ranges and large files
+
+Every static file is sent with an `ETag` and a `Last-Modified` date, and
+with `Cache-Control: no-cache`: browsers keep their copy, but ask before using
+it. When the file hasn't changed, the answer is a short `304 Not Modified`,
+not the file again. So a change you deploy shows on the next visit, and an
+unchanged 30 MB web build isn't downloaded twice.
+
+If a folder's files never change in place (a build folder with the version
+in its name, say), browsers can skip even the question for a while, with
+`maxAge` in `code/static.ms`:
+
+```
+maxAge = {}
+maxAge["/MiniMicro/Build"] = 60 * 60 * 24      // seconds: a day
+```
+
+A rule covers its path and everything below it; the most specific rule for
+a file wins. A browser won't see a change to such a file until its copy is
+that old, so use it only where that's fine. Files restricted by
+[access rules](#who-may-see-what-access-rules) are never cached
+(`private, no-store`), whatever `maxAge` says.
+
+Downloads can be resumed: a browser or download tool that lost its
+connection asks for the rest (`Range`), and gets just that.
+
+Large files are sent from disk a piece at a time, so serving a 50 MB
+download to many visitors at once doesn't take 50 MB of memory each. A file
+can be up to 1 GB.
+
+### Old URLs: `code/routes.ms`
+
+A site that moves in has URLs out in the world (links on other sites, in
+forum posts, in bookmarks) that no file in `pages/` matches any more.
+`code/routes.ms` keeps them working, with **redirects** (the browser is sent
+to the new URL) and **rewrites** (the old URL serves something else, and
+stays in the address bar):
+
+```
+// code/routes.ms
+redirects = {}
+redirects["/wiki/{rest*}"] = "https://wiki.example.org/wiki/{rest}"
+redirects["/old-news"] = {"to": "/news/", "status": 302}
+
+rewrites = {}
+rewrites["/tryit/{code}"] = "/tryit/?s={code}"
+rewrites["/favicon.ico"] = "/img/favicon/favicon.ico"
+```
+
+**Patterns.** A rule's key is a URL path. Parts of it can be placeholders:
+
+- `{name}` matches one whole segment of the path: `/tryit/{code}` matches
+  `/tryit/AbCd1234`, but not `/tryit/a/b` or `/tryit/AbCd1234/`.
+- `{name*}` matches the rest of the path, zero or more segments (and any
+  trailing slash), and can only come last: `/wiki/{rest*}` matches `/wiki`,
+  `/wiki/`, `/wiki/Main_Page` and `/wiki/a/b/`.
+
+There are no wildcards or regular expressions beyond these, and no case
+folding. Write the text decoded: `/my page/{x}`, not `/my%20page/{x}`.
+
+**Targets.** The value is the URL to send the visitor to (or serve), with the
+placeholders filled in. A value is filled in encoded for where it lands, so
+`{code}` in a query is query-encoded, and a value can never add a `/`, `?`,
+`&` or `#` of its own. A placeholder can't come before the path, so it can't
+choose the host.
+
+**Which rule.** Rules only apply to URLs nothing in `pages/` serves: a page,
+handler or file always wins, so a rule can't quietly take over one.
+Redirects are tried first, then rewrites, each in the order you wrote them;
+the first that matches is used. So put specific rules before general ones. A
+rule an earlier one makes unreachable, or one whose URL a page already
+serves, is a compile warning. Rules answer GET and HEAD; anything else gets
+`405 Method Not Allowed` (forms should post to the target's own handlers).
+
+**Redirects** are `301 Moved Permanently` unless you say otherwise:
+`{"to": "...", "status": 302}` for a temporary one (or 307, 308). Browsers
+remember a 301 for a long time, so use 302 while you're still deciding. The
+target can be on another site. The visitor's query string is kept, after
+any the target has: `/wiki/Main_Page?action=edit` goes to
+`https://wiki.example.org/wiki/Main_Page?action=edit`.
+
+**Rewrites** serve a page, file or handler of this app, checked when the app
+compiles, without the browser knowing. So the target is a path on this site,
+with placeholders only in its query (to send visitors somewhere built from
+the path, use a redirect). In the target's code:
+
+- `req.path` is still the visitor's URL (`/tryit/AbCd1234`).
+- `req.query` has the target's query parameters (`s`), then the visitor's.
+  The target's come first, so a visitor can't replace them.
+
+The target's access rules and rate limits apply, and so do those for the
+visitor's URL: both must pass. A rewrite to a page in another folder is a
+warning, since its relative links would resolve against the visitor's URL;
+use absolute links in such a page.
+
+Rewrites aren't followed again: a rewrite's target must be served by a
+page, handler or file, not by another rule.
+
+The [access report](#developing-on-your-own-machine) (`/__dev/access`) lists
+the rules after the routes, in the order they're tried, with who may use
+each rewrite.
 
 ### Error pages
 
@@ -658,6 +787,11 @@ deep. Functions, `frag` results and other special values can't be stored.
 A value or log can be up to 16 MB.
 
 `true` and `false` are 1 and 0 in MiniScript, and they're stored that way.
+
+A map keeps its order, as it does in MiniScript: you get its keys back in
+the order they were added, from `data`, from [`session`](#remembering-visitors-session),
+in a job's arguments, and in JSON. (Data stored before Fourfold kept the
+order comes back with its keys sorted.)
 
 `data.get` gives you a fresh copy: changing the list or map it returned
 changes nothing stored until you store it again.
@@ -2493,15 +2627,23 @@ config.headers.csp = {
 | `form` | where forms may post | your own site |
 
 Each entry is a site (`"https://cdn.example.com"`, `"*.example.com"`, with
-a port or path if you like) or, except for scripts, a scheme (`"https:"`,
-`"data:"`, `"blob:"`, `"wss:"`). There's no way to allow inline event
-handlers, `eval`, or scripts from anywhere: those are what the policy is
-for.
+a port or path if you like) or a scheme (`"https:"`, `"data:"`, `"blob:"`,
+`"wss:"`). For scripts, the only scheme is `"blob:"`, for scripts your own
+scripts build (some web game engines' loaders do). There's no way to allow
+inline event handlers, `eval`, or scripts from anywhere: those are what the
+policy is for.
+
+**WebAssembly** (a web build of a game, say) is blocked unless you turn it
+on with `config.headers.webAssembly = true`. That allows compiling
+WebAssembly that your scripts load, and nothing more (`'wasm-unsafe-eval'`;
+JavaScript's `eval` stays blocked). A Unity web build needs it; an older one
+(with `UnityLoader.js`) also needs `"blob:"` in `script`.
 
 The rest of `config.headers`:
 
 | Setting | Default | Is |
 |---|---|---|
+| `webAssembly` | `false` | `true` lets your pages' scripts run WebAssembly (above) |
 | `strictStyles` | `false` | `true` blocks inline styles too (`style="..."`, `<style>`), for the strictest policy |
 | `frameAncestors` | `[]` | sites allowed to show your pages in a frame: `["self"]` for your own, or `["https://partner.example"]` |
 | `hsts` | a year | how long browsers must use HTTPS for the site: `{"maxAgeDays": 365, "includeSubDomains": true, "preload": true}`, or `false` for none. Sent only by `fourfold serve` over HTTPS |
@@ -2704,6 +2846,8 @@ It uses the app's real `data/` folder, so work on a copy if the data matters.
 | `code/frags/layout/markdown.html` | the page around Markdown pages |
 | `code/lib/x.ms` | the module for `import "x"` |
 | `code/access.ms` | access rules: `rules["/path"] = "login"` |
+| `code/routes.ms` | old URLs: `redirects["/old/{x}"] = "/new/{x}"`, `rewrites["/a/{x}"] = "/page?x={x}"` |
+| `code/static.ms` | more file types, `types["ext"] = "type"`, and caching, `maxAge["/path"] = seconds` |
 | `code/limits.ms` | rate limits and spam checks: `limits["/path"] = "5/minute"` |
 | `code/outbound.ms` | hosts `http` may reach, `allow = [...]`, and addresses `mail.send` may write to, `mailTo = [...]` |
 | `code/mail/x.md` | the mail template `x` |

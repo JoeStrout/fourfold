@@ -725,7 +725,7 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
     const HttpRequest& request = f->request;
 
     if (!entry) {   // not found, a redirect, or the wrong method
-        f->send(dispatch(decision, app, code_, f->render));
+        f->send(dispatch(decision, app, code_, f->render, nullptr, &request));
         return;
     }
 
@@ -751,6 +751,9 @@ void Engine::serveRoute(std::shared_ptr<Flow> f) const {
     f->personal = !entry->access.isPublic() || f->user.has_value();
     std::optional<std::string> csrfToken;
     auto facts = std::make_shared<RequestFacts>(requestFacts(request, f->admitted, &**submission, &csrfToken));
+    // A rewrite (M11.2): req.path stays the visitor's; req.query has the
+    // target's parameters first.
+    if (decision.query) facts->query = parseUrlEncoded(*decision.query);
     GateFacts gateFacts;
     gateFacts.method = request.method;
     if (const std::string* origin = request.headers.get("Origin")) gateFacts.origin = *origin;
@@ -858,7 +861,7 @@ void Engine::afterGate(std::shared_ptr<Flow> f, GateDecision gate, RequestFacts 
     bool useSession = entry->usesSession && options.sessions && options.sessionLocks;
     if (!decision.handler) {
         if (!useSession || !f->sessionHash || !scripts_) {
-            f->send(dispatch(decision, app, code_, f->render));
+            f->send(dispatch(decision, app, code_, f->render, nullptr, &request));
             return;
         }
         // A page with no code but a {{flash}} field: show `session.flash`, if

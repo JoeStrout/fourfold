@@ -65,6 +65,14 @@ std::string localLinkProblem(const CompiledApp& app, const std::optional<std::ve
     if (!local) return "";
     if (path) *path = local->path;
     if (routeExists(app, local->path)) return "";
+    // A URL a code/routes.ms rule answers (M11.2): redirected or rewritten.
+    if (!app.urlRules.empty()) {
+        std::string written = local->path + (local->trailingSlash && local->path != "/" ? "/" : "");
+        if (auto canonical = canonicalUrlPath(written)) {
+            UrlValues values;
+            if (app.matchUrlRule(canonical.value(), values)) return "";
+        }
+    }
     // A push channel (overview §7) is served if an access.ms rule covers it.
     const std::string live = kLivePrefix;
     if (local->path.compare(0, live.size(), live) == 0) {

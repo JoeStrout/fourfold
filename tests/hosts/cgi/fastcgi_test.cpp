@@ -2,6 +2,8 @@
 #include "cgi/fastcgi.h"
 
 #include <sys/socket.h>
+#include <filesystem>
+#include <cstdlib>
 #include <thread>
 #include <unistd.h>
 
@@ -163,4 +165,28 @@ TEST_CASE("FastCGI: limits, roles, multiplexing and management records") {
     records = converse(begin(4, false) + encodeRecord(kAbortRequest, 4, ""), counting);
     REQUIRE(records.size() == 1);
     CHECK(records[0].type == kEndRequest);
+}
+
+TEST_CASE("FastCGI: a body from a source goes a piece at a time; HEAD has none (M11.2)") {
+    std::string big(700 * 1000 + 9, '\0');
+    for (size_t i = 0; i < big.size(); i++) big[i] = static_cast<char>('a' + (i * 11 + i / 997) % 26);
+    std::string name = (std::filesystem::temp_directory_path() / "ff-fcgi-XXXXXX").string();
+    int fd = ::mkstemp(name.data());
+    REQUIRE(fd >= 0);
+    ::unlink(name.c_str());
+    REQUIRE(::write(fd, big.data(), big.size()) == static_cast<ssize_t>(big.size()));
+    Handler file = [&](const CgiVariables&, std::string) {
+        HttpResponse r;
+        r.source = fileBodySource(Fd(::dup(fd)), 0, big.size());
+        return r;
+    };
+    std::string out = stdoutOf(converse(request(1, false, {{"REQUEST_URI", "/f"}}, ""), file), 1);
+    CHECK(contains(out, "Content-Length: " + std::to_string(big.size()) + "\r\n"));
+    REQUIRE(out.find("\r\n\r\n") != std::string::npos);
+    CHECK(out.substr(out.find("\r\n\r\n") + 4) == big);
+
+    out = stdoutOf(converse(request(1, false, {{"REQUEST_URI", "/f"}, {"REQUEST_METHOD", "HEAD"}}, ""), file), 1);
+    CHECK(contains(out, "Content-Length: " + std::to_string(big.size()) + "\r\n"));
+    CHECK(out.size() == out.find("\r\n\r\n") + 4);
+    ::close(fd);
 }

@@ -60,6 +60,8 @@ public:
     bool streamWrite(int32_t id, std::string bytes);
     void streamEnd(int32_t id);
     bool streamOpen(int32_t id) const;
+    // A stream's body source may have more now.
+    void sourceReady(int32_t id);
     // Whether nghttp2 is running a callback (output must wait).
     bool busy() const { return busy_; }
 
@@ -82,6 +84,8 @@ private:
         size_t outOffset = 0;
         bool outEnd = false;
         bool deferred = false;
+        // Or a body read from a source, a piece at a time (M11.2).
+        std::shared_ptr<BodySource> source;
         // A streamed response (server-sent events).
         bool streaming = false;
         bool counted = false;        // against the server's stream caps

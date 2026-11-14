@@ -29,7 +29,10 @@ target=$1; name=$2; domains=$3; app=${4%/}
 [ -d "$app/code" ] || { echo "$app has no code/ folder" >&2; exit 1; }
 
 echo "== uploading"
-remote=/tmp/fourfold-deploy-$name
+# On disk, not /tmp: /tmp is often a small RAM disk, and a site with its
+# downloads can be larger. /var/tmp is usually on /srv's file system too, so
+# the code is moved into place, not copied.
+remote=/var/tmp/fourfold-deploy-$name
 ssh "$target" "rm -rf $remote && mkdir -p $remote"
 scp -q "$binary" "$target:$remote/fourfold"
 COPYFILE_DISABLE=1 tar -C tools --no-xattrs -czf - server 2>/dev/null | ssh "$target" "tar -C $remote -xzf -"

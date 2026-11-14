@@ -70,7 +70,7 @@ RenderOptions renderOptionsFor(const CompiledApp& app, std::string nonce) {
 }
 
 HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, const CodeTree& code,
-                      const RenderOptions& render, const FieldSource* fields) {
+                      const RenderOptions& render, const FieldSource* fields, const HttpRequest* request) {
     switch (decision.kind) {
         case RouteDecision::Kind::NotFound:
             return notFound(app, render);
@@ -82,9 +82,10 @@ HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, con
         }
 
         case RouteDecision::Kind::Redirect: {
-            // 302, not 301: browsers cache a 301 indefinitely, which would
-            // outlive a dev's change from docs.html to docs/index.html.
-            HttpResponse r = HttpResponse::text(302, "Found\n");
+            // The engine's own redirects are 302, not 301: browsers cache a
+            // 301 indefinitely, which would outlive a dev's change from
+            // docs.html to docs/index.html. A redirect rule says its own.
+            HttpResponse r = HttpResponse::text(decision.status, std::string(statusReason(decision.status)) + "\n");
             r.headers.set("Location", decision.location);
             return r;
         }
@@ -104,15 +105,8 @@ HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, con
         return t ? markdownPage(*t, app, render, fields) : notFound(app, render);
     }
 
-    // The file was listed when the app was compiled; it may have gone since
-    // (the next compile will drop its route).
-    auto file = code.read(entry.source);
-    if (!file) return notFound(app, render);
-    HttpResponse r;
-    const StaticFile* info = app.statics.find(entry.source);
-    r.headers.set("Content-Type", info ? info->contentType : "application/octet-stream");
-    r.body = file.value().contents();
-    return r;
+    HttpResponse r = serveStatic(entry, app, code, request);
+    return r.status == 404 ? notFound(app, render) : r;
 }
 
 }  // namespace fourfold

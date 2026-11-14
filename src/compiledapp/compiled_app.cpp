@@ -345,6 +345,14 @@ std::string describe(const CompiledApp& app) {
         if (!entry.pageUrl.empty() && entry.form) s += "  page: " + entry.pageUrl;
         s += "\n";
     }
+    if (!app.urlRules.empty()) {
+        s += "url rules:\n";
+        for (const UrlRule& rule : app.urlRules) {
+            s += "  " + rule.pattern.text() +
+                 (rule.kind == UrlRule::Kind::Redirect ? "  redirect " + std::to_string(rule.status) : "  rewrite") +
+                 "  " + rule.target.text() + "\n";
+        }
+    }
     if (!app.templates.fragments().empty()) {
         s += "fragments:\n";
         for (const auto& [name, t] : app.templates.fragments()) {
@@ -431,16 +439,48 @@ bool isValidChannelName(const std::string& name) {
     return true;
 }
 
+bool rulePathCovers(const std::string& rule, const std::string& url) {
+    if (rule == "/") return true;
+    return url == rule || (url.size() > rule.size() && url.compare(0, rule.size(), rule) == 0 && url[rule.size()] == '/');
+}
+
+const UrlRule* CompiledApp::matchUrlRule(const UrlPath& path, UrlValues& values) const {
+    for (const UrlRule& rule : urlRules) {
+        if (rule.pattern.match(path, values)) return &rule;
+    }
+    values.clear();
+    return nullptr;
+}
+
+RouteEntry CompiledApp::rewriteEntry(const RouteEntry& entry, const std::string& routeUrl,
+                                     const std::string& visitorPath) const {
+    RouteEntry out = entry;
+    for (const AccessRule& rule : accessRules) {
+        if (!rulePathCovers(rule.path, visitorPath) || rulePathCovers(rule.path, routeUrl)) continue;
+        if (rule.isPublic) continue;
+        out.access.require(rule.anyOf);
+        out.accessSources.push_back("code/access.ms: " + rule.path);
+    }
+    for (const PathLimitRule& rule : limitRules) {
+        if (!rulePathCovers(rule.path, visitorPath) || rulePathCovers(rule.path, routeUrl)) continue;
+        out.limits.insert(out.limits.end(), rule.rates.begin(), rule.rates.end());
+        out.limitSources.push_back(rule.source);
+        out.minSeconds = std::max(out.minSeconds, rule.minSeconds);
+        if (rule.maxAgeSeconds > 0) {
+            out.maxAgeSeconds = out.maxAgeSeconds > 0 ? std::min(out.maxAgeSeconds, rule.maxAgeSeconds) : rule.maxAgeSeconds;
+        }
+        out.challenge = out.challenge || rule.challenge;
+    }
+    return out;
+}
+
 std::optional<AccessLevel> CompiledApp::channelAccess(const std::string& name, std::vector<std::string>* sources) const {
     if (!isValidChannelName(name)) return std::nullopt;
     std::string url = kLivePrefix + name;
     AccessLevel level;
     bool covered = false;
     for (const AccessRule& rule : accessRules) {
-        bool covers = rule.path == "/" || url == rule.path ||
-                      (url.size() > rule.path.size() && url.compare(0, rule.path.size(), rule.path) == 0 &&
-                       url[rule.path.size()] == '/');
-        if (!covers) continue;
+        if (!rulePathCovers(rule.path, url)) continue;
         covered = true;
         if (sources) sources->push_back("code/access.ms: " + rule.path);
         if (!rule.isPublic) level.require(rule.anyOf);

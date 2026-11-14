@@ -6,7 +6,10 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 
+#include <cstdlib>
+#include <filesystem>
 #include <map>
+#include <unistd.h>
 
 #include "doctest.h"
 #include "httpserver/http_server.h"
@@ -428,6 +431,92 @@ TEST_CASE("HttpServer: HTTP/2 when ALPN chooses it") {
         CHECK(c2.responses[id].body.empty());
         CHECK_EQ(c2.responses[id].headers.count("connection"), 0u);
         CHECK_EQ(c2.responses[id].headers["x-mine"], "1");
+    }
+}
+
+namespace {
+
+// A body source that has nothing every other read, and wakes its reader
+// from the loop a moment later, as fourfold front's does while waiting for
+// an engine (M11.2).
+struct TrickleSource : BodySource {
+    EventLoop& loop;
+    std::string data;
+    size_t at = 0;
+    bool ready = false;
+    std::function<void()> wake;
+    TrickleSource(EventLoop& l, std::string d) : loop(l), data(std::move(d)) {}
+    uint64_t size() const override { return data.size(); }
+    Status read(std::string& out, size_t max) override {
+        if (at == data.size()) return Status::End;
+        if (!ready) {
+            ready = true;
+            loop.post([this] {
+                if (wake) wake();
+            });
+            return Status::Wait;
+        }
+        ready = false;
+        size_t n = std::min<size_t>({max, data.size() - at, 10000});
+        out.append(data, at, n);
+        at += n;
+        return Status::Data;
+    }
+    void setWake(std::function<void()> w) override { wake = std::move(w); }
+};
+
+}  // namespace
+
+TEST_CASE("HttpServer: response bodies from a source, over HTTP/2 and HTTP/1.1 (M11.2)") {
+    std::string big(1500 * 1000 + 3, '\0');
+    for (size_t i = 0; i < big.size(); i++) big[i] = static_cast<char>('a' + (i * 17 + i / 1009) % 26);
+    std::shared_ptr<TrickleSource> trickle;
+    Server* self = nullptr;
+    Server s({}, [&](HttpRequest request, Responder respond) {
+        HttpResponse r;
+        if (request.target == "/trickle") {
+            trickle = std::make_shared<TrickleSource>(*self->loop, big.substr(0, 200000));
+            r.source = trickle;
+        } else {
+            // A file: a pipe can't be read with pread, so a temporary file.
+            std::string name = (std::filesystem::temp_directory_path() / "ff-source-XXXXXX").string();
+            int fd = ::mkstemp(name.data());
+            REQUIRE(fd >= 0);
+            ::unlink(name.c_str());
+            REQUIRE(::write(fd, big.data(), big.size()) == static_cast<ssize_t>(big.size()));
+            r.source = fileBodySource(Fd(fd), 1000, big.size() - 1000);
+        }
+        respond(std::move(r));
+    });
+    self = &s;
+    s.server->setTls(testTls());
+
+    SUBCASE("HTTP/2: the stream's window is refilled as the client reads") {
+        TlsClient tls(s, {"h2"});
+        REQUIRE(tls.handshake());
+        H2Client h2(tls);
+        int32_t a = h2.request("GET", "/file");
+        int32_t b = h2.request("GET", "/trickle");
+        h2.until([&] { return h2.closed(a) && h2.closed(b); }, 20000);
+        REQUIRE(h2.closed(a));
+        CHECK_EQ(h2.responses[a].headers["content-length"], std::to_string(big.size() - 1000));
+        CHECK(h2.responses[a].body == big.substr(1000));
+        REQUIRE(h2.closed(b));
+        CHECK_EQ(h2.responses[b].error, 0u);
+        CHECK(h2.responses[b].body == big.substr(0, 200000));
+        int32_t head = h2.request("HEAD", "/file");
+        h2.until([&] { return h2.closed(head); });
+        CHECK_EQ(h2.responses[head].headers["content-length"], std::to_string(big.size() - 1000));
+        CHECK(h2.responses[head].body.empty());
+    }
+    SUBCASE("HTTP/1.1: a source that waits") {
+        TlsClient tls(s, {"http/1.1"});
+        REQUIRE(tls.handshake());
+        tls.send("GET /trickle HTTP/1.1\r\nHost: example.com\r\n\r\n");
+        std::string expected = big.substr(0, 200000);
+        for (int i = 0; i < 20000 && !contains(tls.received, expected); i++) tls.pump();
+        CHECK(contains(tls.received, "\r\nContent-Length: 200000\r\n"));
+        CHECK(contains(tls.received, "\r\n\r\n" + expected));
     }
 }
 

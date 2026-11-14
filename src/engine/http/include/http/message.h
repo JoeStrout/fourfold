@@ -3,10 +3,14 @@
 // structs, so the engine can't tell which transport a request came from.
 #pragma once
 
+#include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
+
+#include "base/fd.h"
 
 namespace fourfold {
 
@@ -61,10 +65,43 @@ public:
     virtual bool isOpen() const = 0;
 };
 
+// A response body of known length that the transport reads a piece at a
+// time, as it can send it (M11.2): a large static file, read from disk; or a
+// large response `fourfold front` passes on from an engine as it arrives.
+// Its methods are called on the transport's thread.
+class BodySource {
+public:
+    enum class Status {
+        Data,     // bytes were appended
+        End,      // the whole body has been read
+        Wait,     // nothing yet: the wake function is called when there may be
+        Failed,   // the body can't be finished; the transport closes the connection
+    };
+    virtual ~BodySource() = default;
+    // The body's length in bytes: its Content-Length.
+    virtual uint64_t size() const = 0;
+    // Appends at most `max` bytes to `out`.
+    virtual Status read(std::string& out, size_t max) = 0;
+    // Sets what to call when a read that said Wait may make progress. Sources
+    // that never wait ignore it.
+    virtual void setWake(std::function<void()> wake) { (void)wake; }
+};
+
+// Bytes [offset, offset + length) of an open file. Fails if the file ends
+// sooner (it was cut short while being sent).
+std::shared_ptr<BodySource> fileBodySource(Fd fd, uint64_t offset, uint64_t length);
+
+// Reads all of `source` into `out` (for transports and tests that can't
+// stream). False if it fails, waits, or would pass `maxBytes`.
+bool readWholeBody(BodySource& source, std::string& out, size_t maxBytes);
+
 struct HttpResponse {
     int status = 200;
     Headers headers;
     std::string body;
+    // If set, the body is read from here instead (`body` is empty), and its
+    // size is the Content-Length.
+    std::shared_ptr<BodySource> source;
     // If set, the body is streamed instead: after the headers are sent, the
     // transport calls this, on its own thread, with the writer to send the
     // body through. The connection ends when the stream does.
@@ -76,5 +113,14 @@ struct HttpResponse {
 
 // "OK", "Not Found", …; "Unknown" for codes we don't list.
 const char* statusReason(int status);
+
+// The length of the response's body: its source's size, or its body's.
+uint64_t bodySize(const HttpResponse& response);
+
+// An HTTP date (RFC 9110 §5.6.7, IMF-fixdate): "Sun, 06 Nov 1994 08:49:37 GMT".
+std::string httpDate(int64_t unixSeconds);
+// Reads one: IMF-fixdate, or the obsolete RFC 850 and asctime forms, which
+// recipients must also accept. nullopt if it's none of them.
+std::optional<int64_t> parseHttpDate(const std::string& text);
 
 }  // namespace fourfold

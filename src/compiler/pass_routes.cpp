@@ -54,6 +54,32 @@ void addRoute(CompiledApp& app, Diagnostics& diagnostics, const std::string& url
     app.routes.add(url, std::move(entry));
 }
 
+// A static file's route, with its cache rule (code/static.ms's maxAge,
+// the most specific that covers it).
+void addStatic(CompiledApp& app, Diagnostics& diagnostics, const CodeEntry& file, const std::string& url,
+               const std::string& type, bool sandbox) {
+    // The engine's default limit; files past it aren't served (see CodeTree::open).
+    if (file.size > CodeTreeLimits{}.maxStaticFileBytes) {
+        diagnostics.warning(codeFileName(file.path), "is over " +
+                                                         std::to_string(CodeTreeLimits{}.maxStaticFileBytes >> 20) +
+                                                         " MB, too large to serve; not served");
+        return;
+    }
+    StaticFile info{type, file.size, file.modifiedNs, sandbox};
+    CacheRule* best = nullptr;
+    for (CacheRule& rule : app.cacheRules) {
+        if (!rulePathCovers(rule.path, url)) continue;
+        if (!best || rule.path.size() > best->path.size()) best = &rule;
+    }
+    if (best) {
+        best->used = true;
+        info.maxAgeSeconds = best->seconds;
+    }
+    size_t before = app.routes.size();
+    addRoute(app, diagnostics, url, {RouteKind::Static, file.path});
+    if (app.routes.size() > before) app.statics.add(file.path, std::move(info));
+}
+
 std::string_view stemOf(const RelPath& path) {
     std::string_view name = path.name();
     return name.substr(0, name.size() - path.extension().size());
@@ -210,12 +236,14 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
             if (!app.routes.find(url)) markdownRoutes.push_back(url);
             addRoute(app, diagnostics, url, std::move(entry));
         } else if (const char* type = contentTypeForExtension(extension)) {
-            addRoute(app, diagnostics, urlFor(segments, name), {RouteKind::Static, file.path});
-            app.statics.add(file.path, {type, file.size, file.modifiedNs});
+            addStatic(app, diagnostics, file, urlFor(segments, name), type, false);
+        } else if (auto added = app.addedTypes.find(extension); added != app.addedTypes.end()) {
+            addStatic(app, diagnostics, file, urlFor(segments, name), added->second.contentType, added->second.sandbox);
         } else {
             diagnostics.warning(fileName, extension.empty()
                                               ? "file has no extension, so no known type; not served"
-                                              : "unknown file type " + extension + "; not served");
+                                              : "unknown file type " + extension +
+                                                    "; not served (code/static.ms can add it)");
         }
     }
 
@@ -231,6 +259,12 @@ void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers
         app.routes.addMarkdownAlias(alias, url);
     }
 
+    for (const CacheRule& rule : app.cacheRules) {
+        if (!rule.used) {
+            diagnostics.warning("code/static.ms", "maxAge[\"" + rule.path +
+                                                      "\"] covers no static file (was a folder renamed?)");
+        }
+    }
     if (!anyPages) diagnostics.warning("code/pages", "no pages found; the app serves nothing");
 }
 

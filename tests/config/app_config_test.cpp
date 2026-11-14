@@ -314,6 +314,15 @@ TEST_CASE("config: headers, with CSP additions (M11)") {
     CHECK_FALSE(contains(h.permissionsPolicy, "geolocation=()"));
     CHECK(contains(h.permissionsPolicy, "camera=()"));
 
+    // Web builds (M11.2): WebAssembly, and Unity's older loader's blob: scripts.
+    f.write("app.ms",
+            "config = {}\n"
+            "config.headers = {\"webAssembly\": true, \"csp\": {\"script\": [\"blob:\", \"https://cdn.example.com\"]}}\n");
+    load = f.load(ConfigMode::Serve);
+    REQUIRE_MESSAGE(load.ok(), all(load));
+    CHECK_EQ(load.config->headers.cspBeforeNonce,
+             "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob: https://cdn.example.com");
+
     f.write("app.ms", "config = {}\nconfig.headers = {\"frameAncestors\": [\"self\"], \"hsts\": false}\n");
     load = f.load(ConfigMode::Serve);
     REQUIRE(load.ok());
@@ -323,6 +332,9 @@ TEST_CASE("config: headers, with CSP additions (M11)") {
     for (const char* bad : {"config.headers = {\"csp\": {\"script\": [\"'unsafe-inline'\"]}}",
                             "config.headers = {\"csp\": {\"script\": [\"'unsafe-eval'\"]}}",
                             "config.headers = {\"csp\": {\"script\": [\"https:\"]}}",
+                            "config.headers = {\"csp\": {\"script\": [\"data:\"]}}",
+                            "config.headers = {\"csp\": {\"script\": [\"'wasm-unsafe-eval'\"]}}",
+                            "config.headers = {\"webAssembly\": \"yes\"}",
                             "config.headers = {\"csp\": {\"script\": [\"*\"]}}",
                             "config.headers = {\"csp\": {\"style\": [\"a; script-src *\"]}}",
                             "config.headers = {\"csp\": {\"img\": [\"javascript:\"]}}",

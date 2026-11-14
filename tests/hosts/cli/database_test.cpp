@@ -278,7 +278,7 @@ TEST_CASE("database: dev mode migrates, seeds, and serves named queries") {
     CHECK_EQ(statusOf(reset), 303);
     CHECK(contains(get(r.port(), "/__dev/migrations"), "Reset: ran 2 migration(s), then code/seed.ms."));
     CHECK_EQ(bodyText(get(r.port(), "/notes/list")),
-             "[{\"id\":1,\"stars\":1,\"text\":\"first\"},{\"id\":2,\"stars\":1,\"text\":\"seeded\"}]");
+             "[{\"id\":1,\"text\":\"first\",\"stars\":1},{\"id\":2,\"text\":\"seeded\",\"stars\":1}]");
 }
 
 namespace {

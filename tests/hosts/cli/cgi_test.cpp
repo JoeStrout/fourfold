@@ -127,3 +127,50 @@ TEST_CASE("fourfold cgi-setup: the entry point and .htaccess, outside the app") 
     CHECK(cli::run({"cgi-setup", dir.at("www/app"), dir.at("www"), "--binary", binary}, out, err3) == 1);
     CHECK(contains(err3.str(), "inside the web root"));
 }
+
+TEST_CASE("fourfold cgi: a rewrite runs its target's code, from a cached version (M11.2)") {
+    TempDir dir;
+    AppFolder::open(dir.at("app"), AppFolder::Missing::Create).value();
+    dir.write("app/code/pages/index.html", "<!DOCTYPE html><html><body>hello</body></html>");
+    dir.write("app/code/pages/tryit/index.html", "<!DOCTYPE html><html><body>code={{code}}</body></html>");
+    dir.write("app/code/pages/tryit/index.ms", "render = function(req)\n  return {\"code\": req.query.s}\nend function\n");
+    dir.write("app/code/routes.ms", "rewrites = {}\nrewrites[\"/tryit/{code}\"] = \"/tryit/?s={code}\"\n"
+                                    "redirects = {}\nredirects[\"/w/{rest*}\"] = \"https://wiki.example.org/{rest}\"\n");
+    // The first request compiles everything; later ones compile only the
+    // code their URL runs, found through the rewrite.
+    for (int i = 0; i < 2; i++) {
+        std::string response = cgi(dir, {{"REQUEST_URI", "/tryit/AbCd1234"}});
+        CHECK_MESSAGE(response.rfind("Status: 200 OK\r\n", 0) == 0, response);
+        CHECK_MESSAGE(contains(response, "code=AbCd1234"), response);
+    }
+    std::string response = cgi(dir, {{"REQUEST_URI", "/w/Main_Page"}});
+    CHECK_MESSAGE(response.rfind("Status: 301", 0) == 0, response);
+    CHECK(contains(response, "Location: https://wiki.example.org/Main_Page\r\n"));
+}
+
+TEST_CASE("fourfold cgi: a large static file, a piece at a time, with ranges and 304s (M11.2)") {
+    TempDir dir;
+    AppFolder::open(dir.at("app"), AppFolder::Missing::Create).value();
+    dir.write("app/code/pages/index.html", "<!DOCTYPE html><html><body>hello</body></html>");
+    std::string big(600 * 1000 + 1, '\0');
+    for (size_t i = 0; i < big.size(); i++) big[i] = static_cast<char>('a' + (i * 3 + i / 101) % 26);
+    dir.write("app/code/pages/files/big.zip", big);
+    std::string response = cgi(dir, {{"REQUEST_URI", "/files/big.zip"}});
+    CHECK(response.rfind("Status: 200 OK\r\n", 0) == 0);
+    CHECK(contains(response, "Content-Length: " + std::to_string(big.size()) + "\r\n"));
+    CHECK(response.substr(response.find("\r\n\r\n") + 4) == big);
+    std::string etag = response.substr(response.find("ETag: ") + 6);
+    etag.resize(etag.find("\r\n"));
+
+    response = cgi(dir, {{"REQUEST_URI", "/files/big.zip"}, {"HTTP_RANGE", "bytes=500000-"}});
+    CHECK(response.rfind("Status: 206", 0) == 0);
+    CHECK(contains(response, "Content-Range: bytes 500000-600000/600001\r\n"));
+    CHECK(response.substr(response.find("\r\n\r\n") + 4) == big.substr(500000));
+
+    response = cgi(dir, {{"REQUEST_URI", "/files/big.zip"}, {"HTTP_IF_NONE_MATCH", etag}});
+    CHECK(response.rfind("Status: 304", 0) == 0);
+
+    response = cgi(dir, {{"REQUEST_URI", "/files/big.zip"}, {"REQUEST_METHOD", "HEAD"}});
+    CHECK(contains(response, "Content-Length: " + std::to_string(big.size()) + "\r\n"));
+    CHECK(response.size() == response.find("\r\n\r\n") + 4);
+}

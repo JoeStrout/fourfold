@@ -59,10 +59,22 @@ std::map<RelPath, PageHandlers> scriptsPass(const CodeListing& listing, const Co
                                             const CompileOptions& options, DatabaseSources database,
                                             CompiledApp& app, Diagnostics& diagnostics);
 
+// code/static.ms (M11.2): added file types into app.addedTypes, and
+// maxAge rules into app.cacheRules. Before the routes pass, which uses them.
+void staticPass(const CodeListing& listing, const CodeTree& code, DataEvaluator* evaluator, CompiledApp& app,
+                Diagnostics& diagnostics);
+
 // Routes for code/pages/: pages, handlers, static files, and the 404 and 500
 // pages.
 void routesPass(const CodeListing& listing, const std::map<RelPath, PageHandlers>& handlers, CompiledApp& app,
                 Diagnostics& diagnostics);
+
+// URL rules (M11.2): code/routes.ms's redirects and rewrites (evaluated by
+// `evaluator`) into app.urlRules, each rewrite's target checked against the
+// routes. After the routes pass; before the access and limits passes, which
+// count a rule covering a rewrite's URLs as used.
+void urlRulesPass(const CodeListing& listing, const CodeTree& code, DataEvaluator* evaluator, CompiledApp& app,
+                  Diagnostics& diagnostics);
 
 // Parses the .md pages in code/pages/ into app.templates, rewriting links
 // between them and warning about links to routes that don't exist. After the

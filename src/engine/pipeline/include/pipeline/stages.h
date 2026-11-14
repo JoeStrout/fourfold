@@ -131,7 +131,7 @@ std::string clientAddress(const HttpRequest& request, const std::vector<AddressR
 struct RouteDecision {
     enum class Kind {
         Found,
-        Redirect,           // to the route's canonical URL (trailing slash or not)
+        Redirect,           // to the route's canonical URL (trailing slash or not), or a redirect rule's
         NotFound,
         MethodNotAllowed,
     };
@@ -139,6 +139,14 @@ struct RouteDecision {
     const RouteEntry* entry = nullptr;     // when Found
     const HandlerRef* handler = nullptr;   // when Found, if script code handles it
     std::string location;                  // when Redirect
+    int status = 302;                      // when Redirect
+    // The URL rule (code/routes.ms, M11.2) that decided, if one did.
+    const UrlRule* rule = nullptr;
+    // When Found by a rewrite: the target's entry with the visitor URL's
+    // access rules and limits added (`entry` points into it), and the query
+    // `req.query` is read from: the target's, then the visitor's.
+    std::shared_ptr<const RouteEntry> rewritten;
+    std::optional<std::string> query;
     std::string allow;                     // when MethodNotAllowed: "GET, HEAD, POST"
     // When Found, for a Markdown page: the response is its Markdown (the
     // request was for /about.md, not /about).
@@ -194,8 +202,20 @@ void setRenderFormat(RenderOptions& render, const RouteDecision& decision);
 // ScriptHost.
 // `fields` fills a page template's fields (a code-less page's {{flash}});
 // null leaves them empty. A page (RouteKind::Page) never reads `code`.
+// `request`, if given, is for a static file's conditional and range
+// requests.
 HttpResponse dispatch(const RouteDecision& decision, const CompiledApp& app, const CodeTree& code,
-                      const RenderOptions& render, const FieldSource* fields = nullptr);
+                      const RenderOptions& render, const FieldSource* fields = nullptr,
+                      const HttpRequest* request = nullptr);
+
+// A static file (M11.2): with ETag and Last-Modified, a 304 for a matching
+// If-None-Match or If-Modified-Since, one byte range (206, 416; If-Range),
+// and a streamed body (HttpResponse::source) past a few hundred KB. A 404 if
+// the file has gone. Its Cache-Control is public with max-age if
+// code/static.ms gives it one; an added XML type asks for a CSP sandbox by
+// setting Content-Security-Policy to "sandbox" (see addStandardHeaders).
+HttpResponse serveStatic(const RouteEntry& entry, const CompiledApp& app, const CodeTree& code,
+                         const HttpRequest* request);
 
 // --- Respond: turn results into responses. ---
 
@@ -215,6 +235,9 @@ bool isHtmxRequest(const HttpRequest& request);
 // Security headers (overview §8, "Security headers by default") and cache
 // rules, with `nonce` in the CSP's script-src: only <script> elements the
 // engine rendered (which all carry it) run, and same-origin script files.
+// A response whose Content-Security-Policy is already "sandbox" keeps the
+// sandbox, ahead of the rest of the policy. A Cache-Control already set is
+// kept; otherwise it's no-cache.
 // `headers`: the config's (null: the defaults). HSTS only if `hsts`
 // (production, over HTTPS).
 void addStandardHeaders(HttpResponse& response, const std::string& nonce, const HeadersConfig* headers, bool hsts);

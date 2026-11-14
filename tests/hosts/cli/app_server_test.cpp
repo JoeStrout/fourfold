@@ -236,7 +236,7 @@ TEST_CASE("AppServer: edits show up live, and errors show while the old version 
     CHECK(contains(get(port, "/__dev/client.js"), "EventSource"));
 
     EventStreamClient events(port);
-    REQUIRE(events.waitFor("event: hello\ndata: {\"diagnostics\":[],\"generation\":1,\"warnings\":[]}", std::chrono::seconds(2)));
+    REQUIRE(events.waitFor("event: hello\ndata: {\"generation\":1,\"diagnostics\":[],\"warnings\":[]}", std::chrono::seconds(2)));
     CHECK(contains(events.received, "Content-Type: text/event-stream\r\n"));
 
     // An edit to the code: a reload event within about two seconds.
@@ -268,7 +268,8 @@ TEST_CASE("AppServer: edits show up live, and errors show while the old version 
 
     // A page opened now hears about the errors at once.
     EventStreamClient late(port);
-    REQUIRE(late.waitFor("event: hello\ndata: {\"diagnostics\":[{", std::chrono::seconds(2)));
+    REQUIRE(late.waitFor("event: hello\ndata: {\"generation\":", std::chrono::seconds(2)));
+    REQUIRE(late.waitFor(",\"diagnostics\":[{", std::chrono::seconds(2)));
 
     // Fixed: reload, to the new version.
     mark = events.received.size();
@@ -312,7 +313,7 @@ TEST_CASE("AppServer: an app that doesn't compile starts anyway, and serves once
     CHECK(contains(page, "HTTP/1.1 503 "));
     CHECK(contains(page, "data-generation=\"0\""));
     EventStreamClient events(port);
-    REQUIRE(events.waitFor("event: hello\ndata: {\"diagnostics\":[{", std::chrono::seconds(2)));
+    REQUIRE(events.waitFor("event: hello\ndata: {\"generation\":0,\"diagnostics\":[{", std::chrono::seconds(2)));
 
     size_t mark = events.received.size();
     app.write("pages/index.ms", kHelloMs);

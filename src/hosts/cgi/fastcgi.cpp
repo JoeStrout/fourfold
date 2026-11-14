@@ -73,15 +73,18 @@ std::string encodeRecord(uint8_t type, uint16_t requestId, std::string_view cont
     return out;
 }
 
-std::string encodeStream(uint8_t type, uint16_t requestId, std::string_view data) {
+std::string encodeStreamPart(uint8_t type, uint16_t requestId, std::string_view data) {
     std::string out;
     while (!data.empty()) {
         size_t n = std::min(data.size(), kChunk);
         out += encodeRecord(type, requestId, data.substr(0, n));
         data.remove_prefix(n);
     }
-    out += encodeRecord(type, requestId, {});
     return out;
+}
+
+std::string encodeStream(uint8_t type, uint16_t requestId, std::string_view data) {
+    return encodeStreamPart(type, requestId, data) + encodeRecord(type, requestId, {});
 }
 
 std::string encodeEndRequest(uint16_t requestId, uint32_t appStatus, uint8_t protocolStatus) {
@@ -246,8 +249,25 @@ Status serveConnection(int fd, const Handler& handle, const CgiLimits& limits) {
             HttpResponse response = current->tooLarge  ? HttpResponse::text(413, "Payload Too Large\n")
                                     : current->badLength ? HttpResponse::text(400, "Bad Request\n")
                                                          : handle(current->vars, std::move(current->body));
-            std::string out = encodeStream(kStdout, current->id, cgiResponse(response));
-            out += encodeEndRequest(current->id, 0, kRequestComplete);
+            // The body a piece at a time, so a large static file isn't held
+            // in memory (M11.2); none for HEAD.
+            uint16_t id = current->id;
+            std::string out = encodeStreamPart(kStdout, id, cgiResponseHead(response));
+            Status written;
+            bool complete = true;
+            if (!cgiHead(current->vars)) {
+                complete = writeCgiBody(response, [&](std::string_view piece) {
+                    out += encodeStreamPart(kStdout, id, piece);
+                    if (out.size() < 64 * 1024) return true;
+                    written = writeAll(fd, out);
+                    out.clear();
+                    return static_cast<bool>(written);
+                });
+            }
+            if (!written) return written;
+            if (!complete) return makeError(ErrorCode::IO, "a response body couldn't be read; the connection ends");
+            out += encodeRecord(kStdout, id, {});
+            out += encodeEndRequest(id, 0, kRequestComplete);
             bool keep = current->keepConn;
             current.reset();
             if (Status s = writeAll(fd, out); !s) return s;

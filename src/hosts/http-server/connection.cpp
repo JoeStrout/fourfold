@@ -13,6 +13,8 @@ namespace {
 constexpr size_t kReadChunk = 16 * 1024;
 constexpr std::chrono::milliseconds kDrainTimeout{2000};
 constexpr std::chrono::milliseconds kBodyCheckInterval{1000};
+// A response body from a source is sent this much at a time (M11.2).
+constexpr size_t kBodyPieceBytes = 64 * 1024;
 
 bool hasLineBreak(const std::string& s) {
     return s.find_first_of("\r\n") != std::string::npos;
@@ -98,6 +100,7 @@ void HttpConnection::close() {
     loop_.unwatch(fd_.get());
     fd_.reset();
     releaseStream();
+    bodySource_.reset();
     if (h2_) h2_->closed();
     server_.removeConnection(this);
 }
@@ -142,7 +145,8 @@ void HttpConnection::updateInterest() {
             interest |= io::kReadable;
             break;
         case State::Writing:
-            interest = io::kWritable;
+            // Nothing to write while a body source has nothing yet.
+            interest = bodyWaiting_ && !pending ? 0 : io::kWritable;
             break;
         case State::Handling:
         case State::Closed:
@@ -323,7 +327,7 @@ void HttpConnection::respond(HttpResponse response) {
         if (isFramingHeader(f.name) || hasLineBreak(f.name) || hasLineBreak(f.value)) continue;
         out += f.name + ": " + f.value + "\r\n";
     }
-    if (mayHaveBody && !streamed) out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n";
+    if (mayHaveBody && !streamed) out += "Content-Length: " + std::to_string(bodySize(response)) + "\r\n";
     if (closeAfterWrite_) {
         out += "Connection: close\r\n";
     } else if (http10_) {
@@ -331,7 +335,19 @@ void HttpConnection::respond(HttpResponse response) {
         out += "Connection: keep-alive\r\n";
     }
     out += "\r\n";
-    if (mayHaveBody && !headRequest_ && !streamed) out += response.body;
+    if (mayHaveBody && !headRequest_ && !streamed) {
+        if (response.source) {
+            // Read a piece at a time, as the client takes it.
+            bodySource_ = std::move(response.source);
+            bodyWaiting_ = false;
+            std::weak_ptr<HttpConnection> weak = weak_from_this();
+            bodySource_->setWake([weak] {
+                if (auto c = weak.lock()) c->resumeBody();
+            });
+        } else {
+            out += response.body;
+        }
+    }
     queue(out);
 
     state_ = State::Writing;
@@ -403,6 +419,14 @@ void HttpConnection::flush() {
         }
         // HTTP/2 makes its output as there's room for it.
         if (state_ == State::Http2 && h2_->produce()) continue;
+        if (state_ == State::Writing && bodySource_) {
+            if (pullBody()) continue;
+            if (state_ == State::Closed) return;
+            if (bodySource_) {   // waiting for the source
+                updateInterest();
+                return;
+            }
+        }
         break;
     }
     switch (state_) {
@@ -438,6 +462,34 @@ void HttpConnection::flush() {
             break;
     }
     updateInterest();
+}
+
+bool HttpConnection::pullBody() {
+    std::string piece;
+    BodySource::Status status = bodySource_->read(piece, kBodyPieceBytes);
+    switch (status) {
+        case BodySource::Status::Data:
+            queue(piece);
+            return true;
+        case BodySource::Status::End:
+            bodySource_.reset();
+            return false;
+        case BodySource::Status::Wait:
+            bodyWaiting_ = true;
+            return false;
+        case BodySource::Status::Failed:
+            // The Content-Length was promised; closing tells the client the
+            // body is short.
+            close();
+            return false;
+    }
+    return false;
+}
+
+void HttpConnection::resumeBody() {
+    if (state_ != State::Writing || !bodySource_ || !bodyWaiting_) return;
+    bodyWaiting_ = false;
+    flush();
 }
 
 void HttpConnection::finishResponse() {

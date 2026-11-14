@@ -715,3 +715,234 @@ TEST_CASE("compile: every example compiles, with no errors") {
         CHECK_MESSAGE(out.ok(), allDiagnostics(out));
     }
 }
+
+// --- URL rules, code/routes.ms (M11.2) ---
+
+namespace {
+
+void writeSite(TempDir& dir) {
+    dir.write("code/pages/index.html", "<!DOCTYPE html><html><body>home</body></html>");
+    dir.write("code/pages/tryit/index.html", "<!DOCTYPE html><html><body>{{code}}</body></html>");
+    dir.write("code/pages/tryit/index.ms", "render = function(req)\n  return {\"code\": req.query.s}\nend function\n");
+    dir.write("code/pages/img/favicon/favicon.ico", "ico");
+    dir.write("code/pages/about.md", "# About\n");
+    dir.write("code/pages/api.ms", "post.save = function(req)\nend function\nget.load = function(req)\nend function\n");
+}
+
+}  // namespace
+
+TEST_CASE("compile: routes.ms's redirects and rewrites, in order") {
+    TempDir dir;
+    writeSite(dir);
+    dir.write("code/routes.ms",
+              "redirects = {}\n"
+              "redirects[\"/wiki/{rest*}\"] = \"https://wiki.miniscript.org/wiki/{rest}\"\n"
+              "redirects[\"/old-news\"] = {\"to\": \"/about\", \"status\": 302}\n"
+              "rewrites = {}\n"
+              "rewrites[\"/tryit/{code}\"] = \"/tryit/?s={code}\"\n"
+              "rewrites[\"/favicon.ico\"] = \"/img/favicon/favicon.ico\"\n"
+              "rewrites[\"/about.txt\"] = \"/about.md\"\n"
+              "rewrites[\"/load\"] = \"/api/load\"\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    const auto& rules = out.app->urlRules;
+    REQUIRE_EQ(rules.size(), 6u);
+    CHECK_EQ(rules[0].pattern.text(), "/wiki/{rest*}");   // redirects first, in the order written
+    CHECK(rules[0].kind == UrlRule::Kind::Redirect);
+    CHECK_EQ(rules[0].status, 301);
+    CHECK_EQ(rules[1].status, 302);
+    CHECK_EQ(rules[2].pattern.text(), "/tryit/{code}");
+    CHECK(rules[2].kind == UrlRule::Kind::Rewrite);
+    CHECK_EQ(rules[2].routePath, "/tryit");
+    CHECK_EQ(rules[3].routePath, "/img/favicon/favicon.ico");
+    CHECK_EQ(rules[4].routePath, "/about.md");
+    CHECK(rules[4].markdownAlias);
+    CHECK_EQ(rules[2].source, "code/routes.ms: rewrites[\"/tryit/{code}\"]");
+    CHECK_MESSAGE(out.app->diagnostics.empty(), allDiagnostics(out));
+}
+
+TEST_CASE("compile: links to URLs routes.ms answers aren't broken") {
+    TempDir dir;
+    writeSite(dir);
+    dir.write("code/pages/links.html",
+              "<!DOCTYPE html><html><body><a href=\"wiki/\">w</a> <a href=\"/wiki/Main_Page\">m</a>"
+              " <a href=\"tryit/AbCd1234\">t</a> <img src=\"/favicon.ico\" alt=\"\">"
+              " <a href=\"/nowhere\">n</a></body></html>");
+    dir.write("code/routes.ms",
+              "redirects = {}\n"
+              "redirects[\"/wiki/{rest*}\"] = \"https://wiki.miniscript.org/wiki/{rest}\"\n"
+              "rewrites = {}\n"
+              "rewrites[\"/tryit/{code}\"] = \"/tryit/?s={code}\"\n"
+              "rewrites[\"/favicon.ico\"] = \"/img/favicon/favicon.ico\"\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    CHECK(hasDiagnostic(out, "code/pages/links.html:1: warning: href=\"/nowhere\": there's no such page or file"));
+    CHECK_MESSAGE(out.app->diagnostics.size() == 1, allDiagnostics(out));
+}
+
+TEST_CASE("compile: routes.ms's mistakes") {
+    struct Case {
+        const char* rules;
+        const char* expected;
+    };
+    const Case cases[] = {
+        {"x = 1\n", "must set `redirects` or `rewrites`"},
+        {"redirects = [1]\n", "`redirects` must be a map"},
+        {"redirects = {\"tryit\": \"/x\"}\n", "redirects[\"tryit\"]: a pattern is a URL path"},
+        {"redirects = {\"/a\": 5}\n", "a redirect is a URL, or a map"},
+        {"redirects = {\"/a\": {\"to\": \"/about\", \"status\": 303}}\n", "status must be 301, 302, 307 or 308"},
+        {"redirects = {\"/a\": {\"status\": 302}}\n", "needs \"to\""},
+        {"redirects = {\"/a\": {\"to\": \"/about\", \"why\": 1}}\n", "unknown setting \"why\""},
+        {"redirects = {\"/a/{x}\": \"https://{x}.example/\"}\n", "choose the host"},
+        {"redirects = {\"/a/{x}\": \"/b/{y}\"}\n", "{y} isn't a placeholder"},
+        {"redirects = {\"/a/{rest*}\": \"/a/x/{rest}\"}\n", ""},   // fine: a pattern (no loop check)
+        {"redirects = {\"/loop\": \"/loop\"}\n", "which it matches itself: a loop"},
+        {"rewrites = {\"/a\": \"https://example.org/\"}\n", "use a redirect"},
+        {"rewrites = {\"/a/{x}\": \"/tryit/{x}\"}\n", "its path can't have placeholders"},
+        {"rewrites = {\"/a\": \"/nowhere\"}\n", "no page, handler or file is served at /nowhere"},
+        {"rewrites = {\"/a\": \"/tryit\"}\n", "is /tryit/; write that"},
+        {"rewrites = {\"/a\": {\"to\": \"/tryit/\"}}\n", "a rewrite is a URL on this site"},
+        {"rewrites = {\"/a\": \"/api/save\"}\n", "has no get handler"},
+    };
+    for (const Case& c : cases) {
+        INFO(c.rules);
+        TempDir dir;
+        writeSite(dir);
+        dir.write("code/routes.ms", c.rules);
+        CompileOutput out = compileApp(dir.path());
+        if (std::string(c.expected).empty()) {
+            CHECK_MESSAGE(out.ok(), allDiagnostics(out));
+            continue;
+        }
+        CHECK_FALSE(out.ok());
+        CHECK_MESSAGE(contains(allDiagnostics(out), c.expected), allDiagnostics(out));
+    }
+}
+
+TEST_CASE("compile: routes.ms's warnings") {
+    TempDir dir;
+    writeSite(dir);
+    dir.write("code/pages/docs/guide.html", "<!DOCTYPE html><html><body>guide</body></html>");
+    dir.write("code/routes.ms",
+              "redirects = {}\n"
+              "redirects[\"/a/{rest*}\"] = \"/about\"\n"
+              "redirects[\"/a/b\"] = \"/about\"\n"         // shadowed by the one before
+              "redirects[\"/gone\"] = \"/nothing-here\"\n"  // to a URL nothing serves
+              "rewrites = {}\n"
+              "rewrites[\"/about\"] = \"/tryit/\"\n"         // /about is a page: never applies
+              "rewrites[\"/a/c\"] = \"/tryit/\"\n"           // shadowed by a redirect
+              "rewrites[\"/x/y/z\"] = \"/docs/guide\"\n");   // another folder: relative links break
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    std::string all = allDiagnostics(out);
+    CHECK_MESSAGE(contains(all, "redirects[\"/a/b\"]: never reached: redirects[\"/a/{rest*}\"] comes first"), all);
+    CHECK_MESSAGE(contains(all, "redirects[\"/gone\"]: redirects to /nothing-here, which nothing serves"), all);
+    CHECK_MESSAGE(contains(all, "rewrites[\"/about\"]: never applies: /about is served by code/pages/about.md"), all);
+    CHECK_MESSAGE(contains(all, "rewrites[\"/a/c\"]: never reached: redirects[\"/a/{rest*}\"] comes first and matches "
+                                "every URL this does (redirects are checked before rewrites)"),
+                  all);
+    CHECK_MESSAGE(contains(all, "rewrites[\"/x/y/z\"]: the page's relative links resolve against /docs/, but the "
+                                "visitor's URL is in /x/y/"),
+                  all);
+}
+
+TEST_CASE("compile: access and limits rules covering only a rewrite's URLs are used") {
+    TempDir dir;
+    writeSite(dir);
+    dir.write("code/routes.ms", "rewrites = {}\nrewrites[\"/s/{code}\"] = \"/tryit/?s={code}\"\n");
+    dir.write("code/access.ms", "rules = {}\nrules[\"/s\"] = \"login\"\n");
+    dir.write("code/limits.ms", "limits = {}\nlimits[\"/s\"] = \"10/minute\"\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    CHECK_MESSAGE(!contains(allDiagnostics(out), "covers no page"), allDiagnostics(out));
+    REQUIRE_EQ(out.app->limitRules.size(), 1u);
+    CHECK_EQ(out.app->limitRules[0].source, "code/limits.ms: /s");
+
+    // The rewrite's entry: the target's, plus the rules for the visitor's URL.
+    const RouteEntry* tryit = out.app->routes.find("/tryit");
+    REQUIRE(tryit);
+    CHECK(tryit->access.isPublic());
+    RouteEntry e = out.app->rewriteEntry(*tryit, "/tryit", "/s/abc");
+    CHECK_EQ(e.access.describe(), "login");
+    REQUIRE_EQ(e.limits.size(), 1u);
+    CHECK_EQ(e.limits[0].describe(), "10/minute per ip");
+    CHECK(out.app->rewriteEntry(*tryit, "/tryit", "/t/abc").access.isPublic());
+}
+
+// --- Static files: code/static.ms (M11.2) ---
+
+TEST_CASE("compile: static.ms adds file types, and sets how long files may be cached") {
+    TempDir dir;
+    dir.write("code/pages/index.html", "<!DOCTYPE html><html><body>home</body></html>");
+    dir.write("code/pages/Build/game.unityweb", "x");
+    dir.write("code/pages/Build/game.DATA", "x");
+    dir.write("code/pages/Build/v2/loader.js", "x");
+    dir.write("code/pages/news.xml", "<rss/>");
+    dir.write("code/pages/disk.minidisk", "x");
+    dir.write("code/pages/notes.xyz", "x");
+    dir.write("code/static.ms",
+              "types = {}\n"
+              "types[\"unityweb\"] = \"application/octet-stream\"\n"
+              "types[\".data\"] = \"application/octet-stream\"\n"
+              "types[\"xml\"] = \"application/RSS+xml\"\n"
+              "types[\"minidisk\"] = \"application/octet-stream\"\n"
+              "maxAge = {}\n"
+              "maxAge[\"/Build\"] = 60 * 60\n"
+              "maxAge[\"/Build/v2\"] = 60 * 60 * 24 * 365\n"
+              "maxAge[\"/nothing\"] = 5\n");
+    CompileOutput out = compileApp(dir.path());
+    REQUIRE_MESSAGE(out.ok(), allDiagnostics(out));
+    auto info = [&](const char* path) {
+        const StaticFile* f = out.app->statics.find(RelPath::parse(path).value());
+        REQUIRE_MESSAGE(f, path);
+        return *f;
+    };
+    CHECK(route(out, "/Build/game.unityweb"));
+    CHECK_EQ(info("pages/Build/game.unityweb").contentType, "application/octet-stream");
+    CHECK_EQ(info("pages/Build/game.DATA").contentType, "application/octet-stream");   // any case
+    CHECK_EQ(*info("pages/Build/game.unityweb").maxAgeSeconds, 3600);
+    CHECK_EQ(*info("pages/Build/v2/loader.js").maxAgeSeconds, 31536000);   // the most specific rule
+    CHECK_FALSE(info("pages/disk.minidisk").maxAgeSeconds);
+    CHECK_EQ(info("pages/news.xml").contentType, "application/rss+xml");
+    CHECK(info("pages/news.xml").sandbox);
+    CHECK_FALSE(info("pages/disk.minidisk").sandbox);
+    CHECK_FALSE(route(out, "/notes.xyz"));
+    CHECK(hasDiagnostic(out, "code/static.ms: warning: maxAge[\"/nothing\"] covers no static file"));
+}
+
+TEST_CASE("compile: static.ms's mistakes") {
+    struct Case {
+        const char* text;
+        const char* expected;
+    };
+    const Case cases[] = {
+        {"x = 1\n", "must set `types`"},
+        {"types = [1]\n", "`types` must be a map"},
+        {"types = {\"png\": \"image/webp\"}\n", ".png is already served, as image/png (built-in types can't be changed)"},
+        {"types = {\"html\": \"text/plain\"}\n", ".html files are pages or code"},
+        {"types = {\"ms\": \"text/plain\"}\n", ".ms files are pages or code"},
+        {"types = {\"page\": \"text/html\"}\n", "text/html can run script as the site"},
+        {"types = {\"x\": \"application/xhtml+xml\"}\n", "can run script as the site"},
+        {"types = {\"pic\": \"image/svg+xml\"}\n", "can run script as the site"},
+        {"types = {\"code\": \"application/javascript\"}\n", "can run script as the site"},
+        {"types = {\"code\": \"text/ecmascript\"}\n", "can run script as the site"},
+        {"types = {\"xsl\": \"application/xslt+xml\"}\n", "can run script as the site"},
+        {"types = {\"a.b\": \"text/plain\"}\n", "isn't a file extension"},
+        {"types = {\"x\": \"text\"}\n", "isn't a content type"},
+        {"types = {\"x\": 5}\n", "a content type is a string"},
+        {"types = {\"x\": \"text/plain\", \"X\": \"text/plain\"}\n", ".x is given twice"},
+        {"maxAge = {\"/a/\": 5}\n", "without the trailing slash"},
+        {"maxAge = {\"/a\": -1}\n", "whole number of seconds"},
+        {"maxAge = {\"/a\": 1.5}\n", "whole number of seconds"},
+        {"maxAge = {\"/a\": \"1 day\"}\n", "whole number of seconds"},
+    };
+    for (const Case& c : cases) {
+        INFO(c.text);
+        TempDir dir;
+        dir.write("code/pages/index.html", "<!DOCTYPE html><html><body>home</body></html>");
+        dir.write("code/static.ms", c.text);
+        CompileOutput out = compileApp(dir.path());
+        CHECK_FALSE(out.ok());
+        CHECK_MESSAGE(contains(allDiagnostics(out), c.expected), allDiagnostics(out));
+    }
+}

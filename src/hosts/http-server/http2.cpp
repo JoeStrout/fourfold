@@ -281,12 +281,19 @@ void Http2Session::respond(int32_t id, HttpResponse response) {
         }
         fields.emplace_back(std::move(name), f.value);
     }
-    if (mayHaveBody && !streamed) fields.emplace_back("content-length", std::to_string(response.body.size()));
+    if (mayHaveBody && !streamed) fields.emplace_back("content-length", std::to_string(bodySize(response)));
     std::vector<nghttp2_nv> nva;
     for (const auto& [name, value] : fields) nva.push_back(nv(name, value));
 
-    bool body = streamed || (mayHaveBody && !s->head && !response.body.empty());
-    if (body && !streamed) {
+    bool body = streamed || (mayHaveBody && !s->head && bodySize(response) > 0);
+    if (body && !streamed && response.source) {
+        s->source = std::move(response.source);
+        std::weak_ptr<HttpConnection> weak = connection_.weak_from_this();
+        s->source->setWake([weak, id] {
+            auto c = weak.lock();
+            if (c && c->h2_) c->h2_->sourceReady(id);
+        });
+    } else if (body && !streamed) {
         s->out = std::move(response.body);
         s->outEnd = true;
     }
@@ -339,6 +346,13 @@ bool Http2Session::streamOpen(int32_t id) const {
     return s && s->streaming && !s->outEnd;
 }
 
+void Http2Session::sourceReady(int32_t id) {
+    Stream* s = find(id);
+    if (!s || !s->source) return;
+    resume(*s);
+    if (!busy_) connection_.flush();
+}
+
 void Http2Session::resume(Stream& s) {
     if (!s.deferred) return;
     s.deferred = false;
@@ -348,6 +362,25 @@ void Http2Session::resume(Stream& s) {
 long Http2Session::readBody(int32_t id, uint8_t* buffer, size_t length, uint32_t* flags) {
     Stream* s = find(id);
     if (!s) return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    if (s->source) {
+        // As much as the stream's window allows, read now (M11.2).
+        std::string piece;
+        switch (s->source->read(piece, length)) {
+            case BodySource::Status::Data:
+                std::memcpy(buffer, piece.data(), piece.size());
+                return static_cast<long>(piece.size());
+            case BodySource::Status::End:
+                s->source.reset();
+                *flags |= NGHTTP2_DATA_FLAG_EOF;
+                return 0;
+            case BodySource::Status::Wait:
+                s->deferred = true;
+                return NGHTTP2_ERR_DEFERRED;
+            case BodySource::Status::Failed:
+                s->source.reset();
+                return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;   // resets the stream
+        }
+    }
     size_t available = s->out.size() - s->outOffset;
     size_t n = std::min(available, length);
     if (n > 0) std::memcpy(buffer, s->out.data() + s->outOffset, n);

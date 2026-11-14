@@ -32,11 +32,6 @@ struct LimitRule {
     bool used = false;
 };
 
-bool covers(const std::string& rule, const std::string& url) {
-    if (rule == "/") return true;
-    return url == rule || (url.size() > rule.size() && url.compare(0, rule.size(), rule) == 0 && url[rule.size()] == '/');
-}
-
 // Rates from a string or a list of strings; false (with `error`) if not.
 bool readRates(const Datum& value, const std::string& key, std::vector<RateRule>& out, std::string& error) {
     std::vector<Datum> items;
@@ -159,7 +154,7 @@ void limitsPass(const CodeListing& listing, const CodeTree& code, DataEvaluator*
     for (const auto& [url, original] : app.routes) {
         RouteEntry* entry = app.routes.findForUpdate(url);
         for (LimitRule& rule : rules) {
-            if (!covers(rule.path, url)) continue;
+            if (!rulePathCovers(rule.path, url)) continue;
             rule.used = true;
             entry->limits.insert(entry->limits.end(), rule.rates.begin(), rule.rates.end());
             entry->limitSources.push_back(fileName + ": " + rule.path);
@@ -175,6 +170,17 @@ void limitsPass(const CodeListing& listing, const CodeTree& code, DataEvaluator*
                                                   entry->webhook->label() + " (" + url +
                                                   ") doesn't get: a webhook's caller isn't a browser");
             }
+        }
+    }
+    // Kept for rewrites' visitor URLs (M11.2), which aren't routes; a rule
+    // that covers one is used.
+    for (LimitRule& rule : rules) {
+        app.limitRules.push_back({rule.path, rule.rates, rule.minSeconds, rule.maxAgeSeconds, rule.challenge,
+                                  fileName + ": " + rule.path});
+        for (const UrlRule& u : app.urlRules) {
+            if (u.kind != UrlRule::Kind::Rewrite) continue;
+            std::string prefix = u.pattern.literalPrefix();
+            if (rulePathCovers(rule.path, prefix) || rulePathCovers(prefix, rule.path)) rule.used = true;
         }
     }
     for (const LimitRule& rule : rules) {

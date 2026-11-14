@@ -328,6 +328,34 @@ Datum DevTools::accessReport(const CompiledApp& app) {
                                          {"form", str("")}}));
         }
     }
+    // URL rules (code/routes.ms, M11.2), after every route, in the order
+    // they're tried. A rewrite's access is its target's plus the rules for
+    // its pattern's literal part ("/tryit" for "/tryit/{code}").
+    for (const UrlRule& rule : app.urlRules) {
+        std::string kind = rule.kind == UrlRule::Kind::Redirect
+                               ? "redirect " + std::to_string(rule.status) + " to " + rule.target.text()
+                               : "rewrite to " + rule.target.text();
+        Datum::ListItems sources{str(rule.source)};
+        std::string access = "public";
+        Datum::ListItems limits;
+        if (rule.kind == UrlRule::Kind::Rewrite) {
+            std::string routeUrl = rule.routePath;
+            const RouteEntry* target = rule.markdownAlias ? app.routes.findMarkdown(rule.routePath, &routeUrl)
+                                                          : app.routes.find(rule.routePath);
+            if (target) {
+                RouteEntry e = app.rewriteEntry(*target, routeUrl, rule.pattern.literalPrefix());
+                access = e.access.describe();
+                for (const std::string& source : e.accessSources) sources.push_back(str(source));
+                limits = limitsOf(e);
+            }
+        }
+        routes.push_back(Datum::map({{"url", str(rule.pattern.text())},
+                                     {"kind", str(kind)},
+                                     {"access", str(access)},
+                                     {"sources", Datum::list(std::move(sources))},
+                                     {"limits", Datum::list(std::move(limits))},
+                                     {"form", str("")}}));
+    }
     // Push channels (overview §7): /live/<name>, under the access.ms rules
     // that cover it. Their names aren't known until asked for, so each rule
     // at or below /live is a row, as is /live itself if a rule covers it.
@@ -358,7 +386,8 @@ Datum DevTools::accessReport(const CompiledApp& app) {
     Datum::ListItems warnings;
     for (const Diagnostic& d : app.diagnostics) {
         bool forms = d.message.find(" posts to ") != std::string::npos || d.message.find("this form posts") == 0;
-        if (d.file == "code/access.ms" || d.file == "code/limits.ms" || d.message.compare(0, 7, "access:") == 0 ||
+        if (d.file == "code/access.ms" || d.file == "code/limits.ms" || d.file == "code/routes.ms" ||
+            d.message.compare(0, 7, "access:") == 0 ||
             forms) {
             warnings.push_back(str(d.toString()));
         }

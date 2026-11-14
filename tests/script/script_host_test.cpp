@@ -307,7 +307,9 @@ TEST_CASE("ScriptHost: each kind of return value") {
             "get.empty = function(req)\n  return status(404)\nend function\n"
             "get.oops = function(req)\n  return err(\"no such entry\")\nend function\n"
             "get.map = function(req)\n  return {\"a\": 1}\nend function\n"
-            "get.num = function(req)\n  return 42\nend function\n");
+            "get.num = function(req)\n  return 42\nend function\n"
+            "get.order = function(req)\n  m = {}\n  m.zeta = 1\n  m.alpha = {\"y\": 2, \"x\": 3}\n  m.mid = 4\n"
+            "  return json(m)\nend function\n");
     s.compile();
     REQUIRE_MESSAGE(s.compiled.bundle, s.diagnostics());
 
@@ -352,6 +354,11 @@ TEST_CASE("ScriptHost: each kind of return value") {
     o = s.call("pages/r.ms", "get.num");
     REQUIRE(o.kind == HandlerOutcome::Kind::Error);
     CHECK(contains(o.error.message, "returned a number"));
+
+    // Maps keep the script's insertion order on the way out (M11.2).
+    o = s.call("pages/r.ms", "get.order");
+    REQUIRE_MESSAGE(o.kind == HandlerOutcome::Kind::Json, describe(o));
+    CHECK_EQ(o.body, "{\"zeta\":1,\"alpha\":{\"y\":2,\"x\":3},\"mid\":4}");
 }
 
 TEST_CASE("ScriptHost: redirect, json and status refuse bad arguments") {

@@ -77,7 +77,7 @@ fourfold_component(config DEPS base partition compiledapp appdata script state m
 fourfold_component(compiler DEPS base partition template markdown compiledapp script)
 
 # --- Engine ---
-fourfold_component(http DIR engine/http)           # HttpRequest/HttpResponse
+fourfold_component(http DIR engine/http DEPS base)   # HttpRequest/HttpResponse
 fourfold_component(observer DIR engine/observer DEPS base partition compiledapp script)   # events for the dev tools
 fourfold_component(policy DIR engine/policy DEPS base platform compiledapp script state)   # access, CSRF, rate limits, spam checks
 fourfold_component(push DIR engine/push DEPS base platform http)   # SSE channels and subscribers (overview §7)

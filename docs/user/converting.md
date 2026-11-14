@@ -39,14 +39,44 @@ mentioned here, like `data` and forms, arrive in later milestones.)*
   serves. The warning names the file and line, and for `x.html` links, says
   what to write instead. Converting a site, this list is a good to-do list.
 
+- **URLs no file matches any more** (old share links, a section that moved
+  to another site, a favicon Apache served from somewhere else) are kept
+  working with redirects and rewrites in `code/routes.ms`. See the user
+  guide's [Old URLs](user_guide.md#old-urls-coderoutesms):
+
+  ```
+  redirects = {}
+  redirects["/wiki/{rest*}"] = "https://wiki.example.org/wiki/{rest}"
+  rewrites = {}
+  rewrites["/tryit/{code}"] = "/tryit/?s={code}"
+  rewrites["/favicon.ico"] = "/img/favicon/favicon.ico"
+  ```
+
+  This replaces `.htaccess` rewrite rules. Each rule only applies to URLs no
+  page or file serves.
+
 ## File types
 
 Static files are served only if their type is on Fourfold's list: web pages'
 usual images, fonts, styles, scripts, audio, video, PDFs, `.zip`, `.txt`,
 `.json` and a few more. Anything else (`.gz`, `.dmg`, an app's own formats
-like `.minidisk`) gets a compile warning and isn't served, and links to it
-say so. For now, zip such files; a setting to add types comes with
-configuration (M6).
+like `.minidisk`) gets a compile warning, and links to it say so, until you
+add its type in `code/static.ms`:
+
+```
+types = {}
+types["minidisk"] = "application/octet-stream"
+types["gz"] = "application/gzip"
+types["xml"] = "application/rss+xml"
+```
+
+Types that could run script as your site (HTML, SVG, JavaScript, ...) can't
+be added. See the user guide's
+[More file types](user_guide.md#more-file-types-codestaticms).
+
+Large downloads and web builds are fine as they are: files are sent from
+disk a piece at a time, revalidated cheaply (a `304` when unchanged), and
+downloads resume after an interruption.
 
 `.ms` files in `pages/` are a page's code, never served. To offer MiniScript
 source for download, give it another extension (`.txt`), or zip it.

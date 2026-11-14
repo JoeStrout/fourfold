@@ -109,6 +109,58 @@ std::string upstreamRequest(const HttpRequest& request, const std::string& visit
 
 // --- One connection to the engine ---
 
+class UpstreamConnection;
+
+// A large response's body, passed on as it arrives (M11.2). The visitor's
+// server owns it, and reads it as it can send; the engine's connection
+// pushes into it, and pauses while it's full. Dropping it before the end
+// (the visitor left) closes the engine's connection.
+class UpstreamBody : public BodySource {
+public:
+    UpstreamBody(std::shared_ptr<UpstreamConnection> connection, uint64_t size, size_t buffer)
+        : connection_(std::move(connection)), size_(size), buffer_(buffer) {}
+    ~UpstreamBody() override;
+
+    uint64_t size() const override { return size_; }
+    Status read(std::string& out, size_t max) override;
+    void setWake(std::function<void()> wake) override { wake_ = std::move(wake); }
+
+    // From the engine's connection.
+    void push(const char* data, size_t length) {
+        data_.append(data, length);
+        wakeUp();
+    }
+    bool full() const { return data_.size() - offset_ >= buffer_; }
+    void finish() {
+        done_ = true;
+        connection_.reset();   // free to serve another request
+        wakeUp();
+    }
+    void fail() {
+        failed_ = true;
+        connection_.reset();
+        wakeUp();
+    }
+
+private:
+    void wakeUp() {
+        if (!waiting_ || !wake_) return;
+        waiting_ = false;
+        auto wake = wake_;   // it may replace itself
+        wake();
+    }
+
+    std::shared_ptr<UpstreamConnection> connection_;   // until the end
+    uint64_t size_;
+    size_t buffer_;
+    std::string data_;
+    size_t offset_ = 0;
+    bool done_ = false;
+    bool failed_ = false;
+    bool waiting_ = false;
+    std::function<void()> wake_;
+};
+
 // One connection to the engine, carrying one exchange at a time.
 class UpstreamConnection : public std::enable_shared_from_this<UpstreamConnection> {
 public:
@@ -147,6 +199,9 @@ public:
         complete_ = false;
         streaming_ = false;
         response_ = HttpResponse{};
+        passingOn_ = false;
+        paused_ = false;
+        body_.reset();
         fields_.clear();
         headerBytes_ = 0;
         lastWasValue_ = false;
@@ -188,6 +243,20 @@ public:
 
     void detach() { owner_ = nullptr; }
 
+    // The visitor has read what was waiting: read from the engine again.
+    void resumeReading() {
+        if (!paused_ || closed_) return;
+        paused_ = false;
+        flush();   // restores read interest
+    }
+
+    // The visitor's server dropped the body before its end (the visitor
+    // left): the rest won't be read, so the connection can't be reused.
+    void abandon() {
+        body_.reset();
+        if (!closed_) close();
+    }
+
 private:
     void stopIo() {
         loop_.cancelTimer(timer_);
@@ -210,6 +279,14 @@ private:
     void fail(int status, const std::string& why) {
         if (closed_) return;
         auto keep = shared_from_this();
+        if (passingOn_) {
+            // The headers have gone; the visitor's server ends the body short.
+            passingOn_ = false;
+            if (auto body = body_.lock()) body->fail();
+            body_.reset();
+            close();
+            return;
+        }
         if (!delivered_ && !received_ && retryable_ && owner_ && respond_) {
             // A kept connection the engine had closed: once more, afresh.
             Responder respond = std::move(respond_);
@@ -234,7 +311,8 @@ private:
             }
             out_.erase(0, n.value());
         }
-        (void)loop_.setInterest(fd_.get(), out_.empty() ? io::kReadable : io::kReadable | io::kWritable);
+        uint32_t read = paused_ ? 0 : io::kReadable;
+        (void)loop_.setInterest(fd_.get(), out_.empty() ? read : read | io::kWritable);
     }
 
     void onIo(uint32_t events) {
@@ -253,7 +331,7 @@ private:
                 ended();
                 return;
             }
-            if (!respond_ && !streaming_) {
+            if (!respond_ && !streaming_ && !passingOn_) {
                 // Bytes while idle: nothing is owed; the connection is no good.
                 close();
                 return;
@@ -269,12 +347,25 @@ private:
                 fail(502, "the site's response was malformed");
                 return;
             }
+            if (passingOn_) {
+                auto body = body_.lock();
+                if (!body) {   // the visitor's server let go of it
+                    abandon();
+                    return;
+                }
+                if (body->full()) {
+                    // The visitor is behind: stop reading until it catches up.
+                    paused_ = true;
+                    flush();
+                    return;
+                }
+            }
         }
     }
 
     // The engine closed its end.
     void ended() {
-        if (respond_ || streaming_) {
+        if (respond_ || streaming_ || passingOn_) {
             llhttp_errno_t e = llhttp_finish(&parser_);
             if ((e == HPE_OK || e == HPE_PAUSED) && complete_) {
                 finished();
@@ -305,7 +396,16 @@ private:
             return;
         }
         bool reusable = llhttp_should_keep_alive(&parser_) && out_.empty();
-        deliver(std::move(response_));
+        if (passingOn_) {
+            // All of it is with the body now (the response was delivered
+            // with its headers).
+            passingOn_ = false;
+            paused_ = false;
+            if (auto body = body_.lock()) body->finish();
+            body_.reset();
+        } else {
+            deliver(std::move(response_));
+        }
         if (owner_) owner_->release(this, reusable);
     }
 
@@ -353,12 +453,20 @@ private:
         bool noBody = status == 204 || status == 304;
         bool chunked = (p->flags & F_CHUNKED) != 0;
         if (noBody || (hasLength && !chunked && p->content_length <= c->owner_->limits_.maxBufferedBody)) return 0;
+        if (hasLength && !chunked) {
+            c->startPassingOn(p->content_length);
+            return 0;
+        }
         c->startStream();
         return 0;
     }
 
     static int onBody(llhttp_t* p, const char* at, size_t length) {
         UpstreamConnection* c = of(p);
+        if (c->passingOn_) {
+            if (auto body = c->body_.lock()) body->push(at, length);
+            return 0;   // a body let go of is noticed after this read
+        }
         if (!c->streaming_) {
             c->response_.body.append(at, length);
             return 0;
@@ -369,6 +477,20 @@ private:
     static int onMessageComplete(llhttp_t* p) {
         of(p)->complete_ = true;
         return HPE_PAUSED;
+    }
+
+    // --- Passing a large body on (M11.2) ---
+
+    void startPassingOn(uint64_t length) {
+        passingOn_ = true;
+        loop_.cancelTimer(timer_);   // the headers are in
+        timer_ = 0;
+        auto body = std::make_shared<UpstreamBody>(shared_from_this(), length, owner_->limits_.passOnBuffer);
+        body_ = body;
+        HttpResponse r = std::move(response_);
+        response_ = HttpResponse{};
+        r.source = std::move(body);
+        deliver(std::move(r));
     }
 
     // --- Streaming ---
@@ -468,7 +590,42 @@ private:
     EventLoop::TimerId checkTimer_ = 0;
     // Keeps an ended stream's pending body until the visitor's server asks.
     std::shared_ptr<UpstreamConnection> selfHold_;
+    // Passing a large body on: the body the visitor's server reads (it owns
+    // it), and whether reading from the engine is paused for it.
+    bool passingOn_ = false;
+    bool paused_ = false;
+    std::weak_ptr<UpstreamBody> body_;
+
+    friend class UpstreamBody;
 };
+
+UpstreamBody::~UpstreamBody() {
+    if (connection_) connection_->abandon();
+}
+
+BodySource::Status UpstreamBody::read(std::string& out, size_t max) {
+    size_t available = data_.size() - offset_;
+    if (available == 0) {
+        if (failed_) return Status::Failed;
+        if (done_) return Status::End;
+        waiting_ = true;
+        if (connection_) connection_->resumeReading();
+        return Status::Wait;
+    }
+    size_t n = std::min(available, max);
+    out.append(data_, offset_, n);
+    offset_ += n;
+    if (offset_ == data_.size()) {
+        data_.clear();
+        offset_ = 0;
+    } else if (offset_ >= 64 * 1024) {
+        data_.erase(0, offset_);
+        offset_ = 0;
+    }
+    // Under a quarter full: read from the engine again.
+    if (connection_ && data_.size() - offset_ < buffer_ / 4) connection_->resumeReading();
+    return Status::Data;
+}
 
 // --- Upstream ---
 

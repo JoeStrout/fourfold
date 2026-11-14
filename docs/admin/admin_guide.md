@@ -324,6 +324,13 @@ Fourfold limits request bodies itself: 1 MB for forms, and up to 33 MB for
 forms with file uploads, within what each form declares. The nginx setting
 just refuses bigger ones sooner.
 
+**Large files** (downloads, web builds) go through any proxy as they are:
+Fourfold sends a `Content-Length`, answers `Range` requests, and gives `304`s
+to browsers revalidating with `ETag` or `Last-Modified`. nginx and Caddy pass
+all of that through by default. With nginx's default buffering, a big
+download may be written to its temporary files on the way; that's fine, or
+set `proxy_max_temp_file_size 0;` to stream it instead.
+
 **Visitor addresses.** Behind a proxy, every connection comes from the
 proxy's address, so Fourfold has to be told to believe the proxy about who
 the visitor is. List the proxy's address in the app's config:
@@ -756,6 +763,13 @@ the engine's own per-visitor limits all see the visitor's address, with no
 `config.proxy.trust` needed. Live updates (server-sent events) stream
 through.
 
+A response up to 256 KB is collected from the engine, then sent. A larger
+one (a big static file) is passed on as it comes, with its length: `front`
+reads from the engine only as fast as the visitor takes it, holding at most
+a few hundred KB of it at a time, so many large downloads at once don't
+fill its memory. `Range` requests (resuming a download) and `304`s pass
+through.
+
 If an engine isn't running, its visitors get a `502`; if it's slower than
 two minutes to start answering, a `504`.
 
@@ -900,6 +914,12 @@ Every new version writes a line to the [engine log](#logs) saying so.
 **Don't also run `fourfold serve` or `dev` on the same app folder.** CGI
 requests are refused (503) while one is running, since their locks are in
 memory where the CGI processes can't see them.
+
+**Large files.** Static files are written to the web server a piece at a
+time, with `ETag`, `Last-Modified` and `Range` support, as with the
+standalone server. Each new version is a copy of `code/` (in
+`private/state/cgi/`), so large files there take that much disk space again
+while a version is current, and for a little while after it's replaced.
 
 **Speed.** With CGI, each request starts a process and compiles its page's
 code: about 10–15 ms for a small app on a fast machine, 30 ms for a

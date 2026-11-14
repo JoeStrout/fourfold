@@ -116,7 +116,7 @@ public:
     }
 
 private:
-    std::map<std::string, Datum> map_;
+    Datum::MapItems map_;
     std::set<std::string> read_;
     std::string name_;
     std::string file_;
@@ -651,8 +651,10 @@ void readTls(Section tls, AppConfig& c) {
 
 // One CSP source an app may add: a host ("cdn.example.com",
 // "*.example.com", with a scheme, port or path), or a scheme ("https:",
-// "data:", "blob:", "wss:"). No keywords: 'unsafe-inline' and 'unsafe-eval'
-// are never allowed for scripts, and the others are the engine's to set.
+// "data:", "blob:", "wss:"; only "blob:" for scripts). No keywords:
+// 'unsafe-inline' and 'unsafe-eval' are never allowed for scripts, and the
+// others are the engine's to set ('wasm-unsafe-eval' through
+// config.headers.webAssembly).
 bool validCspSource(const std::string& s, bool forScripts, std::string& why) {
     if (s.empty() || s.find_first_of(" \t\r\n;,'\"") != std::string::npos) {
         why = "isn't a source (no spaces, quotes, ; or ,)";
@@ -669,7 +671,10 @@ bool validCspSource(const std::string& s, bool forScripts, std::string& why) {
             why = "isn't a scheme an app may add (https:, wss:, data:, blob:)";
             return false;
         }
-        if (forScripts) {
+        // blob: is the one scheme scripts may have: only a script already
+        // running on the page can make a blob URL (Unity's older web loader
+        // runs its engine from one, and unpacks in a blob: worker).
+        if (forScripts && scheme != "blob") {
             why = "would let scripts come from anywhere; name the host";
             return false;
         }
@@ -728,6 +733,9 @@ void readHeaders(Section headers, HeadersConfig& h) {
         csp.finish();
     }
     bool strictStyles = headers.boolean("strictStyles").value_or(false);
+    // WebAssembly (M11.2's web builds): compiling it is 'wasm-unsafe-eval',
+    // which allows only that, not eval.
+    bool webAssembly = headers.boolean("webAssembly").value_or(false);
     std::vector<std::string> ancestors;
     if (auto list = headers.strings("frameAncestors")) {
         for (const std::string& a : *list) {
@@ -742,7 +750,9 @@ void readHeaders(Section headers, HeadersConfig& h) {
         }
     }
 
-    h.cspBeforeNonce = joinSources("default-src 'self'; script-src 'self'", added["script"]);
+    h.cspBeforeNonce = joinSources(webAssembly ? "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'"
+                                               : "default-src 'self'; script-src 'self'",
+                                   added["script"]);
     std::string rest = "; style-src " + joinSources(strictStyles ? "'self'" : "'self' 'unsafe-inline'", added["style"]) +
                        "; img-src " + joinSources("'self' https: data:", added["img"]) +
                        "; connect-src " + joinSources("'self'", added["connect"]);

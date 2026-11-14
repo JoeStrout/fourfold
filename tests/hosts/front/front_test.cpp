@@ -6,6 +6,7 @@
 
 #include <arpa/inet.h>
 #include <csignal>
+#include <fcntl.h>
 #include <future>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -368,7 +369,17 @@ TEST_CASE("FrontServer: each app by its name, with its own certificate; port 80 
     LoopThread t;
     FakeEngine club, shop;
     club.answer = [](const HttpRequest& r) { return HttpResponse::text(200, "club " + r.target); };
-    shop.answer = [](const HttpRequest& r) { return HttpResponse::text(200, "shop " + r.target); };
+    // A large file, sent from disk by the engine and passed on by front
+    // (M11.2).
+    std::string big(2 * 1024 * 1024 + 11, '\0');
+    for (size_t i = 0; i < big.size(); i++) big[i] = static_cast<char>('A' + (i * 31 + i / 509) % 26);
+    dir.write("big.bin", big);
+    shop.answer = [&](const HttpRequest& r) {
+        if (r.target != "/big") return HttpResponse::text(200, "shop " + r.target);
+        HttpResponse x;
+        x.source = fileBodySource(Fd(::open(dir.at("big.bin").c_str(), O_RDONLY)), 0, big.size());
+        return x;
+    };
     t.run([&] {
         club.start(*t.loop, dir.at("club.sock"));
         shop.start(*t.loop, dir.at("shop.sock"));
@@ -410,6 +421,11 @@ TEST_CASE("FrontServer: each app by its name, with its own certificate; port 80 
                                "shop.example.com");
     CHECK(contains(b, "[cert shop.example.com]"));
     CHECK(contains(b, "shop /x"));
+    std::string d = httpsFetch(port, "GET /big HTTP/1.1\r\nHost: shop.example.com\r\nConnection: close\r\n\r\n",
+                               "shop.example.com");
+    CHECK(contains(d, "\r\nContent-Length: " + std::to_string(big.size()) + "\r\n"));
+    REQUIRE(d.find("\r\n\r\n") != std::string::npos);
+    CHECK(d.substr(d.find("\r\n\r\n") + 4) == big);
     // Not a site here.
     std::string c = httpsFetch(port, "GET / HTTP/1.1\r\nHost: evil.example.net\r\nConnection: close\r\n\r\n",
                                "club.example.com");
@@ -457,4 +473,85 @@ TEST_CASE("FrontServer: an app with no certifiable name and no files is refused 
         REQUIRE_FALSE(created.ok());
         CHECK(contains(created.error().message, "no public name"));
     });
+}
+
+namespace {
+
+// Reads a body source to its end on the loop's thread, waiting as it says.
+// "FAILED" if it fails.
+std::string drain(LoopThread& t, std::shared_ptr<BodySource> source) {
+    auto done = std::make_shared<std::promise<std::string>>();
+    auto got = std::make_shared<std::string>();
+    auto pump = std::make_shared<std::function<void()>>();
+    *pump = [source, done, got, pump] {
+        for (;;) {
+            switch (source->read(*got, 64 * 1024)) {
+                case BodySource::Status::Data: continue;
+                case BodySource::Status::End: done->set_value(*got); *pump = nullptr; return;
+                case BodySource::Status::Failed: done->set_value("FAILED"); *pump = nullptr; return;
+                case BodySource::Status::Wait: source->setWake([pump] { if (*pump) (*pump)(); }); return;
+            }
+        }
+    };
+    t.loop->post([pump] { (*pump)(); });
+    auto f = done->get_future();
+    REQUIRE(f.wait_for(std::chrono::seconds(10)) == std::future_status::ready);
+    return f.get();
+}
+
+}  // namespace
+
+TEST_CASE("Upstream: a large body is passed on as it comes, with its length, and the connection reused (M11.2)") {
+    TempDir dir;
+    LoopThread t;
+    FakeEngine engine;
+    std::string socket = dir.at("e.sock");
+    std::string big(3 * 1024 * 1024 + 7, '\0');
+    for (size_t i = 0; i < big.size(); i++) big[i] = static_cast<char>('a' + (i * 13 + i / 4093) % 26);
+    dir.write("big.bin", big);
+    // The engine sends it from the file, a piece at a time, as it would a
+    // static file.
+    engine.answer = [&](const HttpRequest&) {
+        HttpResponse r;
+        r.headers.set("Content-Type", "application/octet-stream");
+        int fd = ::open(dir.at("big.bin").c_str(), O_RDONLY);
+        r.source = fileBodySource(Fd(fd), 0, big.size());
+        return r;
+    };
+    t.run([&] { engine.start(*t.loop, socket); });
+    UpstreamLimits limits;
+    limits.passOnBuffer = 64 * 1024;
+    auto up = Upstream::create(*t.loop, "club", socket, limits);
+
+    HttpResponse r = through(t, *up, get("/big.bin"));
+    CHECK_EQ(r.status, 200);
+    REQUIRE(r.source);
+    CHECK_EQ(r.source->size(), big.size());
+    CHECK(r.body.empty());
+    // The visitor is slow to start: front reads only a little meanwhile.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    CHECK(drain(t, r.source) == big);
+    t.run([&] { r.source.reset(); });
+    t.run([&] {
+        CHECK_EQ(up->idleCount(), 1u);   // read to its end, so kept for reuse
+        CHECK_EQ(engine.server->connectionCount(), 1u);
+    });
+
+    // And used again; this time the visitor leaves part way: the
+    // connection to the engine is closed, not kept.
+    r = through(t, *up, get("/big.bin"));
+    REQUIRE(r.source);
+    t.run([&] {
+        std::string some;
+        CHECK(r.source->read(some, 1000) != BodySource::Status::Failed);
+        r.source.reset();
+    });
+    t.run([&] { CHECK_EQ(up->connectionCount(), 0u); });
+
+    // Smaller bodies are still collected whole.
+    engine.answer = [](const HttpRequest&) { return HttpResponse::text(200, std::string(100 * 1024, 'x')); };
+    r = through(t, *up, get("/small"));
+    CHECK_FALSE(r.source);
+    CHECK_EQ(r.body.size(), 100u * 1024);
+    t.run([&] { up->closeAll(); });
 }

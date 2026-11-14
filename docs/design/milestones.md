@@ -365,6 +365,87 @@ The risks most likely to change the design, and where each is retired:
 
 ---
 
+## M11.2 — Moving an existing site in: URL rules and static files
+
+**Goal:** an existing static site, with a little dynamic code, can move into Fourfold without breaking its URLs or its downloads. The test case is miniscript.org: its main site (moving from Apache; the wiki has moved to `wiki.miniscript.org` and the forums stay on `forums.miniscript.org`, both still PHP) becomes one Fourfold app, including the Try-It page.
+
+**What miniscript.org needs that Fourfold can't do yet:**
+- **Old URLs that no file matches.** Try-It share links, `/tryit/AbCd1234` (211 of them, in forum posts and elsewhere), must show the Try-It page with that snippet; `/wiki/...` must redirect to `wiki.miniscript.org`; the favicon set was served from the site root by Apache rewrites.
+- **More static file types:** `.unityweb` and `.data` (the Unity WebGL builds of Mini Micro and RoboReindeer), `.minidisk` and `.grfon` (Mini Micro disks and settings), `.xml` (the news RSS feed), `.gz` (Linux downloads).
+- **Large static files, served well.** The Mini Micro web build is about 30 MB and the downloads are up to 58 MB. Today a static file is read whole into memory on every request (64 MB per file at most), is sent with no `ETag` or `Last-Modified` (so every visit downloads it again), and can't be fetched by `Range` (so an interrupted download starts over).
+
+**Decisions (2026-11-14, with the user):**
+- **URL rules, not a "rest of the path" handler.** Everything the site needs is a fixed mapping from one URL to another, so it's declared, not coded. Handler routes with parameters (`/user/{id}` with `req.params`) stay in M12; they'll use the same pattern matcher.
+- **The rules are part of the app**, in `code/routes.ms`, deployed with the code, and so are the extra file types (they describe the site, not the server).
+
+**Details settled while building it (2026-11-14; for the user to confirm):**
+- **Redirects are tried before rewrites,** each map in the order written.
+- **A rewrite's target is one fixed route** (checked at compile time): placeholders only in its query. To build a path from the visitor's URL, use a redirect. In `req.query` the target's parameters come first, so the visitor can't replace them.
+- **The visitor URL's rules are found at run time:** `access.ms` and `limits.ms` rules are kept in the compiled app, and those covering the visitor's URL (but not the target's) are added to the target's. A rule that covers only a rewrite's URLs isn't "unused".
+- **Static file limit: 1 GB** (`CodeTreeLimits::maxStaticFileBytes`; larger files get a warning and aren't served). Files up to 256 KB are read whole; larger ones are streamed through a `BodySource` that each transport reads as it can send (HTTP/1.1, HTTP/2's data provider, CGI and FastCGI in 64 KB pieces).
+- **`maxAge` in `static.ms`** is a map from paths to whole seconds (up to a year); a rule covers its path and below, and the most specific wins. Restricted files stay `private, no-store`.
+- **`front` passes large bodies on:** a response with a `Content-Length` over 256 KB (was: collected up to 16 MB) goes to the visitor through a body source, reading from the engine only while under 256 KB is waiting; the engine connection is reused after. HEAD is still sent to the engine as GET; for a large file, the connection is closed once the headers are passed on.
+- **XML types' sandbox:** `Content-Security-Policy: sandbox; ` ahead of the usual policy.
+- **Web builds and the CSP** (found in the exit test): `config.headers.webAssembly = true` adds `'wasm-unsafe-eval'` to `script-src` (WebAssembly only, not `eval`; off by default), and `"blob:"` is allowed in `csp.script` (only a page's own scripts can make blob URLs). Unity's web builds need the first; its 2019 loader also the second.
+- **Links to URLs a rule answers aren't broken links:** the compile-time link check accepts them.
+- **`deploy.sh` stages in `/var/tmp`,** not `/tmp`, which is often a small RAM disk (475 MB on the test VPS; the site is 605 MB).
+
+**Proposed design** (as settled at the start, with the details above):
+
+URL rules, in `code/routes.ms`, in the style of `access.ms` and `limits.ms`:
+
+```
+redirects = {}
+redirects["/wiki/{rest*}"] = "https://wiki.miniscript.org/wiki/{rest}"
+redirects["/MiniMicro-old/{rest*}"] = "/MiniMicro/"
+
+rewrites = {}
+rewrites["/tryit/{code}"] = "/tryit/?s={code}"
+rewrites["/favicon.ico"] = "/img/favicon/favicon.ico"
+```
+
+- **Patterns use named placeholders, not regular expressions.** `{name}` matches one whole path segment; `{name*}` matches the rest of the path (zero or more segments) and may only come last. Values are decoded when matched and encoded again when put into the target, so a placeholder can't add a `/`, `?` or `#` that wasn't in its value, and a target can't begin with a placeholder (so `{rest}` can never make `//other.site`).
+- **The first matching rule wins, in the order written** (MiniScript 2 maps keep insertion order), so specific rules go before general ones, as in Apache. A rule that an earlier one makes unreachable is a warning.
+- **Only URLs nothing else serves.** A page, handler or static file always wins over a rule, so a rule can't quietly take over a URL. A rule that shadows nothing and matches nothing it could ever reach is a warning.
+- **One pass.** A rewritten URL isn't matched against the rules again, so there are no loops.
+- **Redirects** are 301 by default; a map value (`{"to": "...", "status": 302}`) allows 302, 307 or 308. The visitor's query string is kept, after any the target adds. Off-site targets are allowed, since the developer writes every host.
+- **Rewrites** serve another URL of the same app without changing the address bar. The target must be a route the app serves (checked at compile time). Its query parameters are added to `req.query`; `req.path` stays the visitor's URL. Access rules and rate limits are those of the target and of the visitor's URL, each of which must pass (rules only tighten, as everywhere). A rewrite to a page in another folder is a warning, since the page's relative links would resolve against the wrong folder.
+- **Rules apply to GET and HEAD only.** A POST to a rule's URL gets a 405; forms post to the target's own handlers.
+- The dev tools' route table lists the rules, with what each matched.
+
+Extra file types, in `code/static.ms`:
+
+```
+types = {}
+types["unityweb"] = "application/octet-stream"
+types["data"] = "application/octet-stream"
+types["minidisk"] = "application/octet-stream"
+types["grfon"] = "text/plain; charset=utf-8"
+types["xml"] = "application/rss+xml"
+types["gz"] = "application/gzip"
+```
+
+- **Some types can't be added:** an extension Fourfold already knows (built-in types can't be changed), the ones that are pages or code (`.html`, `.md`, `.ms`), and content types that run script on the site's origin (`text/html`, `application/xhtml+xml`, `image/svg+xml`, JavaScript). Those would get around the template checks.
+- **Added types that browsers display as XML documents** (`*/xml`, `*+xml`) are served with `Content-Security-Policy: sandbox`, so markup in them can't run script as the site.
+
+Static files, for all types:
+
+- **Streamed from disk,** never read whole into memory; the per-file limit rises (to 1 GB?) as a `CodeTreeLimits` setting.
+- **`ETag` and `Last-Modified`, with `304 Not Modified`** for `If-None-Match` and `If-Modified-Since`. `Cache-Control: no-cache` stays the default (always revalidate, which is now cheap); a public file may get a longer `max-age` through a setting in `static.ms` (e.g. for a versioned build folder).
+- **`Range` requests** (one range; `206`, `416`), with `If-Range`.
+- **Restricted files** keep `Cache-Control: private, no-store` (§5).
+- Checked through `fourfold front` and CGI/FastCGI, not only `serve`.
+
+**Maps keep their order across the engine.** MiniScript 2 maps are traversed in insertion order, but a map that leaves a script becomes a `Datum`, whose `MapItems` is a `std::map` sorted by key. The order is lost there: in declaration files (which the first-match rule above depends on), and for maps stored in `data`, kept in the session, passed to jobs, sent as JSON, or filled into templates, all of which come back sorted. `Datum` maps become insertion-ordered (and `parseJson` keeps a document's order), with lookup by key still fast. Equality stays order-blind, as in MiniScript. Data already stored was written in sorted order and reads back that way, so no migration is needed.
+
+**Scope:** the above; the user guide's sections on URL rules and static files (and a note that maps keep their order through `data`, `session` and JSON), and the admin guide's on large files.
+
+**Exit criteria:** a copy of miniscript.org's main site runs as a Fourfold app on the test VPS: the Mini Micro and RoboReindeer web builds play, the RSS feed reads in a feed reader, every download completes and resumes after interruption (through `front`), a second visit sends `304`s for the big files, `/tryit/{code}` reaches the Try-It page with the code, `/wiki/...` lands on the wiki page, and the favicons show. The engine's memory stays flat while several large downloads run at once.
+
+**Outcome (2026-11-14):** met on the test VPS with a copy of miniscript.org's main site behind `front`: the web builds play, the feed reads, all 717 static files arrive intact and resume, big files get `304`s, the share links, wiki redirects and favicons work, and 8 concurrent large downloads grew the engine by 0.5 MB. Details in [m11.2-results.md](m11.2-results.md).
+
+---
+
 ## M12 — The full product
 
 **Goal:** every feature in the design, ready for a 1.0 release.
@@ -372,7 +453,7 @@ The risks most likely to change the design, and where each is retired:
 **Scope:** everything not yet done, notably:
 - The rest of the dev tools (§9): the full request inspector, session viewing and editing, the REPL against the dev instance, and pausing scheduled jobs.
 - `fourfold test`: handlers called with synthetic requests and fake users against a throwaway `data/`, using the engine with an in-memory transport.
-- The explicit routes table, with parameterized routes and `req.params`.
+- The explicit routes table, with parameterized routes and `req.params` (using M11.2's pattern matcher).
 - The open questions in the overview that are decided for 1.0 (non-browser clients, caching and compression, time zones and localization, a production admin console, account deletion and data export, engine and language versioning), each implemented or explicitly deferred past 1.0.
 - Redis or Postgres implementations of the engine stores for multi-server deployments, if they're in 1.0's scope.
 - Documentation: a tutorial that follows the progressive path (static HTML → a counter → a guestbook → a database app), a reference for every API, and the deployment guides (VPS, container platform, shared hosting).

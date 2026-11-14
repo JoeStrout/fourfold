@@ -1,5 +1,7 @@
 #include "cgi/cgi_request.h"
 
+#include <algorithm>
+
 #include <cctype>
 #include <cstdlib>
 
@@ -100,15 +102,50 @@ bool cgiHttps(const CgiVariables& vars) {
     return https == "on" || https == "1";
 }
 
-std::string cgiResponse(const HttpResponse& response) {
+std::string cgiResponseHead(const HttpResponse& response) {
     std::string out = "Status: " + std::to_string(response.status) + " " + statusReason(response.status) + "\r\n";
     for (const auto& field : response.headers) {
         if (equalsIgnoreCase(field.name, "Content-Length")) continue;
         out += field.name + ": " + field.value + "\r\n";
     }
-    out += "Content-Length: " + std::to_string(response.body.size()) + "\r\n\r\n";
-    out += response.body;
+    out += "Content-Length: " + std::to_string(bodySize(response)) + "\r\n\r\n";
     return out;
 }
+
+bool writeCgiBody(const HttpResponse& response, const std::function<bool(std::string_view)>& write) {
+    constexpr size_t kPiece = 64 * 1024;
+    if (!response.source) {
+        std::string_view rest(response.body);
+        while (!rest.empty()) {
+            if (!write(rest.substr(0, kPiece))) return true;
+            rest.remove_prefix(std::min(rest.size(), kPiece));
+        }
+        return true;
+    }
+    for (;;) {
+        std::string piece;
+        switch (response.source->read(piece, kPiece)) {
+            case BodySource::Status::Data:
+                if (!write(piece)) return true;
+                continue;
+            case BodySource::Status::End:
+                return true;
+            case BodySource::Status::Wait:     // not expected of an engine's response
+            case BodySource::Status::Failed:
+                return false;
+        }
+    }
+}
+
+std::string cgiResponse(const HttpResponse& response) {
+    std::string out = cgiResponseHead(response);
+    (void)writeCgiBody(response, [&](std::string_view piece) {
+        out += piece;
+        return true;
+    });
+    return out;
+}
+
+bool cgiHead(const CgiVariables& vars) { return var(vars, "REQUEST_METHOD").value_or("") == "HEAD"; }
 
 }  // namespace fourfold

@@ -183,6 +183,12 @@ void accessPass(const CodeListing& listing, const CodeTree& code, const std::map
     for (Rule& rule : rules) {
         app.accessRules.push_back({rule.path, rule.anyOf, rule.isPublic});
         if (rule.path == live || covers(live, rule.path)) rule.used = true;
+        // A rule covering a rewrite's visitor URLs (M11.2) applies to them.
+        for (const UrlRule& u : app.urlRules) {
+            if (u.kind != UrlRule::Kind::Rewrite) continue;
+            std::string prefix = u.pattern.literalPrefix();
+            if (covers(rule.path, prefix) || covers(prefix, rule.path)) rule.used = true;
+        }
     }
     for (const Rule& rule : rules) {
         if (!rule.used) {

@@ -5,21 +5,24 @@
 // and cheap to copy (nodes are shared and reference-counted), so it can be
 // handed from the script thread to a worker without copying the tree.
 //
-// Map keys are strings, kept sorted, so equal data always serializes to equal
-// bytes. Numbers are finite: the script bridge refuses NaN and infinities
-// before they get here.
+// Map keys are strings, kept in the order they were added, as in a MiniScript
+// map (M11.2; before that they were sorted). Equality ignores that order, as
+// MiniScript's does. Numbers are finite: the script bridge refuses NaN and
+// infinities before they get here.
 //
 // The canonical codec is JSON (decided in M5): toJson writes it, parseJson
-// reads it back. Equal data gives equal bytes, so "did the session change?"
-// is a byte comparison.
+// reads it back, keys in order both ways. The same data in the same order
+// gives the same bytes, so "did the session change?" is a byte comparison
+// (a map rebuilt in another order counts as a change, which only costs a
+// write).
 #pragma once
 
-#include <map>
 #include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "base/ordered_map.h"
 #include "base/result.h"
 
 namespace fourfold {
@@ -28,7 +31,7 @@ class Datum {
 public:
     enum class Kind { Null, Number, String, List, Map };
     using ListItems = std::vector<Datum>;
-    using MapItems = std::map<std::string, Datum>;
+    using MapItems = OrderedMap<Datum>;   // insertion order
 
     Datum() = default;   // null
 

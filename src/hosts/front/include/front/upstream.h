@@ -8,10 +8,14 @@
 // Forwarded field naming the visitor, which the engine trusts because it
 // arrives on its Unix socket.
 //
-// A response with a Content-Length (up to maxBufferedBody) is collected,
-// then answered whole, so the visitor's connection stays open. Anything
-// else, server-sent events above all, is streamed: the visitor gets the
-// headers at once and the body as it comes, until the engine closes.
+// A response with a Content-Length up to maxBufferedBody is collected, then
+// answered whole. A longer one (a large static file, M11.2) is passed on as
+// it comes, with its Content-Length, through a BodySource: reading from the
+// engine pauses while the visitor is behind, so front holds only a little of
+// it at a time, however large it is; and the connection to the engine is
+// reused afterwards. Either way the visitor's connection stays open.
+// Anything else, server-sent events above all, is streamed: the visitor gets
+// the headers at once and the body as it comes, until the engine closes.
 #pragma once
 
 #include <chrono>
@@ -35,8 +39,12 @@ struct UpstreamLimits {
     std::chrono::milliseconds idleTimeout{20000};
     // From sending the request until the response's headers are in: 504.
     std::chrono::milliseconds responseTimeout{120000};
-    // A larger response (or one without a Content-Length) is streamed.
-    size_t maxBufferedBody = 16 * 1024 * 1024;
+    // A larger response is passed on as it comes; one without a
+    // Content-Length is streamed.
+    size_t maxBufferedBody = 256 * 1024;
+    // While passing a body on: reading from the engine pauses with this much
+    // waiting for the visitor, and resumes once it's under a quarter of it.
+    size_t passOnBuffer = 256 * 1024;
     // Response headers from the engine, at most.
     size_t maxHeaderBytes = 64 * 1024;
 };
